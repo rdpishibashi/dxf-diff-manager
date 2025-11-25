@@ -319,7 +319,7 @@ def create_diff_zip(pairs, master_df=None, tolerance=0.01, deleted_color=6, adde
 
 def app():
     st.title('DXF Diff Manager - DXF差分管理ツール')
-    st.write('流用図面と元図面を自動的にペアリングし、差分をDXFフォーマットで出力します。親子関係マスター管理機能も搭載。')
+    st.write('流用図面と元図面を自動的にペアリングし、差分をDXFフォーマットで出力します。親子関係マスターも更新します。')
 
     # ボタンのスタイルをカスタマイズ（青色背景と枠）
     st.markdown("""
@@ -366,7 +366,7 @@ def app():
             "ペアごとに差分を比較してDXFファイルとして出力します。",
             "",
             "**使用手順：**",
-            "1. （オプション）Parent-Child_list.xlsx をアップロードすると、新しい親子関係が自動的に追加されます",
+            "1. （オプション）親子関係管理台帳をアップロードすると、新しい親子関係が自動的に追加されます",
             "2. DXFファイルを一括アップロードしてください（複数可）",
             "3. 自動的に図番と流用元図番が抽出され、ペアリストが表示されます",
             "4. 流用元図面が不足している場合は「追加アップロード」で追加できます",
@@ -405,13 +405,13 @@ def app():
         st.session_state.added_relationships_count = 0
 
     # 親子関係マスターファイルのアップロード
-    st.subheader("📊 ステップ0: 親子関係マスターファイルのアップロード")
+    st.subheader("Step 0: 親子関係台帳ファイルのアップロード")
 
     master_file = st.file_uploader(
-        "Parent-Child_list.xlsx をアップロードしてください（オプション）",
+        "親子関係台帳ファイルをアップロードしてください（オプション）",
         type=["xlsx"],
         key="master_upload",
-        help="親子関係を管理するExcelファイルです。新しく見つかった親子関係が自動的に追加されます。"
+        help="親子関係を一元管理するExcelファイルです。新しく見つかった親子関係が自動的に追加されます。"
     )
 
     # マスターファイルの読み込み（ファイルがアップロードされた時点で自動処理）
@@ -423,10 +423,10 @@ def app():
                 st.session_state.master_df = master_df
                 st.session_state.master_file_name = master_file.name
                 st.session_state.added_relationships_count = 0  # リセット
-                st.success(f"✅ 親子関係マスターを読み込みました（{len(master_df)}件のレコード）")
+                st.success(f"親子関係を読み込みました（{len(master_df)}件のレコード）")
         else:
             # 既に読み込まれている場合は状態表示のみ
-            st.info(f"✅ 親子関係マスターが読み込まれています（{len(st.session_state.master_df)}件のレコード）")
+            st.info(f"既存の親子関係に追加します（{len(st.session_state.master_df)}件のレコード）")
     else:
         # ファイルがアップロードされていない場合、セッション状態をクリア
         if st.session_state.master_df is not None:
@@ -437,7 +437,7 @@ def app():
     st.divider()
 
     # ファイルアップロード
-    st.subheader("📂 ステップ1: DXFファイルのアップロード")
+    st.subheader("Step 1: DXFファイルのアップロード")
 
     col1, col2 = st.columns([3, 1])
 
@@ -482,7 +482,7 @@ def app():
 
     # アップロード済みファイルの表示
     if st.session_state.uploaded_files_dict:
-        st.subheader("📋 アップロード済みファイル一覧")
+        st.subheader("アップロード済みファイル一覧")
 
         file_list_data = []
         for main_drawing, file_info in st.session_state.uploaded_files_dict.items():
@@ -495,7 +495,7 @@ def app():
         st.dataframe(file_list_data, width='stretch', hide_index=True)
 
         # ペアリストの表示
-        st.subheader("🔗 ペアリスト")
+        st.subheader("図面ペア・リスト")
 
         complete_pairs = [p for p in st.session_state.pairs if p['status'] == 'complete']
         missing_pairs = [p for p in st.session_state.pairs if p['status'] == 'missing_source']
@@ -503,7 +503,7 @@ def app():
 
         # 完全なペア
         if complete_pairs:
-            st.success(f"✅ 完全なペア: {len(complete_pairs)}組")
+            st.success(f"完全なペア: {len(complete_pairs)}組")
 
             pair_data = []
             for pair in complete_pairs:
@@ -517,7 +517,7 @@ def app():
 
         # 流用元図面が不足しているペア
         if missing_pairs:
-            st.warning(f"⚠️ 流用元図面が不足しているペア: {len(missing_pairs)}組")
+            st.warning(f"⚠️ 流用元図面がないペア: {len(missing_pairs)}組")
 
             missing_data = []
             missing_drawings = []
@@ -525,7 +525,7 @@ def app():
                 missing_data.append({
                     '図番（新）': pair['main_drawing'],
                     '流用元図番（旧）': pair['source_drawing'],
-                    'ステータス': '⚠️ 流用元不足'
+                    'ステータス': '⚠️ 流用元図面なし'
                 })
                 missing_drawings.append(pair['source_drawing'])
 
@@ -535,13 +535,13 @@ def app():
 
         # 流用元図番が指定されていないペア
         if no_source_pairs:
-            st.info(f"ℹ️ 流用元図番が指定されていない図面: {len(no_source_pairs)}件（比較対象外）")
+            st.info(f"流用元図番が指定されていない図面: {len(no_source_pairs)}件（比較対象外）")
 
             no_source_data = []
             for pair in no_source_pairs:
                 no_source_data.append({
                     '図番': pair['main_drawing'],
-                    'ステータス': 'ℹ️ 流用元なし'
+                    'ステータス': 'ℹ️ 流用元図番の未記入'
                 })
 
             with st.expander("詳細を表示"):
@@ -549,24 +549,24 @@ def app():
 
         # 親子関係マスター更新状況の表示
         if st.session_state.master_df is not None and st.session_state.added_relationships_count > 0:
-            st.success(f"✅ 親子関係マスターに {st.session_state.added_relationships_count} 件の新しい関係を追加しました")
+            st.success(f"親子関係台帳に {st.session_state.added_relationships_count} 件の新しい関係を追加しました")
 
         # 追加アップロード
         if missing_pairs:
-            st.subheader("➕ ステップ2: 追加アップロード（オプション）")
+            st.subheader("Step 2: 追加アップロード（オプション）")
 
             col1, col2 = st.columns([3, 1])
 
             with col1:
                 additional_files = st.file_uploader(
-                    "不足している流用元図面を追加アップロードしてください",
+                    "不足している流用元図面をアップロードしてください",
                     type="dxf",
                     accept_multiple_files=True,
                     key="additional_upload"
                 )
 
             with col2:
-                add_button = st.button("追加して更新", key="add_files", type="secondary")
+                add_button = st.button("追加・更新", key="add_files", type="secondary")
 
             if add_button and additional_files:
                 with st.spinner(f'{len(additional_files)}個のDXFファイルを処理中...'):
@@ -591,14 +591,14 @@ def app():
                             st.session_state.master_df = updated_master
                             st.session_state.added_relationships_count += added_count
 
-                st.success(f"ファイルを追加しました。ペアリストが更新されました。")
+                st.success(f"ファイルを追加しました。図面ペアリストが更新されました。")
                 st.rerun()
 
         # 比較開始
         st.subheader("🚀 ステップ3: 差分比較")
 
         # オプション設定
-        with st.expander("⚙️ オプション設定", expanded=False):
+        with st.expander("オプション設定", expanded=False):
             col1, col2 = st.columns(2)
 
             with col1:
@@ -615,7 +615,7 @@ def app():
                 st.write("**レイヤー色設定**")
 
                 deleted_color = st.selectbox(
-                    "削除エンティティの色（旧図面のみ）",
+                    "削除エンティティの色（流用元図面のみ）",
                     options=[(1, "1 - 赤"), (2, "2 - 黄"), (3, "3 - 緑"), (4, "4 - シアン"), (5, "5 - 青"), (6, "6 - マゼンタ"), (7, "7 - 白/黒")],
                     index=5,  # デフォルト: マゼンタ
                     format_func=lambda x: x[1]
@@ -639,7 +639,7 @@ def app():
         if complete_pairs:
             st.info(f"比較可能なペア: {len(complete_pairs)}組")
 
-            if st.button("🔍 差分比較を開始", key="start_comparison", type="primary", disabled=len(complete_pairs) == 0):
+            if st.button("差分比較を開始", key="start_comparison", type="primary", disabled=len(complete_pairs) == 0):
                 with st.spinner(f'{len(complete_pairs)}組のペアを比較中...'):
                     try:
                         zip_data, results = create_diff_zip(
@@ -668,7 +668,7 @@ def app():
 
         # 結果の表示
         if 'results' in st.session_state and st.session_state.results:
-            st.subheader("📊 処理結果")
+            st.subheader("処理結果")
 
             results = st.session_state.results
             settings = st.session_state.get('processing_settings', {})
@@ -678,7 +678,7 @@ def app():
             total_count = len(results)
 
             if successful_count == total_count:
-                st.success(f"全{total_count}組のペアの差分比較が完了しました ✅")
+                st.success(f"全{total_count}組のペアの差分比較が完了しました")
             elif successful_count > 0:
                 st.warning(f"{successful_count}/{total_count}組のペアの差分比較が完了しました。一部のペアで処理に失敗しました。")
             else:
@@ -699,12 +699,12 @@ def app():
 
             # ダウンロードボタン
             if successful_count > 0:
-                st.subheader("📥 結果のダウンロード")
+                st.subheader("結果のダウンロード")
 
                 # ダウンロードボタンのラベルを作成
-                download_label = f"📦 差分DXFファイルをZIPでダウンロード ({successful_count}ファイル"
+                download_label = f"ZIPでダウンロード ({successful_count}ファイル"
                 if st.session_state.master_df is not None:
-                    download_label += " + 親子関係マスター"
+                    download_label += " + 親子関係台帳"
                 download_label += ")"
 
                 st.download_button(
