@@ -179,7 +179,7 @@ def extract_drawing_info_from_file(uploaded_file):
     アップロードされたDXFファイルから図面番号情報を抽出する
 
     Args:
-        uploaded_file: Streamlitのアップロードファイルオブジェクト
+        uploaded_file: アップロードファイル・オブジェクト
 
     Returns:
         dict: {
@@ -220,7 +220,7 @@ def extract_drawing_info_from_file(uploaded_file):
         }
 
     except Exception as e:
-        st.error(f"ファイル {uploaded_file.name} の処理中にエラーが発生しました: {str(e)}")
+        st.error(f"ファイル {uploaded_file.name} の図番抽出中にエラーが発生しました: {str(e)}")
         return None
 
 
@@ -458,7 +458,7 @@ def create_diff_zip(pairs, master_df=None, tolerance=None, deleted_color=None, a
                 })
 
         except Exception as e:
-            st.error(f"ペア {main_drawing} vs {source_drawing} の処理中にエラーが発生しました: {str(e)}")
+            st.error(f"ペア {main_drawing} vs {source_drawing} の図面作成中にエラーが発生しました: {str(e)}")
             results.append({
                 'pair_name': f"{main_drawing} vs {source_drawing}",
                 'main_drawing': main_drawing,
@@ -618,17 +618,17 @@ def render_pair_list():
     missing_pairs = [p for p in st.session_state.pairs if p['status'] == 'missing_source']
     no_source_pairs = [p for p in st.session_state.pairs if p['status'] == 'no_source_defined']
 
-    # 完全なペア
+    # 差分抽出可能なペア
     if complete_pairs:
-        st.success(f"差分抽出が有効なペア: {len(complete_pairs)}組")
+        st.success(f"差分抽出が可能なペア: {len(complete_pairs)}組")
 
         pair_data = []
         for pair in complete_pairs:
             pair_data.append({
                 '図番（新）': pair['main_drawing'],
-                '流用元図番（旧）': pair['source_drawing'],
+                '比較元図番（旧）': pair['source_drawing'],
                 '関係': pair.get('relation', 'なし'),
-                'ステータス': '✅ 有効'
+                'ステータス': '✅ 差分抽出可能'
             })
 
         st.dataframe(pair_data, width='stretch', hide_index=True)
@@ -653,14 +653,14 @@ def render_pair_list():
 
     # 流用元図番が指定されていないペア
     if no_source_pairs:
-        st.info(f"流用元図番の記述がない図面: {len(no_source_pairs)}件（比較対象外）")
+        st.info(f"流用元図番の記載がない図面: {len(no_source_pairs)}件（比較対象外）")
 
         no_source_data = []
         for pair in no_source_pairs:
             no_source_data.append({
                 '図番': pair['main_drawing'],
                 '関係': pair.get('relation') or 'なし',
-                'ステータス': 'ℹ️ 流用元図番の未記入'
+                'ステータス': '⚠️ 流用元図番の未記入'
             })
 
         with st.expander("詳細を表示"):
@@ -691,7 +691,7 @@ def app():
     st.subheader("Step 0: 親子関係台帳ファイルのアップロード")
 
     master_file = st.file_uploader(
-        "親子関係台帳ファイルをアップロードしてください（オプション）",
+        "親子関係台帳Excelファイルをアップロードしてください（オプション）",
         type=ui_config.MASTER_FILE_TYPES,
         key=f"master_upload_{st.session_state.uploader_key}",
         help="親子関係を一元管理するExcelファイルです。新しく見つかった親子関係が自動的に追加されます。"
@@ -706,7 +706,7 @@ def app():
                 st.session_state.master_df = master_df
                 st.session_state.master_file_name = master_file.name
                 st.session_state.added_relationships_count = 0  # リセット
-                st.success(f"親子関係を読み込みました（{len(master_df)}件のレコード）")
+                st.success(f"記録済み親子関係（{len(master_df)}件のレコード）")
         else:
             # 既に読み込まれている場合は状態表示のみ
             st.info(f"既存の親子関係に追加します（{len(st.session_state.master_df)}件のレコード）")
@@ -726,7 +726,7 @@ def app():
 
     with col1:
         uploaded_files = st.file_uploader(
-            "DXFファイルを選択してください（複数可・フォルダ可）",
+            "DXFファイルをアップロードしてください（複数可・フォルダ可）",
             type=ui_config.DXF_FILE_TYPES,
             accept_multiple_files=True,
             key=f"initial_upload_{st.session_state.uploader_key}"
@@ -737,7 +737,7 @@ def app():
 
     # ファイル処理
     if process_button and uploaded_files:
-        with st.spinner(f'{len(uploaded_files)}個のDXFファイルを処理中...'):
+        with st.spinner(f'{len(uploaded_files)}個のファイルから図番を抽出中...'):
             for uploaded_file in uploaded_files:
                 file_info = extract_drawing_info_from_file(uploaded_file)
                 if file_info:
@@ -752,12 +752,12 @@ def app():
             added_count = update_master_if_needed(st.session_state.pairs)
             st.session_state.added_relationships_count += added_count
 
-        st.success(f"{len(st.session_state.uploaded_files_dict)}個のファイルを処理しました")
+        st.success(f"{len(st.session_state.uploaded_files_dict)}個のファイルから図番を抽出しました")
         st.rerun()
 
     # アップロード済みファイルの表示
     if st.session_state.uploaded_files_dict:
-        st.subheader("アップロード済みファイル一覧")
+        st.subheader("図番抽出済みファイル一覧")
 
         file_list_data = []
         for main_drawing, file_info in st.session_state.uploaded_files_dict.items():
@@ -780,17 +780,17 @@ def app():
 
             with col1:
                 additional_files = st.file_uploader(
-                    "不足している比較元図面をアップロードしてください",
+                    "比較元図面が不足している場合はアップロードしてください",
                     type=ui_config.DXF_FILE_TYPES,
                     accept_multiple_files=True,
                     key=f"additional_upload_{st.session_state.uploader_key}"
                 )
 
             with col2:
-                add_button = st.button("追加・更新", key="add_files", type="secondary")
+                add_button = st.button("ファイル追加", key="add_files", type="secondary")
 
             if add_button and additional_files:
-                with st.spinner(f'{len(additional_files)}個のDXFファイルを処理中...'):
+                with st.spinner(f'{len(additional_files)}個のファイルを処理中...'):
                     for uploaded_file in additional_files:
                         file_info = extract_drawing_info_from_file(uploaded_file)
                         if file_info:
@@ -804,7 +804,7 @@ def app():
                     added_count = update_master_if_needed(st.session_state.pairs)
                     st.session_state.added_relationships_count += added_count
 
-                st.success(f"ファイルを追加しました。図面ペアリストが更新されました。")
+                st.success(f"ファイルを追加し図面ペア・リストを更新しました。")
                 st.rerun()
 
         # 比較開始
@@ -821,7 +821,7 @@ def app():
                     max_value=1.0,
                     value=diff_config.DEFAULT_TOLERANCE,
                     format="%.8f",
-                    help="図面の位置座標の比較における許容誤差です。大きくするほど座標の差を無視します。"
+                    help="差分判定の位置座標の比較における許容誤差です。大きくするほど座標の差を無視します。"
                 )
 
             with col2:
@@ -833,21 +833,21 @@ def app():
                 unchanged_default_index = next(i for i, (val, _) in enumerate(diff_config.COLOR_OPTIONS) if val == diff_config.DEFAULT_UNCHANGED_COLOR)
 
                 deleted_color = st.selectbox(
-                    "削除エンティティの色（比較元図面のみ）",
+                    "削除図形の色（比較元図面のみ）",
                     options=diff_config.COLOR_OPTIONS,
                     index=deleted_default_index,
                     format_func=lambda x: x[1]
                 )[0]
 
                 added_color = st.selectbox(
-                    "追加エンティティの色（新図面のみ）",
+                    "追加図形の色（新図面のみ）",
                     options=diff_config.COLOR_OPTIONS,
                     index=added_default_index,
                     format_func=lambda x: x[1]
                 )[0]
 
                 unchanged_color = st.selectbox(
-                    "変更なしエンティティの色",
+                    "変更なし図形の色",
                     options=diff_config.COLOR_OPTIONS,
                     index=unchanged_default_index,
                     format_func=lambda x: x[1]
@@ -855,10 +855,10 @@ def app():
 
         # 比較開始ボタン
         if complete_pairs:
-            st.info(f"比較可能なペア: {len(complete_pairs)}組")
+            st.info(f"差分抽出可能なペア: {len(complete_pairs)}組")
 
-            if st.button("差分比較を開始", key="start_comparison", type="primary", disabled=len(complete_pairs) == 0):
-                with st.spinner(f'{len(complete_pairs)}組のペアを比較中...'):
+            if st.button("差分抽出開始", key="start_comparison", type="primary", disabled=len(complete_pairs) == 0):
+                with st.spinner(f'{len(complete_pairs)}組のペアの差分を抽出中...'):
                     try:
                         zip_data, results = create_diff_zip(
                             st.session_state.pairs,
@@ -896,9 +896,9 @@ def app():
             total_count = len(results)
 
             if successful_count == total_count:
-                st.success(f"全{total_count}組のペアの差分比較が完了しました")
+                st.success(f"全{total_count}組のペアの差分抽出が完了しました")
             elif successful_count > 0:
-                st.warning(f"{successful_count}/{total_count}組のペアの差分比較が完了しました。一部のペアで処理に失敗しました。")
+                st.warning(f"{successful_count}/{total_count}組のペアの差分抽出が完了しましたが、一部のペアで処理に失敗しました。")
             else:
                 st.error("全てのペアで処理に失敗しました ❌")
 
@@ -951,14 +951,14 @@ def app():
                 # オプション設定の情報を表示
                 st.info(f"""
                 **生成されたDXFファイルについて：**
-                - ADDED (色{settings.get('added_color', 4)}): 新図面にのみ存在する要素（追加された要素）
-                - DELETED (色{settings.get('deleted_color', 6)}): 旧図面にのみ存在する要素（削除された要素）
-                - UNCHANGED (色{settings.get('unchanged_color', 7)}): 両方の図面に存在し変更がない要素
+                - ADDED (色{settings.get('added_color', 4)}): 新図面にのみ存在する要素（追加された図形）
+                - DELETED (色{settings.get('deleted_color', 6)}): 旧図面にのみ存在する要素（削除された図形）
+                - UNCHANGED (色{settings.get('unchanged_color', 7)}): 両方の図面に存在し変更がない図形
                 - 座標許容誤差: {settings.get('tolerance', 0.01)}
                 """)
 
             # 新しい比較を開始するボタン
-            if st.button("🔄 新しい比較を開始", key="restart_button"):
+            if st.button("🔄 新しい差分抽出を開始", key="restart_button"):
                 # セッション状態をクリア
                 for key in ['uploaded_files_dict', 'pairs', 'results', 'zip_data', 'processing_settings',
                             'master_df', 'master_file_name', 'added_relationships_count']:
