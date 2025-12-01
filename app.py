@@ -30,7 +30,7 @@ st.set_page_config(
 
 def load_parent_child_master(uploaded_file):
     """
-    親子関係台帳ファイル（Parent-Child_list.xlsx）を読み込む
+    親子関係台帳ファイルを読み込む
 
     Args:
         uploaded_file: アップロードされたExcelファイル
@@ -57,7 +57,7 @@ def load_parent_child_master(uploaded_file):
 
 def update_parent_child_master(master_df, new_pairs):
     """
-    親子関係台帳に新しいペアを追加、または既存ペアを更新する
+    親子関係台帳に新しいペアを追加、もしくは既存ペアを更新する
 
     Args:
         master_df: 既存の親子関係台帳DataFrame
@@ -620,7 +620,7 @@ def render_pair_list():
 
     # 完全なペア
     if complete_pairs:
-        st.success(f"完全なペア: {len(complete_pairs)}組")
+        st.success(f"差分抽出が有効なペア: {len(complete_pairs)}組")
 
         pair_data = []
         for pair in complete_pairs:
@@ -628,32 +628,32 @@ def render_pair_list():
                 '図番（新）': pair['main_drawing'],
                 '流用元図番（旧）': pair['source_drawing'],
                 '関係': pair.get('relation', 'なし'),
-                'ステータス': '✅ 完全'
+                'ステータス': '✅ 有効'
             })
 
         st.dataframe(pair_data, width='stretch', hide_index=True)
 
-    # 流用元図面が不足しているペア
+    # 比較元の旧図面が不足しているペア
     if missing_pairs:
-        st.warning(f"⚠️ 流用元図面がないペア: {len(missing_pairs)}組")
+        st.warning(f"⚠️ 比較元の旧図面がないペア: {len(missing_pairs)}組")
 
         missing_data = []
         missing_drawings = []
         for pair in missing_pairs:
             missing_data.append({
                 '図番（新）': pair['main_drawing'],
-                '流用元図番（旧）': pair['source_drawing'],
+                '比較元図番（旧）': pair['source_drawing'],
                 '関係': pair.get('relation', 'なし'),
-                'ステータス': '⚠️ 流用元図面なし'
+                'ステータス': '⚠️ 比較元図面なし'
             })
             missing_drawings.append(pair['source_drawing'])
 
         st.dataframe(missing_data, width='stretch', hide_index=True)
-        st.info(f"不足している図番: {', '.join(missing_drawings)}")
+        st.info(f"不足している図面: {', '.join(missing_drawings)}")
 
     # 流用元図番が指定されていないペア
     if no_source_pairs:
-        st.info(f"流用元図番が指定されていない図面: {len(no_source_pairs)}件（比較対象外）")
+        st.info(f"流用元図番の記述がない図面: {len(no_source_pairs)}件（比較対象外）")
 
         no_source_data = []
         for pair in no_source_pairs:
@@ -726,7 +726,7 @@ def app():
 
     with col1:
         uploaded_files = st.file_uploader(
-            "DXFファイルを選択してください（複数可）",
+            "DXFファイルを選択してください（複数可・フォルダ可）",
             type=ui_config.DXF_FILE_TYPES,
             accept_multiple_files=True,
             key=f"initial_upload_{st.session_state.uploader_key}"
@@ -764,7 +764,7 @@ def app():
             file_list_data.append({
                 '図番': main_drawing,
                 'ファイル名': file_info['filename'],
-                '流用元図番': file_info.get('source_drawing_number') or 'なし'
+                '比較元図番': file_info.get('source_drawing_number') or 'なし'
             })
 
         st.dataframe(file_list_data, width='stretch', hide_index=True)
@@ -780,7 +780,7 @@ def app():
 
             with col1:
                 additional_files = st.file_uploader(
-                    "不足している流用元図面をアップロードしてください",
+                    "不足している比較元図面をアップロードしてください",
                     type=ui_config.DXF_FILE_TYPES,
                     accept_multiple_files=True,
                     key=f"additional_upload_{st.session_state.uploader_key}"
@@ -808,7 +808,7 @@ def app():
                 st.rerun()
 
         # 比較開始
-        st.subheader("🚀 ステップ3: 差分比較")
+        st.subheader("ステップ3: 差分比較")
 
         # オプション設定
         with st.expander("オプション設定", expanded=False):
@@ -821,7 +821,7 @@ def app():
                     max_value=1.0,
                     value=diff_config.DEFAULT_TOLERANCE,
                     format="%.8f",
-                    help="図面の位置座標の比較における許容誤差です。大きくすると微小な違いを無視します。"
+                    help="図面の位置座標の比較における許容誤差です。大きくするほど座標の差を無視します。"
                 )
 
             with col2:
@@ -833,7 +833,7 @@ def app():
                 unchanged_default_index = next(i for i, (val, _) in enumerate(diff_config.COLOR_OPTIONS) if val == diff_config.DEFAULT_UNCHANGED_COLOR)
 
                 deleted_color = st.selectbox(
-                    "削除エンティティの色（流用元図面のみ）",
+                    "削除エンティティの色（比較元図面のみ）",
                     options=diff_config.COLOR_OPTIONS,
                     index=deleted_default_index,
                     format_func=lambda x: x[1]
@@ -882,7 +882,7 @@ def app():
                     except Exception as e:
                         handle_error(e)
         else:
-            st.warning("比較可能な完全なペアがありません。流用元図面をアップロードしてください。")
+            st.warning("比較対象となる旧図面がありません。旧図面をアップロードしてください。")
 
         # 結果の表示
         if 'results' in st.session_state and st.session_state.results:
@@ -910,7 +910,7 @@ def app():
 
                 row = {
                     '図番（新）': result['main_drawing'],
-                    '流用元図番（旧）': result['source_drawing'],
+                    '比較元図番（旧）': result['source_drawing'],
                     '出力ファイル名': result['output_filename']
                 }
 
