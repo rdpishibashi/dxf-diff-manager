@@ -18,6 +18,9 @@ from utils.extract_labels import extract_labels
 from utils.compare_dxf import compare_dxf_files_and_generate_dxf
 from utils.common_utils import save_uploadedfile, handle_error
 
+# 設定をインポート
+from config import ui_config, diff_config, extraction_config, help_text
+
 st.set_page_config(
     page_title="DXF Diff Manager",
     page_icon="📊",
@@ -27,13 +30,13 @@ st.set_page_config(
 
 def load_parent_child_master(uploaded_file):
     """
-    親子関係マスターファイル（Parent-Child_list.xlsx）を読み込む
+    親子関係台帳ファイル（Parent-Child_list.xlsx）を読み込む
 
     Args:
         uploaded_file: アップロードされたExcelファイル
 
     Returns:
-        DataFrame: 親子関係マスターのデータフレーム
+        DataFrame: 親子関係台帳のデータフレーム
     """
     try:
         df = pd.read_excel(uploaded_file)
@@ -48,16 +51,16 @@ def load_parent_child_master(uploaded_file):
         return df
 
     except Exception as e:
-        st.error(f"親子関係マスターファイルの読み込み中にエラーが発生しました: {str(e)}")
+        st.error(f"親子関係台帳ファイルの読み込み中にエラーが発生しました: {str(e)}")
         return None
 
 
 def update_parent_child_master(master_df, new_pairs):
     """
-    親子関係マスターに新しいペアを追加する（重複はスキップ）
+    親子関係台帳に新しいペアを追加、または既存ペアを更新する
 
     Args:
-        master_df: 既存の親子関係マスターDataFrame
+        master_df: 既存の親子関係台帳DataFrame
         new_pairs: 新しいペア情報のリスト
 
     Returns:
@@ -65,43 +68,101 @@ def update_parent_child_master(master_df, new_pairs):
     """
     added_count = 0
     new_records = []
+    updated_df = master_df.copy()
 
     for pair in new_pairs:
         parent = pair.get('source_drawing')  # 流用元図番がParent
         child = pair.get('main_drawing')      # 図番がChild
+        title = pair.get('title')
+        subtitle = pair.get('subtitle')
+        relation = pair.get('relation')       # 'RevUp' または '流用'
+        entity_counts = pair.get('entity_counts')  # エンティティ数情報
 
         if not parent or not child:
             continue
 
         # 既存のレコードに同じ親子関係が存在するか確認
-        exists = ((master_df['Parent'] == parent) & (master_df['Child'] == child)).any()
+        mask = (updated_df['Parent'] == parent) & (updated_df['Child'] == child)
+        exists = mask.any()
 
-        if not exists:
-            # 新しいレコードを追加（ParentとChild、Dateのみ。Functionは空のまま）
+        if exists:
+            # 既存レコードを更新（Relation, Title, Subtitle, Recorded Date, エンティティ数を上書き）
+            current_date = datetime.now()
+
+            # 必要な列が存在しない場合は追加（文字列型として明示）
+            if 'Relation' not in updated_df.columns:
+                updated_df['Relation'] = pd.Series(dtype='object')
+            if 'Title' not in updated_df.columns:
+                updated_df['Title'] = pd.Series(dtype='object')
+            if 'Subtitle' not in updated_df.columns:
+                updated_df['Subtitle'] = pd.Series(dtype='object')
+            if 'Recorded Date' not in updated_df.columns:
+                # 古い'Date'列があれば'Recorded Date'にリネーム
+                if 'Date' in updated_df.columns:
+                    updated_df.rename(columns={'Date': 'Recorded Date'}, inplace=True)
+                else:
+                    updated_df['Recorded Date'] = None
+
+            # エンティティ数カラムを追加（存在しない場合）
+            entity_count_columns = ['Deleted Entities', 'Added Entities', 'Diff Entities',
+                                   'Unchanged Entities', 'Total Entities']
+            for col in entity_count_columns:
+                if col not in updated_df.columns:
+                    updated_df[col] = pd.Series(dtype='Int64')  # 整数型（NULLを許容）
+
+            updated_df.loc[mask, 'Relation'] = relation
+            updated_df.loc[mask, 'Title'] = title
+            updated_df.loc[mask, 'Subtitle'] = subtitle
+            updated_df.loc[mask, 'Recorded Date'] = current_date
+
+            # エンティティ数を更新（存在する場合）
+            if entity_counts:
+                updated_df.loc[mask, 'Deleted Entities'] = entity_counts.get('deleted_entities')
+                updated_df.loc[mask, 'Added Entities'] = entity_counts.get('added_entities')
+                updated_df.loc[mask, 'Diff Entities'] = entity_counts.get('diff_entities')
+                updated_df.loc[mask, 'Unchanged Entities'] = entity_counts.get('unchanged_entities')
+                updated_df.loc[mask, 'Total Entities'] = entity_counts.get('total_entities')
+        else:
+            # 新しいレコードを追加
             new_record = {
                 'Parent': parent,
                 'Child': child,
-                'Date': datetime.now()
+                'Relation': relation,
+                'Title': title,
+                'Subtitle': subtitle,
+                'Recorded Date': datetime.now()
             }
+
+            # エンティティ数を追加（存在する場合）
+            if entity_counts:
+                new_record['Deleted Entities'] = entity_counts.get('deleted_entities')
+                new_record['Added Entities'] = entity_counts.get('added_entities')
+                new_record['Diff Entities'] = entity_counts.get('diff_entities')
+                new_record['Unchanged Entities'] = entity_counts.get('unchanged_entities')
+                new_record['Total Entities'] = entity_counts.get('total_entities')
+
+            # 他のカラムが存在する場合は空値を設定
+            for col in updated_df.columns:
+                if col not in new_record:
+                    new_record[col] = None
+
             new_records.append(new_record)
             added_count += 1
 
     if new_records:
         # 新しいレコードを追加
         new_df = pd.DataFrame(new_records)
-        updated_df = pd.concat([master_df, new_df], ignore_index=True)
-    else:
-        updated_df = master_df
+        updated_df = pd.concat([updated_df, new_df], ignore_index=True)
 
     return updated_df, added_count
 
 
 def save_master_to_bytes(master_df):
     """
-    親子関係マスターDataFrameをExcelバイトデータに変換
+    親子関係台帳DataFrameをExcelバイトデータに変換
 
     Args:
-        master_df: 親子関係マスターDataFrame
+        master_df: 親子関係台帳DataFrame
 
     Returns:
         bytes: Excelファイルのバイトデータ
@@ -132,7 +193,7 @@ def extract_drawing_info_from_file(uploaded_file):
         # 一時ファイルに保存
         temp_path = save_uploadedfile(uploaded_file)
 
-        # 図面番号を抽出
+        # 図面番号、タイトル、サブタイトルを抽出
         _, info = extract_labels(
             temp_path,
             filter_non_parts=False,
@@ -140,7 +201,8 @@ def extract_drawing_info_from_file(uploaded_file):
             debug=False,
             selected_layers=None,
             validate_ref_designators=False,
-            extract_drawing_numbers_option=True
+            extract_drawing_numbers_option=True,
+            extract_title_option=True
         )
 
         # 図番が見つからない場合はファイル名を使用
@@ -152,7 +214,9 @@ def extract_drawing_info_from_file(uploaded_file):
             'filename': uploaded_file.name,
             'temp_path': temp_path,
             'main_drawing_number': main_drawing,
-            'source_drawing_number': info.get('source_drawing_number')
+            'source_drawing_number': info.get('source_drawing_number'),
+            'title': info.get('title'),
+            'subtitle': info.get('subtitle')
         }
 
     except Exception as e:
@@ -160,9 +224,100 @@ def extract_drawing_info_from_file(uploaded_file):
         return None
 
 
+def extract_base_drawing_number(drawing_number):
+    """
+    図番から最後の1英文字（Revision識別子）を除いたベース図番を抽出
+
+    Args:
+        drawing_number: 図番文字列
+
+    Returns:
+        tuple: (ベース図番, Revision識別子) または (None, None)
+    """
+    if not drawing_number or len(drawing_number) < 2:
+        return None, None
+
+    # 最後の1文字を確認
+    last_char = drawing_number[-1]
+
+    # 英大文字（半角または全角）の場合のみRevision識別子として扱う
+    if last_char.isalpha() and last_char.isupper():
+        base = drawing_number[:-1]
+        revision = last_char
+        return base, revision
+
+    # 全角英大文字の場合
+    if '\uff21' <= last_char <= '\uff3a':  # 全角A-Z
+        base = drawing_number[:-1]
+        revision = last_char
+        return base, revision
+
+    return None, None
+
+
+def create_revup_pairs(uploaded_files_dict):
+    """
+    RevUpペア（Revision識別子のみ異なる同一図面のペア）を作成
+
+    Args:
+        uploaded_files_dict: 図番をキーとしたファイル情報の辞書
+
+    Returns:
+        tuple: (RevUpペアのリスト, 使用された図番のセット)
+    """
+    # ベース図番ごとにグループ化
+    base_groups = defaultdict(list)
+
+    for drawing_number in uploaded_files_dict.keys():
+        base, revision = extract_base_drawing_number(drawing_number)
+        if base and revision:
+            base_groups[base].append((drawing_number, revision))
+
+    revup_pairs = []
+    used_drawings = set()
+
+    # 各グループでペアを作成
+    for base, drawings_with_rev in base_groups.items():
+        # 2つ以上ある場合のみペアを作成
+        if len(drawings_with_rev) < 2:
+            continue
+
+        # Revision識別子でソート（アルファベット順）
+        sorted_drawings = sorted(drawings_with_rev, key=lambda x: x[1])
+
+        # 2つずつペアを作成
+        for i in range(0, len(sorted_drawings) - 1, 2):
+            old_drawing, old_rev = sorted_drawings[i]
+            new_drawing, new_rev = sorted_drawings[i + 1]
+
+            old_file_info = uploaded_files_dict[old_drawing]
+            new_file_info = uploaded_files_dict[new_drawing]
+
+            pair = {
+                'main_drawing': new_drawing,
+                'source_drawing': old_drawing,
+                'main_file_info': new_file_info,
+                'source_file_info': old_file_info,
+                'status': 'complete',
+                'relation': 'RevUp',
+                'title': new_file_info.get('title'),
+                'subtitle': new_file_info.get('subtitle')
+            }
+
+            revup_pairs.append(pair)
+            used_drawings.add(old_drawing)
+            used_drawings.add(new_drawing)
+
+    return revup_pairs, used_drawings
+
+
 def create_pair_list(uploaded_files_dict):
     """
     アップロードされたファイル情報からペアリストを作成
+
+    優先順位:
+    1. RevUpペア（Revision識別子のみ異なる同一図面）
+    2. 流用ペア（図番と流用元図番）
 
     Args:
         uploaded_files_dict: 図番をキーとしたファイル情報の辞書
@@ -171,7 +326,13 @@ def create_pair_list(uploaded_files_dict):
         list: ペア情報のリスト
     """
     pairs = []
-    processed_mains = set()
+
+    # 1. RevUpペアを優先的に作成
+    revup_pairs, used_drawings = create_revup_pairs(uploaded_files_dict)
+    pairs.extend(revup_pairs)
+
+    # 2. 残りのファイルで流用ペアを作成
+    processed_mains = set(used_drawings)  # RevUpペアで使用された図番は除外
 
     for main_drawing, file_info in uploaded_files_dict.items():
         if main_drawing in processed_mains:
@@ -189,7 +350,10 @@ def create_pair_list(uploaded_files_dict):
                 'source_drawing': source_drawing,
                 'main_file_info': file_info,
                 'source_file_info': source_file_info,
-                'status': 'complete' if source_file_info else 'missing_source'
+                'status': 'complete' if source_file_info else 'missing_source',
+                'relation': '流用',
+                'title': file_info.get('title'),
+                'subtitle': file_info.get('subtitle')
             }
             pairs.append(pair)
             processed_mains.add(main_drawing)
@@ -200,6 +364,9 @@ def create_pair_list(uploaded_files_dict):
                 'source_drawing': None,
                 'main_file_info': file_info,
                 'source_file_info': None,
+                'title': file_info.get('title'),
+                'subtitle': file_info.get('subtitle'),
+                'relation': None,  # 関係なし
                 'status': 'no_source_defined'
             }
             pairs.append(pair)
@@ -208,21 +375,31 @@ def create_pair_list(uploaded_files_dict):
     return pairs
 
 
-def create_diff_zip(pairs, master_df=None, tolerance=0.01, deleted_color=6, added_color=4, unchanged_color=7):
+def create_diff_zip(pairs, master_df=None, tolerance=None, deleted_color=None, added_color=None, unchanged_color=None):
     """
     ペアリストに基づいて差分DXFファイルを作成し、ZIPアーカイブを生成
 
     Args:
         pairs: ペア情報のリスト
-        master_df: 親子関係マスターDataFrame（Noneでない場合はZIPに含める）
-        tolerance: 座標許容誤差
-        deleted_color: 削除エンティティの色
-        added_color: 追加エンティティの色
-        unchanged_color: 変更なしエンティティの色
+        master_df: 親子関係台帳DataFrame（Noneでない場合はZIPに含める）
+        tolerance: 座標許容誤差（Noneの場合はconfigのデフォルト値を使用）
+        deleted_color: 削除エンティティの色（Noneの場合はconfigのデフォルト値を使用）
+        added_color: 追加エンティティの色（Noneの場合はconfigのデフォルト値を使用）
+        unchanged_color: 変更なしエンティティの色（Noneの場合はconfigのデフォルト値を使用）
 
     Returns:
         tuple: (zip_data, results)
     """
+    # デフォルト値をconfigから取得
+    if tolerance is None:
+        tolerance = diff_config.DEFAULT_TOLERANCE
+    if deleted_color is None:
+        deleted_color = diff_config.DEFAULT_DELETED_COLOR
+    if added_color is None:
+        added_color = diff_config.DEFAULT_ADDED_COLOR
+    if unchanged_color is None:
+        unchanged_color = diff_config.DEFAULT_UNCHANGED_COLOR
+
     results = []
     temp_output_files = []
 
@@ -244,7 +421,7 @@ def create_diff_zip(pairs, master_df=None, tolerance=0.01, deleted_color=6, adde
 
         try:
             # DXF比較処理（図番（新）を基準A、流用元図番（旧）を比較対象B）
-            success = compare_dxf_files_and_generate_dxf(
+            success, entity_counts = compare_dxf_files_and_generate_dxf(
                 main_file_path,        # 基準ファイルA (新)
                 source_file_path,      # 比較対象ファイルB (旧)
                 temp_output,
@@ -266,7 +443,8 @@ def create_diff_zip(pairs, master_df=None, tolerance=0.01, deleted_color=6, adde
                     'source_drawing': source_drawing,
                     'output_filename': output_filename,
                     'dxf_data': dxf_data,
-                    'success': True
+                    'success': True,
+                    'entity_counts': entity_counts
                 })
             else:
                 results.append({
@@ -275,7 +453,8 @@ def create_diff_zip(pairs, master_df=None, tolerance=0.01, deleted_color=6, adde
                     'source_drawing': source_drawing,
                     'output_filename': output_filename,
                     'dxf_data': None,
-                    'success': False
+                    'success': False,
+                    'entity_counts': None
                 })
 
         except Exception as e:
@@ -287,8 +466,30 @@ def create_diff_zip(pairs, master_df=None, tolerance=0.01, deleted_color=6, adde
                 'output_filename': output_filename,
                 'dxf_data': None,
                 'success': False,
-                'error': str(e)
+                'error': str(e),
+                'entity_counts': None
             })
+
+    # 親子関係台帳を結果で更新（エンティティ数を含む）
+    if master_df is not None:
+        # 結果からペア情報を作成（エンティティ数を含む）
+        pairs_with_entity_counts = []
+        for result in results:
+            if result['success']:
+                # 元のペア情報を取得
+                original_pair = next((p for p in complete_pairs
+                                     if p['main_drawing'] == result['main_drawing']
+                                     and p['source_drawing'] == result['source_drawing']), None)
+
+                if original_pair:
+                    # エンティティ数を追加したペア情報を作成
+                    pair_with_counts = original_pair.copy()
+                    pair_with_counts['entity_counts'] = result['entity_counts']
+                    pairs_with_entity_counts.append(pair_with_counts)
+
+        # 親子関係台帳を更新
+        if pairs_with_entity_counts:
+            master_df, _ = update_parent_child_master(master_df, pairs_with_entity_counts)
 
     # ZIPアーカイブを作成
     zip_buffer = BytesIO()
@@ -299,10 +500,10 @@ def create_diff_zip(pairs, master_df=None, tolerance=0.01, deleted_color=6, adde
             if result['success'] and result['dxf_data']:
                 zip_file.writestr(result['output_filename'], result['dxf_data'])
 
-        # 親子関係マスターファイルを追加（存在する場合）
+        # 親子関係台帳ファイルを追加（存在する場合）
         if master_df is not None:
             master_excel_data = save_master_to_bytes(master_df)
-            zip_file.writestr('Parent-Child_list.xlsx', master_excel_data)
+            zip_file.writestr(diff_config.MASTER_FILENAME, master_excel_data)
 
     zip_buffer.seek(0)
     zip_data = zip_buffer.getvalue()
@@ -317,78 +518,8 @@ def create_diff_zip(pairs, master_df=None, tolerance=0.01, deleted_color=6, adde
     return zip_data, results
 
 
-def app():
-    st.title('DXF Diff Manager - DXF差分管理ツール')
-    st.write('流用図面と元図面を自動的にペアリングし、差分をDXFフォーマットで出力します。親子関係マスターも更新します。')
-
-    # ボタンのスタイルをカスタマイズ（青色背景と枠）
-    st.markdown("""
-        <style>
-        .stButton > button {
-            background-color: #0066cc;
-            color: white;
-            border: 1px solid #0066cc;
-        }
-        .stButton > button:hover {
-            background-color: #0052a3;
-            color: white;
-            border: 1px solid #0052a3;
-        }
-        .stButton > button:focus {
-            background-color: #0066cc;
-            color: white;
-            border: 1px solid #0066cc;
-            box-shadow: 0 0 0 0.2rem rgba(0, 102, 204, 0.5);
-        }
-        .stDownloadButton > button {
-            background-color: #0066cc;
-            color: white;
-            border: 1px solid #0066cc;
-        }
-        .stDownloadButton > button:hover {
-            background-color: #0052a3;
-            color: white;
-            border: 1px solid #0052a3;
-        }
-        .stDownloadButton > button:focus {
-            background-color: #0066cc;
-            color: white;
-            border: 1px solid #0066cc;
-            box-shadow: 0 0 0 0.2rem rgba(0, 102, 204, 0.5);
-        }
-        </style>
-    """, unsafe_allow_html=True)
-
-    # プログラム説明
-    with st.expander("ℹ️ プログラム説明", expanded=False):
-        help_text = [
-            "このツールは、複数のDXFファイルから図面番号と流用元図番を自動抽出し、",
-            "ペアごとに差分を比較してDXFファイルとして出力します。",
-            "",
-            "**使用手順：**",
-            "1. （オプション）親子関係管理台帳をアップロードすると、新しい親子関係が自動的に追加されます",
-            "2. DXFファイルを一括アップロードしてください（複数可）",
-            "3. 自動的に図番と流用元図番が抽出され、ペアリストが表示されます",
-            "4. 流用元図面が不足している場合は「追加アップロード」で追加できます",
-            "5. 「差分比較を開始」ボタンをクリックして処理を実行します",
-            "6. 完全なペアのみが処理され、ZIPファイルで一括ダウンロードできます",
-            "7. ZIPには差分DXFファイルと更新された親子関係マスター（アップロードした場合）が含まれます",
-            "",
-            "**出力DXFファイルの内容：**",
-            "- ADDED (デフォルト色: シアン): 新図面にのみ存在する要素（追加された要素）",
-            "- DELETED (デフォルト色: マゼンタ): 旧図面にのみ存在する要素（削除された要素）",
-            "- UNCHANGED (デフォルト色: 白/黒): 両方の図面に存在し変更がない要素",
-            "",
-            "**注意事項：**",
-            "- 図番が抽出できない場合はファイル名が図番として使用されます",
-            "- 図番（新）を基準A、流用元図番（旧）を比較対象Bとして比較します",
-            "- 流用元図番が指定されていない図面は比較対象外となります",
-            "- 親子関係マスターには、完全なペア（図番と流用元図番の両方が存在する）のみが追加されます"
-        ]
-
-        st.info("\n".join(help_text))
-
-    # セッション状態の初期化
+def initialize_session_state():
+    """セッション状態を初期化"""
     if 'uploaded_files_dict' not in st.session_state:
         st.session_state.uploaded_files_dict = {}
 
@@ -404,17 +535,169 @@ def app():
     if 'added_relationships_count' not in st.session_state:
         st.session_state.added_relationships_count = 0
 
-    # 親子関係マスターファイルのアップロード
+    if 'uploader_key' not in st.session_state:
+        st.session_state.uploader_key = 0
+
+
+def render_custom_styles():
+    """カスタムCSSスタイルを適用"""
+    st.markdown(f"""
+        <style>
+        .stButton > button {{
+            background-color: {ui_config.PRIMARY_COLOR};
+            color: white;
+            border: 1px solid {ui_config.PRIMARY_COLOR};
+        }}
+        .stButton > button:hover {{
+            background-color: {ui_config.HOVER_COLOR};
+            color: white;
+            border: 1px solid {ui_config.HOVER_COLOR};
+        }}
+        .stButton > button:focus {{
+            background-color: {ui_config.PRIMARY_COLOR};
+            color: white;
+            border: 1px solid {ui_config.PRIMARY_COLOR};
+            box-shadow: 0 0 0 0.2rem {ui_config.FOCUS_SHADOW_COLOR};
+        }}
+        .stDownloadButton > button {{
+            background-color: {ui_config.PRIMARY_COLOR};
+            color: white;
+            border: 1px solid {ui_config.PRIMARY_COLOR};
+        }}
+        .stDownloadButton > button:hover {{
+            background-color: {ui_config.HOVER_COLOR};
+            color: white;
+            border: 1px solid {ui_config.HOVER_COLOR};
+        }}
+        .stDownloadButton > button:focus {{
+            background-color: {ui_config.PRIMARY_COLOR};
+            color: white;
+            border: 1px solid {ui_config.PRIMARY_COLOR};
+            box-shadow: 0 0 0 0.2rem {ui_config.FOCUS_SHADOW_COLOR};
+        }}
+        </style>
+    """, unsafe_allow_html=True)
+
+
+def update_master_if_needed(pairs):
+    """親子関係台帳を更新（必要な場合のみ）
+
+    Args:
+        pairs: ペア情報のリスト
+
+    Returns:
+        int: 追加された件数
+    """
+    if st.session_state.master_df is None:
+        return 0
+
+    complete_pairs = [p for p in pairs if p['status'] == 'complete']
+    if not complete_pairs:
+        return 0
+
+    updated_master, added_count = update_parent_child_master(
+        st.session_state.master_df,
+        complete_pairs
+    )
+    st.session_state.master_df = updated_master
+    return added_count
+
+
+def render_pair_list():
+    """ペアリストを表示
+
+    Returns:
+        tuple: (complete_pairs, missing_pairs)
+    """
+    if not st.session_state.pairs:
+        return [], []
+
+    st.subheader("図面ペア・リスト")
+
+    complete_pairs = [p for p in st.session_state.pairs if p['status'] == 'complete']
+    missing_pairs = [p for p in st.session_state.pairs if p['status'] == 'missing_source']
+    no_source_pairs = [p for p in st.session_state.pairs if p['status'] == 'no_source_defined']
+
+    # 完全なペア
+    if complete_pairs:
+        st.success(f"完全なペア: {len(complete_pairs)}組")
+
+        pair_data = []
+        for pair in complete_pairs:
+            pair_data.append({
+                '図番（新）': pair['main_drawing'],
+                '流用元図番（旧）': pair['source_drawing'],
+                '関係': pair.get('relation', 'なし'),
+                'ステータス': '✅ 完全'
+            })
+
+        st.dataframe(pair_data, width='stretch', hide_index=True)
+
+    # 流用元図面が不足しているペア
+    if missing_pairs:
+        st.warning(f"⚠️ 流用元図面がないペア: {len(missing_pairs)}組")
+
+        missing_data = []
+        missing_drawings = []
+        for pair in missing_pairs:
+            missing_data.append({
+                '図番（新）': pair['main_drawing'],
+                '流用元図番（旧）': pair['source_drawing'],
+                '関係': pair.get('relation', 'なし'),
+                'ステータス': '⚠️ 流用元図面なし'
+            })
+            missing_drawings.append(pair['source_drawing'])
+
+        st.dataframe(missing_data, width='stretch', hide_index=True)
+        st.info(f"不足している図番: {', '.join(missing_drawings)}")
+
+    # 流用元図番が指定されていないペア
+    if no_source_pairs:
+        st.info(f"流用元図番が指定されていない図面: {len(no_source_pairs)}件（比較対象外）")
+
+        no_source_data = []
+        for pair in no_source_pairs:
+            no_source_data.append({
+                '図番': pair['main_drawing'],
+                '関係': pair.get('relation') or 'なし',
+                'ステータス': 'ℹ️ 流用元図番の未記入'
+            })
+
+        with st.expander("詳細を表示"):
+            st.dataframe(no_source_data, width='stretch', hide_index=True)
+
+    # 親子関係台帳更新状況の表示
+    if st.session_state.master_df is not None and st.session_state.added_relationships_count > 0:
+        st.success(f"親子関係台帳に {st.session_state.added_relationships_count} 件の新しい関係を追加しました")
+
+    return complete_pairs, missing_pairs
+
+
+def render_help_section():
+    """プログラム説明セクションを表示"""
+    with st.expander("ℹ️ プログラム説明", expanded=False):
+        st.info("\n".join(help_text.USAGE_STEPS))
+
+
+def app():
+    st.title(ui_config.TITLE)
+    st.write(ui_config.SUBTITLE)
+
+    render_custom_styles()
+    render_help_section()
+    initialize_session_state()
+
+    # 親子関係台帳ファイルのアップロード
     st.subheader("Step 0: 親子関係台帳ファイルのアップロード")
 
     master_file = st.file_uploader(
         "親子関係台帳ファイルをアップロードしてください（オプション）",
-        type=["xlsx"],
-        key="master_upload",
+        type=ui_config.MASTER_FILE_TYPES,
+        key=f"master_upload_{st.session_state.uploader_key}",
         help="親子関係を一元管理するExcelファイルです。新しく見つかった親子関係が自動的に追加されます。"
     )
 
-    # マスターファイルの読み込み（ファイルがアップロードされた時点で自動処理）
+    # 台帳ファイルの読み込み（ファイルがアップロードされた時点で自動処理）
     if master_file is not None:
         # まだ読み込まれていない場合、または異なるファイルの場合のみ読み込む
         if st.session_state.master_df is None or st.session_state.get('master_file_name') != master_file.name:
@@ -444,9 +727,9 @@ def app():
     with col1:
         uploaded_files = st.file_uploader(
             "DXFファイルを選択してください（複数可）",
-            type="dxf",
+            type=ui_config.DXF_FILE_TYPES,
             accept_multiple_files=True,
-            key="initial_upload"
+            key=f"initial_upload_{st.session_state.uploader_key}"
         )
 
     with col2:
@@ -465,17 +748,9 @@ def app():
             # ペアリストを作成
             st.session_state.pairs = create_pair_list(st.session_state.uploaded_files_dict)
 
-            # 親子関係マスターが読み込まれている場合、更新する
-            if st.session_state.master_df is not None:
-                # 完全なペアのみマスターに追加
-                complete_pairs = [p for p in st.session_state.pairs if p['status'] == 'complete']
-                if complete_pairs:
-                    updated_master, added_count = update_parent_child_master(
-                        st.session_state.master_df,
-                        complete_pairs
-                    )
-                    st.session_state.master_df = updated_master
-                    st.session_state.added_relationships_count += added_count
+            # 親子関係台帳を更新
+            added_count = update_master_if_needed(st.session_state.pairs)
+            st.session_state.added_relationships_count += added_count
 
         st.success(f"{len(st.session_state.uploaded_files_dict)}個のファイルを処理しました")
         st.rerun()
@@ -495,61 +770,7 @@ def app():
         st.dataframe(file_list_data, width='stretch', hide_index=True)
 
         # ペアリストの表示
-        st.subheader("図面ペア・リスト")
-
-        complete_pairs = [p for p in st.session_state.pairs if p['status'] == 'complete']
-        missing_pairs = [p for p in st.session_state.pairs if p['status'] == 'missing_source']
-        no_source_pairs = [p for p in st.session_state.pairs if p['status'] == 'no_source_defined']
-
-        # 完全なペア
-        if complete_pairs:
-            st.success(f"完全なペア: {len(complete_pairs)}組")
-
-            pair_data = []
-            for pair in complete_pairs:
-                pair_data.append({
-                    '図番（新）': pair['main_drawing'],
-                    '流用元図番（旧）': pair['source_drawing'],
-                    'ステータス': '✅ 完全'
-                })
-
-            st.dataframe(pair_data, width='stretch', hide_index=True)
-
-        # 流用元図面が不足しているペア
-        if missing_pairs:
-            st.warning(f"⚠️ 流用元図面がないペア: {len(missing_pairs)}組")
-
-            missing_data = []
-            missing_drawings = []
-            for pair in missing_pairs:
-                missing_data.append({
-                    '図番（新）': pair['main_drawing'],
-                    '流用元図番（旧）': pair['source_drawing'],
-                    'ステータス': '⚠️ 流用元図面なし'
-                })
-                missing_drawings.append(pair['source_drawing'])
-
-            st.dataframe(missing_data, width='stretch', hide_index=True)
-
-            st.info(f"不足している図番: {', '.join(missing_drawings)}")
-
-        # 流用元図番が指定されていないペア
-        if no_source_pairs:
-            st.info(f"流用元図番が指定されていない図面: {len(no_source_pairs)}件（比較対象外）")
-
-            no_source_data = []
-            for pair in no_source_pairs:
-                no_source_data.append({
-                    '図番': pair['main_drawing'],
-                    'ステータス': 'ℹ️ 流用元図番の未記入'
-                })
-
-            with st.expander("詳細を表示"):
-                st.dataframe(no_source_data, width='stretch', hide_index=True)
-
-        # 親子関係マスター更新状況の表示
-        if st.session_state.master_df is not None and st.session_state.added_relationships_count > 0:
-            st.success(f"親子関係台帳に {st.session_state.added_relationships_count} 件の新しい関係を追加しました")
+        complete_pairs, missing_pairs = render_pair_list()
 
         # 追加アップロード
         if missing_pairs:
@@ -560,9 +781,9 @@ def app():
             with col1:
                 additional_files = st.file_uploader(
                     "不足している流用元図面をアップロードしてください",
-                    type="dxf",
+                    type=ui_config.DXF_FILE_TYPES,
                     accept_multiple_files=True,
-                    key="additional_upload"
+                    key=f"additional_upload_{st.session_state.uploader_key}"
                 )
 
             with col2:
@@ -579,17 +800,9 @@ def app():
                     # ペアリストを更新
                     st.session_state.pairs = create_pair_list(st.session_state.uploaded_files_dict)
 
-                    # 親子関係マスターが読み込まれている場合、更新する
-                    if st.session_state.master_df is not None:
-                        # 完全なペアのみマスターに追加
-                        complete_pairs = [p for p in st.session_state.pairs if p['status'] == 'complete']
-                        if complete_pairs:
-                            updated_master, added_count = update_parent_child_master(
-                                st.session_state.master_df,
-                                complete_pairs
-                            )
-                            st.session_state.master_df = updated_master
-                            st.session_state.added_relationships_count += added_count
+                    # 親子関係台帳を更新
+                    added_count = update_master_if_needed(st.session_state.pairs)
+                    st.session_state.added_relationships_count += added_count
 
                 st.success(f"ファイルを追加しました。図面ペアリストが更新されました。")
                 st.rerun()
@@ -606,7 +819,7 @@ def app():
                     "座標許容誤差",
                     min_value=1e-8,
                     max_value=1.0,
-                    value=0.01,
+                    value=diff_config.DEFAULT_TOLERANCE,
                     format="%.8f",
                     help="図面の位置座標の比較における許容誤差です。大きくすると微小な違いを無視します。"
                 )
@@ -614,24 +827,29 @@ def app():
             with col2:
                 st.write("**レイヤー色設定**")
 
+                # デフォルト値のインデックスを取得
+                deleted_default_index = next(i for i, (val, _) in enumerate(diff_config.COLOR_OPTIONS) if val == diff_config.DEFAULT_DELETED_COLOR)
+                added_default_index = next(i for i, (val, _) in enumerate(diff_config.COLOR_OPTIONS) if val == diff_config.DEFAULT_ADDED_COLOR)
+                unchanged_default_index = next(i for i, (val, _) in enumerate(diff_config.COLOR_OPTIONS) if val == diff_config.DEFAULT_UNCHANGED_COLOR)
+
                 deleted_color = st.selectbox(
                     "削除エンティティの色（流用元図面のみ）",
-                    options=[(1, "1 - 赤"), (2, "2 - 黄"), (3, "3 - 緑"), (4, "4 - シアン"), (5, "5 - 青"), (6, "6 - マゼンタ"), (7, "7 - 白/黒")],
-                    index=5,  # デフォルト: マゼンタ
+                    options=diff_config.COLOR_OPTIONS,
+                    index=deleted_default_index,
                     format_func=lambda x: x[1]
                 )[0]
 
                 added_color = st.selectbox(
                     "追加エンティティの色（新図面のみ）",
-                    options=[(1, "1 - 赤"), (2, "2 - 黄"), (3, "3 - 緑"), (4, "4 - シアン"), (5, "5 - 青"), (6, "6 - マゼンタ"), (7, "7 - 白/黒")],
-                    index=3,  # デフォルト: シアン
+                    options=diff_config.COLOR_OPTIONS,
+                    index=added_default_index,
                     format_func=lambda x: x[1]
                 )[0]
 
                 unchanged_color = st.selectbox(
                     "変更なしエンティティの色",
-                    options=[(1, "1 - 赤"), (2, "2 - 黄"), (3, "3 - 緑"), (4, "4 - シアン"), (5, "5 - 青"), (6, "6 - マゼンタ"), (7, "7 - 白/黒")],
-                    index=6,  # デフォルト: 白/黒
+                    options=diff_config.COLOR_OPTIONS,
+                    index=unchanged_default_index,
                     format_func=lambda x: x[1]
                 )[0]
 
@@ -644,7 +862,7 @@ def app():
                     try:
                         zip_data, results = create_diff_zip(
                             st.session_state.pairs,
-                            master_df=st.session_state.master_df,  # 親子関係マスターを渡す
+                            master_df=st.session_state.master_df,  # 親子関係台帳を渡す
                             tolerance=tolerance,
                             deleted_color=deleted_color,
                             added_color=added_color,
@@ -688,12 +906,26 @@ def app():
             result_data = []
             for result in results:
                 status = "✅ 成功" if result['success'] else "❌ 失敗"
-                result_data.append({
+                entity_counts = result.get('entity_counts')
+
+                row = {
                     '図番（新）': result['main_drawing'],
                     '流用元図番（旧）': result['source_drawing'],
-                    '出力ファイル名': result['output_filename'],
-                    'ステータス': status
-                })
+                    '出力ファイル名': result['output_filename']
+                }
+
+                # エンティティ数を追加（成功した場合のみ）
+                if entity_counts:
+                    row['削除図形数'] = entity_counts.get('deleted_entities', '-')
+                    row['追加図形数'] = entity_counts.get('added_entities', '-')
+                    row['総図形数'] = entity_counts.get('total_entities', '-')
+                else:
+                    row['削除図形数'] = '-'
+                    row['追加図形数'] = '-'
+                    row['総図形数'] = '-'
+
+                row['ステータス'] = status
+                result_data.append(row)
 
             st.dataframe(result_data, width='stretch', hide_index=True)
 
@@ -732,6 +964,9 @@ def app():
                             'master_df', 'master_file_name', 'added_relationships_count']:
                     if key in st.session_state:
                         del st.session_state[key]
+
+                # ファイルアップロード入力をクリアするためにキーをインクリメント
+                st.session_state.uploader_key += 1
 
                 # 一時ファイルのクリーンアップ
                 # （実際の本番環境では適切なクリーンアップが必要）
