@@ -42,7 +42,7 @@ def load_parent_child_master(uploaded_file):
         df = pd.read_excel(uploaded_file)
 
         # 必要なカラムが存在するか確認
-        required_columns = ['Parent', 'Child']
+        required_columns = ['Child', 'Parent']
         for col in required_columns:
             if col not in df.columns:
                 st.error(f"必須カラム '{col}' が見つかりません。")
@@ -125,8 +125,8 @@ def update_parent_child_master(master_df, new_pairs):
         else:
             # 新しいレコードを追加
             new_record = {
-                'Parent': parent,
                 'Child': child,
+                'Parent': parent,
                 'Relation': relation,
                 'Title': title,
                 'Subtitle': subtitle,
@@ -444,7 +444,8 @@ def create_diff_zip(pairs, master_df=None, tolerance=None, deleted_color=None, a
                     'output_filename': output_filename,
                     'dxf_data': dxf_data,
                     'success': True,
-                    'entity_counts': entity_counts
+                    'entity_counts': entity_counts,
+                    'relation': pair.get('relation', 'なし')
                 })
             else:
                 results.append({
@@ -454,7 +455,8 @@ def create_diff_zip(pairs, master_df=None, tolerance=None, deleted_color=None, a
                     'output_filename': output_filename,
                     'dxf_data': None,
                     'success': False,
-                    'entity_counts': None
+                    'entity_counts': None,
+                    'relation': pair.get('relation', 'なし')
                 })
 
         except Exception as e:
@@ -467,6 +469,7 @@ def create_diff_zip(pairs, master_df=None, tolerance=None, deleted_color=None, a
                 'dxf_data': None,
                 'success': False,
                 'error': str(e),
+                'relation': pair.get('relation', 'なし'),
                 'entity_counts': None
             })
 
@@ -762,8 +765,8 @@ def app():
         file_list_data = []
         for main_drawing, file_info in st.session_state.uploaded_files_dict.items():
             file_list_data.append({
-                '図番': main_drawing,
                 'ファイル名': file_info['filename'],
+                '図番': main_drawing,
                 '比較元図番': file_info.get('source_drawing_number') or 'なし'
             })
 
@@ -808,7 +811,7 @@ def app():
                 st.rerun()
 
         # 比較開始
-        st.subheader("ステップ3: 差分比較")
+        st.subheader("Step 3: 差分比較")
 
         # オプション設定
         with st.expander("オプション設定", expanded=False):
@@ -886,7 +889,7 @@ def app():
 
         # 結果の表示
         if 'results' in st.session_state and st.session_state.results:
-            st.subheader("処理結果")
+            st.subheader("差分抽出結果")
 
             results = st.session_state.results
             settings = st.session_state.get('processing_settings', {})
@@ -911,7 +914,8 @@ def app():
                 row = {
                     '図番（新）': result['main_drawing'],
                     '比較元図番（旧）': result['source_drawing'],
-                    '出力ファイル名': result['output_filename']
+                    '出力ファイル名': result['output_filename'],
+                    '関係': result.get('relation', 'なし')
                 }
 
                 # エンティティ数を追加（成功した場合のみ）
@@ -931,7 +935,7 @@ def app():
 
             # ダウンロードボタン
             if successful_count > 0:
-                st.subheader("結果のダウンロード")
+                st.subheader("Step 4: 差分抽出ファイルのダウンロード")
 
                 # ダウンロードボタンのラベルを作成
                 download_label = f"ZIPでダウンロード ({successful_count}ファイル"
