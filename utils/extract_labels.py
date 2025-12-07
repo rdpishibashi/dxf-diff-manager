@@ -5,8 +5,11 @@ import sys
 from typing import List, Tuple, Dict, Optional
 
 # 共通ユーティリティをインポート
-from .common_utils import process_circuit_symbol_labels
-
+# config モジュールから抽出設定をインポート
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.insert(0, parent_dir)
+from config import extraction_config
 
 def get_layers_from_dxf(dxf_file):
     """
@@ -85,7 +88,8 @@ def clean_mtext_format_codes(text: str, debug=False) -> str:
     # 複数の空白を単一の空白に変換
     cleaned = re.sub(r' +', ' ', cleaned)
 
-    result = cleaned.strip()
+    cleaned = cleaned.replace('\\P', ' ')
+    result = re.sub(r'\s+', ' ', cleaned).strip()
 
     if debug:
         print(f"MTEXT cleaning: '{text}' -> '{result}'")
@@ -187,8 +191,9 @@ def extract_drawing_numbers(text: str, debug=False) -> List[str]:
     """
     # 図面番号の正確なパターンを定義
     # 例: DE5313-008-02B（英大文字x2+数字x4+"-"+数字x3+"-"+数字x2+英大文字）
+    # config.py の extraction_config.DRAWING_NUMBER_PATTERN を使用
     patterns = [
-        r'[A-Z]{2}\d{4}-\d{3}-\d{2}[A-Z]',  # DE5313-008-02B 型（正確なフォーマット）
+        extraction_config.DRAWING_NUMBER_PATTERN,
     ]
 
     drawing_numbers = []
@@ -310,7 +315,8 @@ def extract_title_and_subtitle(
 
     # 2. タイトル候補を収集
     title_candidates = []
-    title_proximity_x = 80  # X方向の近辺範囲（TITLEのすぐ右側のみ）
+    # X方向の近辺範囲（TITLEのすぐ右側のみ） - config.py から取得
+    title_proximity_x = extraction_config.TITLE_PROXIMITY_X
 
     for label, coords in all_labels:
         # TITLEやREVISIONのラベル自体は除外
@@ -416,7 +422,7 @@ def extract_title_and_subtitle(
         subtitle_candidates = []
         title_min_x = min([coords[0] for _, coords in title_group])
         title_max_x = max([coords[0] for _, coords in title_group])
-        x_tolerance = 100.0
+        x_tolerance = extraction_config.RIGHTMOST_DRAWING_TOLERANCE
 
         for group, min_x, avg_y in groups_with_min_x:
             if avg_y < title_y_coord:
@@ -447,7 +453,7 @@ def determine_drawing_number_types(
     debug: bool = False
 ) -> Dict[str, str]:
     """
-    ラベルと座標に基づいて図番と流用元図番を判別する（改善版）
+    ラベルと座標に基づいて図番と流用元図番を判別する
 
     判別ルール:
     1. ファイル名と一致する図面番号を「図番」とする
@@ -527,8 +533,8 @@ def determine_drawing_number_types(
                         min_distance = distance
                         closest_dn = dn
 
-            # 距離が妥当な範囲内（80単位以内）であれば採用
-            if closest_dn and min_distance < 80:
+            # 距離が妥当な範囲内であれば採用 - config.py から取得
+            if closest_dn and min_distance < extraction_config.SOURCE_LABEL_PROXIMITY:
                 source_drawing = closest_dn
                 if debug:
                     print(f"流用元図番をラベルから判別: {source_drawing} (距離: {min_distance:.2f})")
@@ -548,8 +554,8 @@ def determine_drawing_number_types(
                         min_distance = distance
                         closest_dn = dn
 
-            # 距離が妥当な範囲内（80単位以内）であれば採用
-            if closest_dn and min_distance < 80:
+            # 距離が妥当な範囲内であれば採用 - config.py から取得
+            if closest_dn and min_distance < extraction_config.DWG_NO_LABEL_PROXIMITY:
                 main_drawing = closest_dn
                 if debug:
                     print(f"図番をDWG No.ラベルから判別: {main_drawing} (距離: {min_distance:.2f})")
@@ -559,7 +565,8 @@ def determine_drawing_number_types(
         # 複数図面対応: 最も右側の図面番号群のみを対象とする
         # 最も右側のX座標を取得
         max_x = max([coords[0] for _, coords in drawing_numbers])
-        x_tolerance = 100.0  # 同一図面とみなすX座標の許容範囲
+        # 同一図面とみなすX座標の許容範囲 - config.py から取得
+        x_tolerance = extraction_config.RIGHTMOST_DRAWING_TOLERANCE
 
         # 最も右側の範囲内にある図面番号のみをフィルタリング
         rightmost_numbers = [(dn, coords) for dn, coords in drawing_numbers
@@ -593,7 +600,8 @@ def determine_drawing_number_types(
 
 def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=False,
                   selected_layers=None, validate_ref_designators=False,
-                  extract_drawing_numbers_option=False, extract_title_option=False):
+                  extract_drawing_numbers_option=False, extract_title_option=False,
+                  include_coordinates=False):
     """
     DXFファイルからテキストラベルを抽出する
 
@@ -645,6 +653,7 @@ def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=Fal
 
         # すべてのテキストエンティティを抽出（選択されたレイヤーのみ）
         labels = []
+        labels_with_coordinates = []
         drawing_number_candidates = []  # 図面番号候補を座標付きで保存
         all_labels_with_coords = []  # 全ラベル（座標付き）- 図面番号判別用
 
@@ -658,55 +667,39 @@ def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=Fal
             if e.dxftype() in ['TEXT', 'MTEXT']:
                 all_entities_to_process.append(e)
 
-        # 2. BLOCKSから直接は収集しない - INSERT経由でのみ処理する
-
-        # 3. PAPER_SPACEからエンティティを収集
+        # 2. PAPER_SPACEからエンティティを収集
         try:
             for layout in doc.layouts:
                 if layout.name != 'Model':  # Model space以外のレイアウト
                     for e in layout:
                         if e.dxftype() in ['TEXT', 'MTEXT']:
                             all_entities_to_process.append(e)
-        except Exception as e:
+        except Exception:
             pass
 
-        # 4. INSERT エンティティを処理してブロック参照を展開
+        # 3. INSERT エンティティを処理してブロック参照を展開
         try:
-            # ブロック定義内のテキストエンティティをキャッシュ
-            block_text_cache = {}
-            for block in doc.blocks:
-                block_texts = []
-                for entity in block:
-                    if entity.dxftype() in ['TEXT', 'MTEXT']:
-                        block_texts.append(entity)
-                if block_texts:
-                    block_text_cache[block.name] = block_texts
-
-            # INSERT エンティティを処理
             for e in msp:
-                if e.dxftype() == 'INSERT':
-                    # INSERT エンティティのブロック名を取得
-                    block_name = e.dxf.name
+                if e.dxftype() == 'INSERT' and e.dxf.layer in selected_layers:
+                    try:
+                        for virtual_entity in e.virtual_entities():
+                            if virtual_entity.dxftype() in ['TEXT', 'MTEXT']:
+                                all_entities_to_process.append(virtual_entity)
+                    except Exception:
+                        pass
 
-                    # そのブロック内のテキストエンティティを取得
-                    if block_name in block_text_cache:
-                        for text_entity in block_text_cache[block_name]:
-                            # INSERT エンティティのレイヤーをチェック
-                            if e.dxf.layer in selected_layers:
-                                all_entities_to_process.append(text_entity)
-
-            # ペーパースペースの INSERT エンティティも処理
             for layout in doc.layouts:
                 if layout.name != 'Model':
                     for e in layout:
-                        if e.dxftype() == 'INSERT':
-                            block_name = e.dxf.name
-                            if block_name in block_text_cache:
-                                for text_entity in block_text_cache[block_name]:
-                                    if e.dxf.layer in selected_layers:
-                                        all_entities_to_process.append(text_entity)
+                        if e.dxftype() == 'INSERT' and e.dxf.layer in selected_layers:
+                            try:
+                                for virtual_entity in e.virtual_entities():
+                                    if virtual_entity.dxftype() in ['TEXT', 'MTEXT']:
+                                        all_entities_to_process.append(virtual_entity)
+                            except Exception:
+                                pass
 
-        except Exception as e:
+        except Exception:
             pass  # INSERT処理エラーは無視して続行
 
         # 重複を除去（ここではINSERT経由の重複も許可する）
@@ -740,6 +733,7 @@ def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=Fal
 
                     # 通常のラベルとして追加（クリーンテキストを使用）
                     labels.append(clean_text)
+                    labels_with_coordinates.append((clean_text, coordinates[0], coordinates[1]))
 
         # 総抽出数を記録
         info["total_extracted"] = len(labels)
@@ -768,25 +762,25 @@ def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=Fal
 
 
 
-        # 回路記号処理（フィルタリング、妥当性チェック）
-        symbol_result = process_circuit_symbol_labels(
-            labels,
-            filter_non_parts=filter_non_parts,
-            validate_ref_designators=validate_ref_designators,
-            debug=debug
-        )
+        processed_labels = labels.copy()
+        info["filtered_count"] = 0
+        info["invalid_ref_designators"] = []
 
-        # 処理結果を取得
-        processed_labels = symbol_result['labels']
-        info["filtered_count"] = symbol_result['filtered_count']
-        info["invalid_ref_designators"] = symbol_result['invalid_ref_designators']
+        if include_coordinates:
+            filtered_set = set(processed_labels)
+            processed_label_entries = [entry for entry in labels_with_coordinates if entry[0] in filtered_set]
 
-        # ソート
-        if sort_order == "asc":
-            processed_labels.sort()
-        elif sort_order == "desc":
-            processed_labels.sort(reverse=True)
-        final_labels = processed_labels
+            if sort_order == "asc":
+                processed_label_entries.sort(key=lambda x: (x[0], x[1], x[2]))
+            elif sort_order == "desc":
+                processed_label_entries.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
+            final_labels = processed_label_entries
+        else:
+            if sort_order == "asc":
+                processed_labels.sort()
+            elif sort_order == "desc":
+                processed_labels.sort(reverse=True)
+            final_labels = processed_labels
 
         # 最終的なラベル数を記録
         info["final_count"] = len(final_labels)

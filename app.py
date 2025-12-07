@@ -17,6 +17,12 @@ sys.path.insert(0, utils_path)
 from utils.extract_labels import extract_labels
 from utils.compare_dxf import compare_dxf_files_and_generate_dxf
 from utils.common_utils import save_uploadedfile, handle_error
+from utils.label_diff import (
+    compute_label_differences,
+    filter_unchanged_by_prefix,
+    build_diff_labels_workbook,
+    build_unchanged_labels_workbook
+)
 
 # 設定をインポート
 from config import ui_config, diff_config, extraction_config, help_text
@@ -26,6 +32,26 @@ st.set_page_config(
     page_icon="📊",
     layout="wide",
 )
+
+PREFIX_CONFIG_PATH = Path(current_dir) / "prefix_config.txt"
+DIFF_LABELS_FILENAME = "diff_labels.xlsx"
+UNCHANGED_LABELS_FILENAME = "unchanged_labels.xlsx"
+
+
+def load_default_prefixes():
+    if PREFIX_CONFIG_PATH.exists():
+        with open(PREFIX_CONFIG_PATH, 'r', encoding='utf-8') as f:
+            lines = [line.rstrip('\n') for line in f]
+        return [line for line in lines if line.strip()]
+    return []
+
+
+DEFAULT_PREFIXES = load_default_prefixes()
+
+
+def get_prefix_list_from_state():
+    text_value = st.session_state.get('prefix_text_input', "")
+    return [line.strip() for line in text_value.splitlines() if line.strip()]
 
 
 def load_parent_child_master(uploaded_file):
@@ -157,12 +183,13 @@ def update_parent_child_master(master_df, new_pairs):
     return updated_df, added_count
 
 
-def save_master_to_bytes(master_df):
+def save_master_to_bytes(master_df, filename=None):
     """
     親子関係台帳DataFrameをExcelバイトデータに変換
 
     Args:
         master_df: 親子関係台帳DataFrame
+        filename: 出力ファイル名（使用しないが、インターフェースの一貫性のために保持）
 
     Returns:
         bytes: Excelファイルのバイトデータ
@@ -375,13 +402,15 @@ def create_pair_list(uploaded_files_dict):
     return pairs
 
 
-def create_diff_zip(pairs, master_df=None, tolerance=None, deleted_color=None, added_color=None, unchanged_color=None):
+def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None, deleted_color=None, added_color=None,
+                    unchanged_color=None, prefixes=None):
     """
     ペアリストに基づいて差分DXFファイルを作成し、ZIPアーカイブを生成
 
     Args:
         pairs: ペア情報のリスト
         master_df: 親子関係台帳DataFrame（Noneでない場合はZIPに含める）
+        master_filename: 親子関係台帳のファイル名（Noneの場合はデフォルト名を使用）
         tolerance: 座標許容誤差（Noneの場合はconfigのデフォルト値を使用）
         deleted_color: 削除エンティティの色（Noneの場合はconfigのデフォルト値を使用）
         added_color: 追加エンティティの色（Noneの場合はconfigのデフォルト値を使用）
@@ -401,7 +430,10 @@ def create_diff_zip(pairs, master_df=None, tolerance=None, deleted_color=None, a
         unchanged_color = diff_config.DEFAULT_UNCHANGED_COLOR
 
     results = []
+    prefixes = prefixes or []
     temp_output_files = []
+    diff_label_sheets = []
+    unchanged_label_sheets = []
 
     # 完全なペアのみ処理
     complete_pairs = [p for p in pairs if p['status'] == 'complete']
@@ -418,6 +450,33 @@ def create_diff_zip(pairs, master_df=None, tolerance=None, deleted_color=None, a
         # 一時出力ファイルを作成
         temp_output = tempfile.NamedTemporaryFile(delete=False, suffix=".dxf").name
         temp_output_files.append(temp_output)
+
+        change_rows = []
+        filtered_unchanged = []
+        change_label_count = 0
+        unchanged_label_count = 0
+
+        try:
+            change_rows, unchanged_entries = compute_label_differences(
+                main_file_path,
+                source_file_path,
+                tolerance=tolerance
+            )
+            filtered_unchanged = filter_unchanged_by_prefix(unchanged_entries, prefixes)
+            change_label_count = len(change_rows)
+            unchanged_label_count = sum(row.get('Count', 0) for row in filtered_unchanged)
+        except Exception as e:
+            st.error(f"ラベル比較中にエラーが発生しました ({main_drawing}): {str(e)}")
+            change_rows = []
+            filtered_unchanged = []
+
+        diff_label_sheets.append({
+            'sheet_name': main_drawing,
+            'rows': change_rows,
+            'old_label_name': f"Old: {source_drawing}",
+            'new_label_name': f"New: {main_drawing}"
+        })
+        unchanged_label_sheets.append({'sheet_name': main_drawing, 'rows': filtered_unchanged})
 
         try:
             # DXF比較処理（図番（新）を基準A、流用元図番（旧）を比較対象B）
@@ -445,7 +504,9 @@ def create_diff_zip(pairs, master_df=None, tolerance=None, deleted_color=None, a
                     'dxf_data': dxf_data,
                     'success': True,
                     'entity_counts': entity_counts,
-                    'relation': pair.get('relation', 'なし')
+                    'relation': pair.get('relation', 'なし'),
+                    'change_label_count': change_label_count,
+                    'unchanged_label_count': unchanged_label_count
                 })
             else:
                 results.append({
@@ -456,7 +517,9 @@ def create_diff_zip(pairs, master_df=None, tolerance=None, deleted_color=None, a
                     'dxf_data': None,
                     'success': False,
                     'entity_counts': None,
-                    'relation': pair.get('relation', 'なし')
+                    'relation': pair.get('relation', 'なし'),
+                    'change_label_count': change_label_count,
+                    'unchanged_label_count': unchanged_label_count
                 })
 
         except Exception as e:
@@ -470,7 +533,9 @@ def create_diff_zip(pairs, master_df=None, tolerance=None, deleted_color=None, a
                 'success': False,
                 'error': str(e),
                 'relation': pair.get('relation', 'なし'),
-                'entity_counts': None
+                'entity_counts': None,
+                'change_label_count': change_label_count,
+                'unchanged_label_count': unchanged_label_count
             })
 
     # 親子関係台帳を結果で更新（エンティティ数を含む）
@@ -497,16 +562,27 @@ def create_diff_zip(pairs, master_df=None, tolerance=None, deleted_color=None, a
     # ZIPアーカイブを作成
     zip_buffer = BytesIO()
 
+    diff_labels_excel = build_diff_labels_workbook(diff_label_sheets)
+    unchanged_labels_excel = build_unchanged_labels_workbook(unchanged_label_sheets)
+
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
         # 差分DXFファイルを追加
         for result in results:
             if result['success'] and result['dxf_data']:
                 zip_file.writestr(result['output_filename'], result['dxf_data'])
 
+        # ラベル比較ファイルを追加
+        if diff_labels_excel:
+            zip_file.writestr(DIFF_LABELS_FILENAME, diff_labels_excel)
+        if unchanged_labels_excel:
+            zip_file.writestr(UNCHANGED_LABELS_FILENAME, unchanged_labels_excel)
+
         # 親子関係台帳ファイルを追加（存在する場合）
         if master_df is not None:
             master_excel_data = save_master_to_bytes(master_df)
-            zip_file.writestr(diff_config.MASTER_FILENAME, master_excel_data)
+            # アップロードされたファイル名を使用、なければデフォルト名を使用
+            output_master_filename = master_filename if master_filename else diff_config.MASTER_FILENAME
+            zip_file.writestr(output_master_filename, master_excel_data)
 
     zip_buffer.seek(0)
     zip_data = zip_buffer.getvalue()
@@ -540,6 +616,9 @@ def initialize_session_state():
 
     if 'uploader_key' not in st.session_state:
         st.session_state.uploader_key = 0
+
+    if 'prefix_text_input' not in st.session_state:
+        st.session_state.prefix_text_input = "\n".join(DEFAULT_PREFIXES)
 
 
 def render_custom_styles():
@@ -707,7 +786,7 @@ def app():
             master_df = load_parent_child_master(master_file)
             if master_df is not None:
                 st.session_state.master_df = master_df
-                st.session_state.master_file_name = master_file.name
+                st.session_state.master_file_name = master_file.name  # アップロードされたファイルの元の名前を保存
                 st.session_state.added_relationships_count = 0  # リセット
                 st.success(f"記録済み親子関係（{len(master_df)}件のレコード）")
         else:
@@ -758,24 +837,12 @@ def app():
         st.success(f"{len(st.session_state.uploaded_files_dict)}個のファイルから図番を抽出しました")
         st.rerun()
 
-    # アップロード済みファイルの表示
-    if st.session_state.uploaded_files_dict:
-        st.subheader("図番抽出済みファイル一覧")
+    complete_pairs = []
+    missing_pairs = []
 
-        file_list_data = []
-        for main_drawing, file_info in st.session_state.uploaded_files_dict.items():
-            file_list_data.append({
-                'ファイル名': file_info['filename'],
-                '図番': main_drawing,
-                '比較元図番': file_info.get('source_drawing_number') or 'なし'
-            })
-
-        st.dataframe(file_list_data, width='stretch', hide_index=True)
-
-        # ペアリストの表示
+    if st.session_state.pairs:
         complete_pairs, missing_pairs = render_pair_list()
 
-        # 追加アップロード
         if missing_pairs:
             st.subheader("Step 2: 追加アップロード（オプション）")
 
@@ -800,17 +867,13 @@ def app():
                             main_drawing = file_info['main_drawing_number']
                             st.session_state.uploaded_files_dict[main_drawing] = file_info
 
-                    # ペアリストを更新
                     st.session_state.pairs = create_pair_list(st.session_state.uploaded_files_dict)
-
-                    # 親子関係台帳を更新
                     added_count = update_master_if_needed(st.session_state.pairs)
                     st.session_state.added_relationships_count += added_count
 
-                st.success(f"ファイルを追加し図面ペア・リストを更新しました。")
+                st.success("ファイルを追加し図面ペア・リストを更新しました。")
                 st.rerun()
 
-        # 比較開始
         st.subheader("Step 3: 差分比較")
 
         # オプション設定
@@ -856,6 +919,17 @@ def app():
                     format_func=lambda x: x[1]
                 )[0]
 
+            st.markdown("**未変更ラベルの中から抽出したい先頭文字列**")
+            prefix_text = st.text_area(
+                "1行につき1件を入力してください",
+                value=st.session_state.prefix_text_input,
+                height=150,
+                help="prefix_config.txt に定義された初期値を基に編集できます。空行は無視されます。",
+                key=f"prefix_text_area_{st.session_state.uploader_key}"
+            )
+            st.session_state.prefix_text_input = prefix_text
+            prefix_list = get_prefix_list_from_state()
+
         # 比較開始ボタン
         if complete_pairs:
             st.info(f"差分抽出可能なペア: {len(complete_pairs)}組")
@@ -866,10 +940,12 @@ def app():
                         zip_data, results = create_diff_zip(
                             st.session_state.pairs,
                             master_df=st.session_state.master_df,  # 親子関係台帳を渡す
+                            master_filename=st.session_state.master_file_name,  # アップロードされたファイル名を渡す
                             tolerance=tolerance,
                             deleted_color=deleted_color,
                             added_color=added_color,
-                            unchanged_color=unchanged_color
+                            unchanged_color=unchanged_color,
+                            prefixes=prefix_list
                         )
 
                         # セッション状態に保存
@@ -927,6 +1003,8 @@ def app():
                     row['削除図形数'] = '-'
                     row['追加図形数'] = '-'
                     row['総図形数'] = '-'
+                row['変更ラベル数'] = result.get('change_label_count', '-')
+                row['未変更抽出ラベル数'] = result.get('unchanged_label_count', '-')
 
                 row['ステータス'] = status
                 result_data.append(row)
@@ -940,8 +1018,9 @@ def app():
                 # ダウンロードボタンのラベルを作成
                 download_label = f"ZIPでダウンロード ({successful_count}ファイル"
                 if st.session_state.master_df is not None:
-                    download_label += " + 親子関係台帳"
-                download_label += ")"
+                    master_name = st.session_state.master_file_name if st.session_state.master_file_name else "親子関係台帳"
+                    download_label += f" + {master_name}"
+                download_label += " + diff_labels.xlsx + unchanged_labels.xlsx)"
 
                 st.download_button(
                     label=download_label,
@@ -954,10 +1033,12 @@ def app():
 
                 # オプション設定の情報を表示
                 st.info(f"""
-                **生成されたDXFファイルについて：**
-                - ADDED (色{settings.get('added_color', 4)}): 新図面にのみ存在する要素（追加された図形）
-                - DELETED (色{settings.get('deleted_color', 6)}): 旧図面にのみ存在する要素（削除された図形）
-                - UNCHANGED (色{settings.get('unchanged_color', 7)}): 両方の図面に存在し変更がない図形
+                **生成されたファイルについて：**
+                - ADDED: 新図面にのみ存在する要素（追加された図形）
+                - DELETED: 旧図面にのみ存在する要素（削除された図形）
+                - UNCHANGED: 両方の図面に存在し変更がない図形
+                - diff_labels.xlsx: 各図面の変更ラベル一覧（シート名は新図面の図番）
+                - unchanged_labels.xlsx: 指定の先頭文字列に一致する未変更ラベル一覧
                 - 座標許容誤差: {settings.get('tolerance', 0.01)}
                 """)
 
