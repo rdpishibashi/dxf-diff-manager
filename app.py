@@ -764,7 +764,7 @@ def render_preview_dataframe(df, key_prefix):
     }
     st.dataframe(
         df,
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
         column_config=column_config,
         key=key_prefix
@@ -1052,7 +1052,8 @@ def app():
                         render_preview_dataframe(st.session_state.master_df, "master_preview")
 
                 if st.session_state.get('diff_labels_excel_data'):
-                    with st.expander("diff_labels.xlsx プレビュー", expanded=False):
+                    diff_expanded = st.session_state.get('diff_preview_expanded', False)
+                    with st.expander("diff_labels.xlsx プレビュー", expanded=diff_expanded):
                         diff_xl = pd.ExcelFile(BytesIO(st.session_state.diff_labels_excel_data))
                         sheet_name = st.selectbox(
                             "シートを選択（diff_labels）",
@@ -1060,6 +1061,7 @@ def app():
                             key="diff_labels_preview_sheet"
                         )
                         render_preview_dataframe(diff_xl.parse(sheet_name), "diff_preview")
+                        st.session_state['diff_preview_expanded'] = True
 
                 if st.session_state.get('unchanged_labels_excel_data'):
                     with st.expander("unchanged_labels.xlsx プレビュー", expanded=False):
