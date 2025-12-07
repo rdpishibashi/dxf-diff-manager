@@ -594,7 +594,7 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
         except:
             pass
 
-    return zip_data, results
+    return zip_data, results, diff_labels_excel, unchanged_labels_excel
 
 
 def initialize_session_state():
@@ -753,6 +753,22 @@ def render_pair_list():
         st.success(f"親子関係台帳に {st.session_state.added_relationships_count} 件の新しい関係を追加しました")
 
     return complete_pairs, missing_pairs
+
+def render_preview_dataframe(df, key_prefix):
+    """プレビュー用データフレームの列幅を調整して表示"""
+    column_config = {
+        col: st.column_config.Column(col, width="small")
+        if col in ("Coordinate X", "Coordinate Y", "Count")
+        else st.column_config.Column(col)
+        for col in df.columns
+    }
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        column_config=column_config,
+        key=key_prefix
+    )
 
 
 def render_help_section():
@@ -937,7 +953,7 @@ def app():
             if st.button("差分抽出開始", key="start_comparison", type="primary", disabled=len(complete_pairs) == 0):
                 with st.spinner(f'{len(complete_pairs)}組のペアの差分を抽出中...'):
                     try:
-                        zip_data, results = create_diff_zip(
+                        zip_data, results, diff_labels_excel, unchanged_labels_excel = create_diff_zip(
                             st.session_state.pairs,
                             master_df=st.session_state.master_df,  # 親子関係台帳を渡す
                             master_filename=st.session_state.master_file_name,  # アップロードされたファイル名を渡す
@@ -951,6 +967,8 @@ def app():
                         # セッション状態に保存
                         st.session_state.zip_data = zip_data
                         st.session_state.results = results
+                        st.session_state.diff_labels_excel_data = diff_labels_excel
+                        st.session_state.unchanged_labels_excel_data = unchanged_labels_excel
                         st.session_state.processing_settings = {
                             'tolerance': tolerance,
                             'deleted_color': deleted_color,
@@ -1011,6 +1029,48 @@ def app():
 
             st.dataframe(result_data, width='stretch', hide_index=True)
 
+            # プレビューセクション
+            preview_available = st.session_state.get('diff_labels_excel_data') is not None or \
+                                st.session_state.get('unchanged_labels_excel_data') is not None or \
+                                st.session_state.master_df is not None
+
+            if preview_available:
+                st.subheader("出力内容プレビュー")
+
+                preview_items = []
+                if st.session_state.master_df is not None:
+                    preview_items.append("親子関係台帳")
+                if st.session_state.get('diff_labels_excel_data'):
+                    preview_items.append("diff_labels.xlsx")
+                if st.session_state.get('unchanged_labels_excel_data'):
+                    preview_items.append("unchanged_labels.xlsx")
+                if preview_items:
+                    st.caption("表示可能: " + ", ".join(preview_items))
+
+                if st.session_state.master_df is not None:
+                    with st.expander("親子関係台帳プレビュー", expanded=False):
+                        render_preview_dataframe(st.session_state.master_df, "master_preview")
+
+                if st.session_state.get('diff_labels_excel_data'):
+                    with st.expander("diff_labels.xlsx プレビュー", expanded=False):
+                        diff_xl = pd.ExcelFile(BytesIO(st.session_state.diff_labels_excel_data))
+                        sheet_name = st.selectbox(
+                            "シートを選択（diff_labels）",
+                            diff_xl.sheet_names,
+                            key="diff_labels_preview_sheet"
+                        )
+                        render_preview_dataframe(diff_xl.parse(sheet_name), "diff_preview")
+
+                if st.session_state.get('unchanged_labels_excel_data'):
+                    with st.expander("unchanged_labels.xlsx プレビュー", expanded=False):
+                        unchanged_xl = pd.ExcelFile(BytesIO(st.session_state.unchanged_labels_excel_data))
+                        sheet_name = st.selectbox(
+                            "シートを選択（unchanged_labels）",
+                            unchanged_xl.sheet_names,
+                            key="unchanged_labels_preview_sheet"
+                        )
+                        render_preview_dataframe(unchanged_xl.parse(sheet_name), "unchanged_preview")
+
             # ダウンロードボタン
             if successful_count > 0:
                 st.subheader("Step 4: 差分抽出ファイルのダウンロード")
@@ -1046,7 +1106,8 @@ def app():
             if st.button("🔄 新しい差分抽出を開始", key="restart_button"):
                 # セッション状態をクリア
                 for key in ['uploaded_files_dict', 'pairs', 'results', 'zip_data', 'processing_settings',
-                            'master_df', 'master_file_name', 'added_relationships_count']:
+                            'master_df', 'master_file_name', 'added_relationships_count',
+                            'diff_labels_excel_data', 'unchanged_labels_excel_data']:
                     if key in st.session_state:
                         del st.session_state[key]
 
