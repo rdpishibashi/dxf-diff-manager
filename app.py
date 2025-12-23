@@ -8,6 +8,7 @@ from io import BytesIO
 from collections import defaultdict
 import pandas as pd
 from datetime import datetime
+import gc
 
 # utils モジュールをインポート可能にするためのパスの追加
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -47,6 +48,20 @@ def load_default_prefixes():
 
 
 DEFAULT_PREFIXES = load_default_prefixes()
+
+
+def cleanup_temp_files():
+    """
+    セッション状態に保存された一時ファイルをクリーンアップする
+    """
+    if 'uploaded_files_dict' in st.session_state:
+        for drawing_number, file_info in st.session_state.uploaded_files_dict.items():
+            temp_path = file_info.get('temp_path')
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except Exception:
+                    pass  # エラーは無視
 
 
 def get_prefix_list_from_state():
@@ -221,6 +236,7 @@ def extract_drawing_info_from_file(uploaded_file):
         temp_path = save_uploadedfile(uploaded_file)
 
         # 図面番号、タイトル、サブタイトルを抽出
+        # 元のファイル名を渡して、図番のファイル名マッチングを正しく行う
         _, info = extract_labels(
             temp_path,
             filter_non_parts=False,
@@ -229,7 +245,8 @@ def extract_drawing_info_from_file(uploaded_file):
             selected_layers=None,
             validate_ref_designators=False,
             extract_drawing_numbers_option=True,
-            extract_title_option=True
+            extract_title_option=True,
+            original_filename=uploaded_file.name  # 元のファイル名を渡す
         )
 
         # 図番が見つからない場合はファイル名を使用
@@ -369,21 +386,37 @@ def create_pair_list(uploaded_files_dict):
 
         # 流用元図番がある場合
         if source_drawing:
-            # 流用元図面が存在するか確認
-            source_file_info = uploaded_files_dict.get(source_drawing)
+            # 流用元図番が図番自身と同じ場合はスキップ（無効なペア）
+            if source_drawing == main_drawing:
+                # 流用元図番がないものとして扱う
+                pair = {
+                    'main_drawing': main_drawing,
+                    'source_drawing': None,
+                    'main_file_info': file_info,
+                    'source_file_info': None,
+                    'title': file_info.get('title'),
+                    'subtitle': file_info.get('subtitle'),
+                    'relation': None,  # 関係なし
+                    'status': 'no_source_defined'
+                }
+                pairs.append(pair)
+                processed_mains.add(main_drawing)
+            else:
+                # 流用元図面が存在するか確認
+                source_file_info = uploaded_files_dict.get(source_drawing)
 
-            pair = {
-                'main_drawing': main_drawing,
-                'source_drawing': source_drawing,
-                'main_file_info': file_info,
-                'source_file_info': source_file_info,
-                'status': 'complete' if source_file_info else 'missing_source',
-                'relation': '流用',
-                'title': file_info.get('title'),
-                'subtitle': file_info.get('subtitle')
-            }
-            pairs.append(pair)
-            processed_mains.add(main_drawing)
+                pair = {
+                    'main_drawing': main_drawing,
+                    'source_drawing': source_drawing,
+                    'main_file_info': file_info,
+                    'source_file_info': source_file_info,
+                    'status': 'complete' if source_file_info else 'missing_source',
+                    'relation': '流用',
+                    'title': file_info.get('title'),
+                    'subtitle': file_info.get('subtitle')
+                }
+                pairs.append(pair)
+                processed_mains.add(main_drawing)
         else:
             # 流用元図番がない場合もリストに追加（流用元なし）
             pair = {
@@ -593,6 +626,13 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
             os.unlink(temp_file)
         except:
             pass
+
+    # メモリ解放: 大きなデータ構造を削除
+    del temp_output_files
+    del diff_label_sheets
+    del unchanged_label_sheets
+    # ガベージコレクションを実行
+    gc.collect()
 
     return zip_data, results, diff_labels_excel, unchanged_labels_excel
 
@@ -850,6 +890,9 @@ def app():
             added_count = update_master_if_needed(st.session_state.pairs)
             st.session_state.added_relationships_count += added_count
 
+            # メモリ解放
+            gc.collect()
+
         st.success(f"{len(st.session_state.uploaded_files_dict)}個のファイルから図番を抽出しました")
         st.rerun()
 
@@ -976,8 +1019,13 @@ def app():
                             'unchanged_color': unchanged_color
                         }
 
+                        # メモリ解放
+                        gc.collect()
+
                     except Exception as e:
                         handle_error(e)
+                        # エラー時もメモリ解放
+                        gc.collect()
         else:
             st.warning("比較対象となる旧図面がありません。旧図面をアップロードしてください。")
 
@@ -1106,6 +1154,9 @@ def app():
 
             # 新しい比較を開始するボタン
             if st.button("🔄 新しい差分抽出を開始", key="restart_button"):
+                # 一時ファイルのクリーンアップ
+                cleanup_temp_files()
+
                 # セッション状態をクリア
                 for key in ['uploaded_files_dict', 'pairs', 'results', 'zip_data', 'processing_settings',
                             'master_df', 'master_file_name', 'added_relationships_count',
@@ -1116,8 +1167,8 @@ def app():
                 # ファイルアップロード入力をクリアするためにキーをインクリメント
                 st.session_state.uploader_key += 1
 
-                # 一時ファイルのクリーンアップ
-                # （実際の本番環境では適切なクリーンアップが必要）
+                # ガベージコレクションを実行してメモリを解放
+                gc.collect()
 
                 st.rerun()
 

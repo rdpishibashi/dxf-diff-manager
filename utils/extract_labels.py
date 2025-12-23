@@ -2,6 +2,7 @@ import ezdxf
 import re
 import os
 import sys
+import gc
 from typing import List, Tuple, Dict, Optional
 
 # 共通ユーティリティをインポート
@@ -534,10 +535,14 @@ def determine_drawing_number_types(
                         closest_dn = dn
 
             # 距離が妥当な範囲内であれば採用 - config.py から取得
+            # ただし、図番と同じ場合は採用しない
             if closest_dn and min_distance < extraction_config.SOURCE_LABEL_PROXIMITY:
-                source_drawing = closest_dn
-                if debug:
-                    print(f"流用元図番をラベルから判別: {source_drawing} (距離: {min_distance:.2f})")
+                if closest_dn != main_drawing:
+                    source_drawing = closest_dn
+                    if debug:
+                        print(f"流用元図番をラベルから判別: {source_drawing} (距離: {min_distance:.2f})")
+                elif debug:
+                    print(f"警告: 流用元図番が図番と同じためスキップ: {closest_dn}")
 
         # 図番を「DWG No.」ラベルに最も近い図面番号から確認
         if dwg_label_positions and not main_drawing:
@@ -595,13 +600,19 @@ def determine_drawing_number_types(
                         print(f"流用元図番を座標から判別: {source_drawing}")
                     break
 
+    # 最終検証: 流用元図番が図番と同じ場合はNoneにする
+    if source_drawing and source_drawing == main_drawing:
+        if debug:
+            print(f"警告: 流用元図番が図番と同じため、Noneに設定: {source_drawing}")
+        source_drawing = None
+
     return {'main_drawing': main_drawing, 'source_drawing': source_drawing}
 
 
 def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=False,
                   selected_layers=None, validate_ref_designators=False,
                   extract_drawing_numbers_option=False, extract_title_option=False,
-                  include_coordinates=False):
+                  include_coordinates=False, original_filename=None):
     """
     DXFファイルからテキストラベルを抽出する
 
@@ -614,6 +625,7 @@ def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=Fal
         validate_ref_designators: 回路記号の妥当性をチェックするかどうか
         extract_drawing_numbers_option: 図面番号を抽出するかどうか
         extract_title_option: タイトルとサブタイトルを抽出するかどうか
+        original_filename: 元のファイル名（一時ファイルの場合に使用）
 
     Returns:
         tuple: (ラベルリスト, 情報辞書)
@@ -702,12 +714,27 @@ def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=Fal
         except Exception:
             pass  # INSERT処理エラーは無視して続行
 
-        # 重複を除去（ここではINSERT経由の重複も許可する）
-        processed_entity_ids = set()
+        # 重複を除去（座標とテキストで判定して真の重複のみ削除）
+        seen_entities = set()
         unique_entities = []
         for e in all_entities_to_process:
-            # INSERT経由の同じブロック内エンティティは重複として扱わない
-            unique_entities.append(e)
+            # エンティティの種類、レイヤー、座標で重複判定
+            try:
+                entity_key = (
+                    e.dxftype(),
+                    e.dxf.layer if hasattr(e.dxf, 'layer') else '',
+                    getattr(e.dxf, 'insert', (0, 0)) if hasattr(e.dxf, 'insert') else (0, 0)
+                )
+                if entity_key not in seen_entities:
+                    seen_entities.add(entity_key)
+                    unique_entities.append(e)
+            except:
+                # エラーの場合は追加（安全のため）
+                unique_entities.append(e)
+
+        # 元のリストを削除してメモリ解放
+        del all_entities_to_process
+        del seen_entities
 
 
         # 実際の抽出処理
@@ -740,10 +767,12 @@ def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=Fal
 
         # 図面番号の判別（改善版ロジックを使用）
         if extract_drawing_numbers_option and drawing_number_candidates:
+            # 元のファイル名がある場合はそれを使用、なければdxf_fileを使用
+            filename_for_matching = original_filename if original_filename else dxf_file
             drawing_info = determine_drawing_number_types(
                 drawing_number_candidates,
                 all_labels=all_labels_with_coords,
-                filename=dxf_file,
+                filename=filename_for_matching,
                 debug=debug
             )
             info["main_drawing_number"] = drawing_info['main_drawing']
@@ -785,17 +814,26 @@ def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=Fal
         # 最終的なラベル数を記録
         info["final_count"] = len(final_labels)
 
+        # メモリ解放: DXFドキュメントオブジェクトを明示的に削除
+        del doc
+        del msp
+        # ガベージコレクションを実行してメモリを即座に解放
+        gc.collect()
+
         return final_labels, info
 
     except Exception as e:
         print(f"エラー: {str(e)}")
         info["error"] = str(e)
+        # エラー時もメモリ解放
+        gc.collect()
         return [], info
 
 
 def process_multiple_dxf_files(dxf_files, filter_non_parts=False, sort_order="asc", debug=False,
                               selected_layers=None, validate_ref_designators=False,
-                              extract_drawing_numbers_option=False, extract_title_option=False):
+                              extract_drawing_numbers_option=False, extract_title_option=False,
+                              original_filenames=None):
     """
     複数のDXFファイルからラベルを抽出する
 
@@ -807,6 +845,7 @@ def process_multiple_dxf_files(dxf_files, filter_non_parts=False, sort_order="as
         selected_layers: 処理対象とするレイヤー名のリスト。Noneの場合は全レイヤーを対象とする
         validate_ref_designators: 回路記号の妥当性をチェックするかどうか
         extract_drawing_numbers_option: 図面番号を抽出するかどうか
+        original_filenames: 元のファイル名のリスト（一時ファイルの場合に使用）
 
     Returns:
         dict: ファイルパスをキー、(ラベルリスト, 情報辞書)をバリューとする辞書

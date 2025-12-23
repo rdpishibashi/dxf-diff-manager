@@ -10,6 +10,7 @@ import logging
 import numpy as np
 import tempfile
 import os
+import gc
 
 # 高精度計算設定
 getcontext().prec = 50
@@ -1025,8 +1026,25 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
         success = output_generator.create_diff_dxf(
             entities_a, entities_b, deleted_hashes, added_hashes, common_hashes, output_file)
 
+        # メモリ解放: 大きなデータ構造を削除
+        del doc_a
+        del doc_b
+        del entities_a
+        del entities_b
+        del data_a
+        del data_b
+        del locations_a
+        del locations_b
+        del deleted_hashes
+        del added_hashes
+        del common_hashes
+        # ガベージコレクションを実行
+        gc.collect()
+
         return success, entity_counts if success else None
 
     except Exception as e:
         logger.error(f"DXF comparison error: {e}")
+        # エラー時もメモリ解放
+        gc.collect()
         return False, None
