@@ -53,7 +53,8 @@ class ExtractionConfig:
     """DXF抽出関連の設定"""
 
     # 図番抽出設定
-    DRAWING_NUMBER_PATTERN = r'[A-Z]{2}\d{4}-\d{3}-\d{2}[A-Z]'  # 図番パターン
+    # 両フォーマット対応: XX0000-000-00X（長）、XX0000-000X（短）
+    DRAWING_NUMBER_PATTERN = r'[A-Z]{2}\d{4}-\d{3}(?:-\d{2})?[A-Z]'  # 図番パターン
 
     # 距離設定（DXF単位）
     SOURCE_LABEL_PROXIMITY = 80     # 流用元図番ラベルからの検出距離
