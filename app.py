@@ -864,10 +864,11 @@ def app():
 
     with col1:
         uploaded_files = st.file_uploader(
-            "DXFファイルをアップロードしてください（複数可・フォルダ可）",
+            "DXFファイルをアップロードしてください（複数可・フォルダ可・複数回可）",
             type=ui_config.DXF_FILE_TYPES,
             accept_multiple_files=True,
-            key=f"initial_upload_{st.session_state.uploader_key}"
+            key=f"initial_upload_{st.session_state.uploader_key}",
+            help="ファイルを追加するたびに「図番を抽出」ボタンを押すとペアが識別されます"
         )
 
     with col2:
@@ -902,38 +903,7 @@ def app():
     if st.session_state.pairs:
         complete_pairs, missing_pairs = render_pair_list()
 
-        if missing_pairs:
-            st.subheader("Step 2: 追加アップロード（オプション）")
-
-            col1, col2 = st.columns([3, 1])
-
-            with col1:
-                additional_files = st.file_uploader(
-                    "比較元図面が不足している場合はアップロードしてください",
-                    type=ui_config.DXF_FILE_TYPES,
-                    accept_multiple_files=True,
-                    key=f"additional_upload_{st.session_state.uploader_key}"
-                )
-
-            with col2:
-                add_button = st.button("ファイル追加", key="add_files", type="secondary")
-
-            if add_button and additional_files:
-                with st.spinner(f'{len(additional_files)}個のファイルを処理中...'):
-                    for uploaded_file in additional_files:
-                        file_info = extract_drawing_info_from_file(uploaded_file)
-                        if file_info:
-                            main_drawing = file_info['main_drawing_number']
-                            st.session_state.uploaded_files_dict[main_drawing] = file_info
-
-                    st.session_state.pairs = create_pair_list(st.session_state.uploaded_files_dict)
-                    added_count = update_master_if_needed(st.session_state.pairs)
-                    st.session_state.added_relationships_count += added_count
-
-                st.success("ファイルを追加し図面ペア・リストを更新しました。")
-                st.rerun()
-
-        st.subheader("Step 3: 差分比較")
+        st.subheader("Step 2: 差分比較")
 
         # オプション設定
         with st.expander("オプション設定", expanded=False):
@@ -1123,7 +1093,7 @@ def app():
 
             # ダウンロードボタン
             if successful_count > 0:
-                st.subheader("Step 4: 差分抽出ファイルのダウンロード")
+                st.subheader("Step 3: 差分抽出ファイルのダウンロード")
 
                 # ダウンロードボタンのラベルを作成
                 download_label = f"ZIPでダウンロード ({successful_count}ファイル"
