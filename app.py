@@ -129,7 +129,7 @@ def update_parent_child_master(master_df, new_pairs):
         exists = mask.any()
 
         if exists:
-            # 既存レコードを更新（Relation, Title, Subtitle, Recorded Date, エンティティ数を上書き）
+            # 既存レコードを更新（Child/Parent/Noteは保持）
             current_date = datetime.now()
 
             # 必要な列が存在しない場合は追加（文字列型として明示）
@@ -153,7 +153,18 @@ def update_parent_child_master(master_df, new_pairs):
                 if col not in updated_df.columns:
                     updated_df[col] = pd.Series(dtype='Int64')  # 整数型（NULLを許容）
 
-            updated_df.loc[mask, 'Relation'] = relation
+            if 'Note' not in updated_df.columns:
+                updated_df['Note'] = pd.Series(dtype='object')
+
+            if relation:
+                prev_relation_series = updated_df.loc[mask, 'Relation']
+                relation_to_set = relation
+                if prev_relation_series.notna().any():
+                    prev_unique = prev_relation_series.dropna().unique()
+                    if len(prev_unique) > 0 and prev_unique[0] != relation:
+                        relation_to_set = f"{relation}-changed"
+                updated_df.loc[mask, 'Relation'] = relation_to_set
+
             updated_df.loc[mask, 'Title'] = title
             updated_df.loc[mask, 'Subtitle'] = subtitle
             updated_df.loc[mask, 'Recorded Date'] = current_date
@@ -545,9 +556,6 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
             unchanged_label_sheets.append({'sheet_name': main_drawing, 'rows': filtered_unchanged})
 
             try:
-                if progress_callback:
-                    progress_callback(index - 1, total_pairs, f"{main_drawing} vs {source_drawing} の比較を準備中")
-
                 # DXF比較処理（図番（新）を基準A、流用元図番（旧）を比較対象B）
                 success, entity_counts = compare_dxf_files_and_generate_dxf(
                     main_file_path,        # 基準ファイルA (新)
@@ -607,7 +615,7 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                     pass
 
             if progress_callback:
-                progress_callback(index, total_pairs, f"{main_drawing} vs {source_drawing} の処理が完了しました")
+                progress_callback(index, total_pairs, f"{main_drawing} vs {source_drawing} 処理完了")
 
         # 親子関係台帳を結果で更新（エンティティ数を含む）
         if master_df is not None:
@@ -647,7 +655,7 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
     del unchanged_label_sheets
     gc.collect()
 
-    return zip_data, results, diff_labels_excel, unchanged_labels_excel
+    return zip_data, results, diff_labels_excel, unchanged_labels_excel, master_df
 
 
 def initialize_session_state():
@@ -1052,7 +1060,7 @@ def app():
                     progress_bar.progress(min(progress, 1.0), text=f"{message}（{current}/{total}組）")
 
                 try:
-                    zip_data, results, diff_labels_excel, unchanged_labels_excel = create_diff_zip(
+                    zip_data, results, diff_labels_excel, unchanged_labels_excel, updated_master = create_diff_zip(
                         st.session_state.pairs,
                         master_df=st.session_state.master_df,
                         master_filename=st.session_state.master_file_name,
@@ -1075,6 +1083,8 @@ def app():
                         'added_color': added_color,
                         'unchanged_color': unchanged_color
                     }
+                    if updated_master is not None:
+                        st.session_state.master_df = updated_master
 
                     # メモリ解放
                     gc.collect()
