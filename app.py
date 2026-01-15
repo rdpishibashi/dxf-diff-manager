@@ -113,6 +113,9 @@ def update_parent_child_master(master_df, new_pairs):
     new_records = []
     updated_df = master_df.copy()
 
+    entity_count_columns = ['Deleted Entities', 'Added Entities', 'Diff Entities',
+                            'Unchanged Entities', 'Total Entities']
+
     for pair in new_pairs:
         parent = pair.get('source_drawing')  # 流用元図番がParent
         child = pair.get('main_drawing')      # 図番がChild
@@ -147,8 +150,6 @@ def update_parent_child_master(master_df, new_pairs):
                     updated_df['Recorded Date'] = None
 
             # エンティティ数カラムを追加（存在しない場合）
-            entity_count_columns = ['Deleted Entities', 'Added Entities', 'Diff Entities',
-                                   'Unchanged Entities', 'Total Entities']
             for col in entity_count_columns:
                 if col not in updated_df.columns:
                     updated_df[col] = pd.Series(dtype='Int64')  # 整数型（NULLを許容）
@@ -195,18 +196,18 @@ def update_parent_child_master(master_df, new_pairs):
                 new_record['Unchanged Entities'] = entity_counts.get('unchanged_entities')
                 new_record['Total Entities'] = entity_counts.get('total_entities')
 
-            # 他のカラムが存在する場合は空値を設定
-            for col in updated_df.columns:
-                if col not in new_record:
-                    new_record[col] = None
-
             new_records.append(new_record)
             added_count += 1
 
     if new_records:
-        # 新しいレコードを追加
-        new_df = pd.DataFrame(new_records)
-        updated_df = pd.concat([updated_df, new_df], ignore_index=True)
+        for record in new_records:
+            for key in record.keys():
+                if key not in updated_df.columns:
+                    if key in entity_count_columns:
+                        updated_df[key] = pd.Series(dtype='Int64')
+                    else:
+                        updated_df[key] = pd.Series(dtype='object')
+            updated_df.loc[len(updated_df)] = record
 
     return updated_df, added_count
 
