@@ -9,6 +9,8 @@ from collections import defaultdict
 import pandas as pd
 from datetime import datetime
 import gc
+import hashlib
+import time
 
 # utils モジュールをインポート可能にするためのパスの追加
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -232,36 +234,52 @@ def extract_drawing_info_from_file(uploaded_file):
         }
     """
     try:
-        # 一時ファイルに保存
+        file_hash = hashlib.sha256(uploaded_file.getbuffer()).hexdigest()
         temp_path = save_uploadedfile(uploaded_file)
 
-        # 図面番号、タイトル、サブタイトルを抽出
-        # 元のファイル名を渡して、図番のファイル名マッチングを正しく行う
-        _, info = extract_labels(
-            temp_path,
-            filter_non_parts=False,
-            sort_order="none",
-            debug=False,
-            selected_layers=None,
-            validate_ref_designators=False,
-            extract_drawing_numbers_option=True,
-            extract_title_option=True,
-            original_filename=uploaded_file.name  # 元のファイル名を渡す
-        )
+        cache = st.session_state.get('drawing_info_cache', {})
+        cached_info = cache.get(file_hash)
+
+        if cached_info:
+            info = dict(cached_info)
+        else:
+            # 図面番号、タイトル、サブタイトルを抽出
+            # 元のファイル名を渡して、図番のファイル名マッチングを正しく行う
+            _, info = extract_labels(
+                temp_path,
+                filter_non_parts=False,
+                sort_order="none",
+                debug=False,
+                selected_layers=None,
+                validate_ref_designators=False,
+                extract_drawing_numbers_option=True,
+                extract_title_option=True,
+                original_filename=uploaded_file.name  # 元のファイル名を渡す
+            )
 
         # 図番が見つからない場合はファイル名を使用
         main_drawing = info.get('main_drawing_number')
         if not main_drawing:
             main_drawing = Path(uploaded_file.name).stem
 
-        return {
+        result = {
             'filename': uploaded_file.name,
             'temp_path': temp_path,
             'main_drawing_number': main_drawing,
             'source_drawing_number': info.get('source_drawing_number'),
             'title': info.get('title'),
-            'subtitle': info.get('subtitle')
+            'subtitle': info.get('subtitle'),
+            'file_hash': file_hash
         }
+
+        if not cached_info:
+            cache[file_hash] = {
+                key: value for key, value in result.items()
+                if key not in ('filename', 'temp_path')
+            }
+            st.session_state.drawing_info_cache = cache
+
+        return result
 
     except Exception as e:
         st.error(f"ファイル {uploaded_file.name} の図番抽出中にエラーが発生しました: {str(e)}")
@@ -355,7 +373,7 @@ def create_revup_pairs(uploaded_files_dict):
     return revup_pairs, used_drawings
 
 
-def create_pair_list(uploaded_files_dict):
+def create_pair_list(uploaded_files_dict, progress_callback=None):
     """
     アップロードされたファイル情報からペアリストを作成
 
@@ -371,17 +389,26 @@ def create_pair_list(uploaded_files_dict):
     """
     pairs = []
 
+    def report_progress(progress, message, count=None, total=None):
+        if progress_callback:
+            progress_callback(progress, message, count, total)
+
+    total_files = len(uploaded_files_dict)
+    report_progress(0.0, "RevUpペアを解析中...", 0, total_files)
+
     # 1. RevUpペアを優先的に作成
     revup_pairs, used_drawings = create_revup_pairs(uploaded_files_dict)
     pairs.extend(revup_pairs)
+    report_progress(0.3, "RevUpペアの解析が完了しました", len(used_drawings), total_files)
 
     # 2. 残りのファイルで流用ペアを作成
     processed_mains = set(used_drawings)  # RevUpペアで使用された図番は除外
+    remaining_drawings = [d for d in uploaded_files_dict.keys() if d not in processed_mains]
+    total_targets = len(remaining_drawings)
+    processed_targets = 0
 
-    for main_drawing, file_info in uploaded_files_dict.items():
-        if main_drawing in processed_mains:
-            continue
-
+    for main_drawing in remaining_drawings:
+        file_info = uploaded_files_dict[main_drawing]
         source_drawing = file_info.get('source_drawing_number')
 
         # 流用元図番がある場合
@@ -400,7 +427,6 @@ def create_pair_list(uploaded_files_dict):
                     'status': 'no_source_defined'
                 }
                 pairs.append(pair)
-                processed_mains.add(main_drawing)
             else:
                 # 流用元図面が存在するか確認
                 source_file_info = uploaded_files_dict.get(source_drawing)
@@ -416,7 +442,6 @@ def create_pair_list(uploaded_files_dict):
                     'subtitle': file_info.get('subtitle')
                 }
                 pairs.append(pair)
-                processed_mains.add(main_drawing)
         else:
             # 流用元図番がない場合もリストに追加（流用元なし）
             pair = {
@@ -430,13 +455,19 @@ def create_pair_list(uploaded_files_dict):
                 'status': 'no_source_defined'
             }
             pairs.append(pair)
-            processed_mains.add(main_drawing)
+
+        processed_targets += 1
+        progress_fraction = 0.3 + 0.7 * (processed_targets / total_targets) if total_targets else 1.0
+        report_progress(min(progress_fraction, 1.0), "流用ペアを作成中...", processed_targets, total_targets)
+
+    final_total = total_targets if total_targets else total_files
+    report_progress(1.0, "図面ペア・リストの作成が完了しました", processed_targets, final_total)
 
     return pairs
 
 
 def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None, deleted_color=None, added_color=None,
-                    unchanged_color=None, prefixes=None):
+                    unchanged_color=None, prefixes=None, progress_callback=None):
     """
     ペアリストに基づいて差分DXFファイルを作成し、ZIPアーカイブを生成
 
@@ -464,174 +495,156 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
 
     results = []
     prefixes = prefixes or []
-    temp_output_files = []
     diff_label_sheets = []
     unchanged_label_sheets = []
-
-    # 完全なペアのみ処理
-    complete_pairs = [p for p in pairs if p['status'] == 'complete']
-
-    for pair in complete_pairs:
-        main_drawing = pair['main_drawing']
-        source_drawing = pair['source_drawing']
-        main_file_path = pair['main_file_info']['temp_path']
-        source_file_path = pair['source_file_info']['temp_path']
-
-        # 出力ファイル名を生成
-        output_filename = f"{main_drawing}_vs_{source_drawing}.dxf"
-
-        # 一時出力ファイルを作成
-        temp_output = tempfile.NamedTemporaryFile(delete=False, suffix=".dxf").name
-        temp_output_files.append(temp_output)
-
-        change_rows = []
-        filtered_unchanged = []
-        change_label_count = 0
-        unchanged_label_count = 0
-
-        try:
-            change_rows, unchanged_entries = compute_label_differences(
-                main_file_path,
-                source_file_path,
-                tolerance=tolerance
-            )
-            filtered_unchanged = filter_unchanged_by_prefix(unchanged_entries, prefixes)
-            change_label_count = len(change_rows)
-            unchanged_label_count = sum(row.get('Count', 0) for row in filtered_unchanged)
-        except Exception as e:
-            st.error(f"ラベル比較中にエラーが発生しました ({main_drawing}): {str(e)}")
-            change_rows = []
-            filtered_unchanged = []
-
-        diff_label_sheets.append({
-            'sheet_name': main_drawing,
-            'rows': change_rows,
-            'old_label_name': f"Old: {source_drawing}",
-            'new_label_name': f"New: {main_drawing}"
-        })
-        unchanged_label_sheets.append({'sheet_name': main_drawing, 'rows': filtered_unchanged})
-
-        try:
-            # DXF比較処理（図番（新）を基準A、流用元図番（旧）を比較対象B）
-            success, entity_counts = compare_dxf_files_and_generate_dxf(
-                main_file_path,        # 基準ファイルA (新)
-                source_file_path,      # 比較対象ファイルB (旧)
-                temp_output,
-                tolerance=tolerance,
-                deleted_color=deleted_color,
-                added_color=added_color,
-                unchanged_color=unchanged_color,
-                offset_b=None
-            )
-
-            if success:
-                # 結果ファイルを読み込み
-                with open(temp_output, 'rb') as f:
-                    dxf_data = f.read()
-
-                results.append({
-                    'pair_name': f"{main_drawing} vs {source_drawing}",
-                    'main_drawing': main_drawing,
-                    'source_drawing': source_drawing,
-                    'output_filename': output_filename,
-                    'dxf_data': dxf_data,
-                    'success': True,
-                    'entity_counts': entity_counts,
-                    'relation': pair.get('relation', 'なし'),
-                    'change_label_count': change_label_count,
-                    'unchanged_label_count': unchanged_label_count
-                })
-            else:
-                results.append({
-                    'pair_name': f"{main_drawing} vs {source_drawing}",
-                    'main_drawing': main_drawing,
-                    'source_drawing': source_drawing,
-                    'output_filename': output_filename,
-                    'dxf_data': None,
-                    'success': False,
-                    'entity_counts': None,
-                    'relation': pair.get('relation', 'なし'),
-                    'change_label_count': change_label_count,
-                    'unchanged_label_count': unchanged_label_count
-                })
-
-        except Exception as e:
-            st.error(f"ペア {main_drawing} vs {source_drawing} の図面作成中にエラーが発生しました: {str(e)}")
-            results.append({
-                'pair_name': f"{main_drawing} vs {source_drawing}",
-                'main_drawing': main_drawing,
-                'source_drawing': source_drawing,
-                'output_filename': output_filename,
-                'dxf_data': None,
-                'success': False,
-                'error': str(e),
-                'relation': pair.get('relation', 'なし'),
-                'entity_counts': None,
-                'change_label_count': change_label_count,
-                'unchanged_label_count': unchanged_label_count
-            })
-
-    # 親子関係台帳を結果で更新（エンティティ数を含む）
-    if master_df is not None:
-        # 結果からペア情報を作成（エンティティ数を含む）
-        pairs_with_entity_counts = []
-        for result in results:
-            if result['success']:
-                # 元のペア情報を取得
-                original_pair = next((p for p in complete_pairs
-                                     if p['main_drawing'] == result['main_drawing']
-                                     and p['source_drawing'] == result['source_drawing']), None)
-
-                if original_pair:
-                    # エンティティ数を追加したペア情報を作成
-                    pair_with_counts = original_pair.copy()
-                    pair_with_counts['entity_counts'] = result['entity_counts']
-                    pairs_with_entity_counts.append(pair_with_counts)
-
-        # 親子関係台帳を更新
-        if pairs_with_entity_counts:
-            master_df, _ = update_parent_child_master(master_df, pairs_with_entity_counts)
-
-    # ZIPアーカイブを作成
+    label_cache = {}
     zip_buffer = BytesIO()
-
-    diff_labels_excel = build_diff_labels_workbook(diff_label_sheets)
-    unchanged_labels_excel = build_unchanged_labels_workbook(unchanged_label_sheets)
+    complete_pairs = [p for p in pairs if p['status'] == 'complete']
+    total_pairs = len(complete_pairs)
 
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-        # 差分DXFファイルを追加
-        for result in results:
-            if result['success'] and result['dxf_data']:
-                zip_file.writestr(result['output_filename'], result['dxf_data'])
 
-        # ラベル比較ファイルを追加
+        for index, pair in enumerate(complete_pairs, start=1):
+            main_drawing = pair['main_drawing']
+            source_drawing = pair['source_drawing']
+            main_file_path = pair['main_file_info']['temp_path']
+            source_file_path = pair['source_file_info']['temp_path']
+
+            # 出力ファイル名を生成
+            output_filename = f"{main_drawing}_vs_{source_drawing}.dxf"
+
+            # 一時出力ファイルを作成
+            temp_output = tempfile.NamedTemporaryFile(delete=False, suffix=".dxf").name
+
+            change_rows = []
+            filtered_unchanged = []
+            change_label_count = 0
+            unchanged_label_count = 0
+
+            try:
+                change_rows, unchanged_entries = compute_label_differences(
+                    main_file_path,
+                    source_file_path,
+                    tolerance=tolerance,
+                    label_cache=label_cache
+                )
+                filtered_unchanged = filter_unchanged_by_prefix(unchanged_entries, prefixes)
+                change_label_count = len(change_rows)
+                unchanged_label_count = sum(row.get('Count', 0) for row in filtered_unchanged)
+            except Exception as e:
+                st.error(f"ラベル比較中にエラーが発生しました ({main_drawing}): {str(e)}")
+                change_rows = []
+                filtered_unchanged = []
+
+            diff_label_sheets.append({
+                'sheet_name': main_drawing,
+                'rows': change_rows,
+                'old_label_name': f"Old: {source_drawing}",
+                'new_label_name': f"New: {main_drawing}"
+            })
+            unchanged_label_sheets.append({'sheet_name': main_drawing, 'rows': filtered_unchanged})
+
+            try:
+                if progress_callback:
+                    progress_callback(index - 1, total_pairs, f"{main_drawing} vs {source_drawing} の比較を準備中")
+
+                # DXF比較処理（図番（新）を基準A、流用元図番（旧）を比較対象B）
+                success, entity_counts = compare_dxf_files_and_generate_dxf(
+                    main_file_path,        # 基準ファイルA (新)
+                    source_file_path,      # 比較対象ファイルB (旧)
+                    temp_output,
+                    tolerance=tolerance,
+                    deleted_color=deleted_color,
+                    added_color=added_color,
+                    unchanged_color=unchanged_color,
+                    offset_b=None
+                )
+
+                if success:
+                    zip_file.write(temp_output, arcname=output_filename)
+                    results.append({
+                        'pair_name': f"{main_drawing} vs {source_drawing}",
+                        'main_drawing': main_drawing,
+                        'source_drawing': source_drawing,
+                        'output_filename': output_filename,
+                        'success': True,
+                        'entity_counts': entity_counts,
+                        'relation': pair.get('relation', 'なし'),
+                        'change_label_count': change_label_count,
+                        'unchanged_label_count': unchanged_label_count
+                    })
+                else:
+                    results.append({
+                        'pair_name': f"{main_drawing} vs {source_drawing}",
+                        'main_drawing': main_drawing,
+                        'source_drawing': source_drawing,
+                        'output_filename': output_filename,
+                        'success': False,
+                        'entity_counts': None,
+                        'relation': pair.get('relation', 'なし'),
+                        'change_label_count': change_label_count,
+                        'unchanged_label_count': unchanged_label_count
+                    })
+
+            except Exception as e:
+                st.error(f"ペア {main_drawing} vs {source_drawing} の図面作成中にエラーが発生しました: {str(e)}")
+                results.append({
+                    'pair_name': f"{main_drawing} vs {source_drawing}",
+                    'main_drawing': main_drawing,
+                    'source_drawing': source_drawing,
+                    'output_filename': output_filename,
+                    'success': False,
+                    'error': str(e),
+                    'relation': pair.get('relation', 'なし'),
+                    'entity_counts': None,
+                    'change_label_count': change_label_count,
+                    'unchanged_label_count': unchanged_label_count
+                })
+            finally:
+                try:
+                    os.unlink(temp_output)
+                except:
+                    pass
+
+            if progress_callback:
+                progress_callback(index, total_pairs, f"{main_drawing} vs {source_drawing} の処理が完了しました")
+
+        # 親子関係台帳を結果で更新（エンティティ数を含む）
+        if master_df is not None:
+            pairs_with_entity_counts = []
+            for result in results:
+                if result['success']:
+                    original_pair = next((p for p in complete_pairs
+                                         if p['main_drawing'] == result['main_drawing']
+                                         and p['source_drawing'] == result['source_drawing']), None)
+
+                    if original_pair:
+                        pair_with_counts = original_pair.copy()
+                        pair_with_counts['entity_counts'] = result['entity_counts']
+                        pairs_with_entity_counts.append(pair_with_counts)
+
+            if pairs_with_entity_counts:
+                master_df, _ = update_parent_child_master(master_df, pairs_with_entity_counts)
+
+        diff_labels_excel = build_diff_labels_workbook(diff_label_sheets)
+        unchanged_labels_excel = build_unchanged_labels_workbook(unchanged_label_sheets)
+
         if diff_labels_excel:
             zip_file.writestr(DIFF_LABELS_FILENAME, diff_labels_excel)
         if unchanged_labels_excel:
             zip_file.writestr(UNCHANGED_LABELS_FILENAME, unchanged_labels_excel)
 
-        # 親子関係台帳ファイルを追加（存在する場合）
         if master_df is not None:
             master_excel_data = save_master_to_bytes(master_df)
-            # アップロードされたファイル名を使用、なければデフォルト名を使用
             output_master_filename = master_filename if master_filename else diff_config.MASTER_FILENAME
             zip_file.writestr(output_master_filename, master_excel_data)
 
     zip_buffer.seek(0)
     zip_data = zip_buffer.getvalue()
 
-    # 一時ファイルの削除
-    for temp_file in temp_output_files:
-        try:
-            os.unlink(temp_file)
-        except:
-            pass
-
     # メモリ解放: 大きなデータ構造を削除
-    del temp_output_files
     del diff_label_sheets
     del unchanged_label_sheets
-    # ガベージコレクションを実行
     gc.collect()
 
     return zip_data, results, diff_labels_excel, unchanged_labels_excel
@@ -645,6 +658,9 @@ def initialize_session_state():
     if 'pairs' not in st.session_state:
         st.session_state.pairs = []
 
+    if 'pairs_dirty' not in st.session_state:
+        st.session_state.pairs_dirty = False
+
     if 'master_df' not in st.session_state:
         st.session_state.master_df = None
 
@@ -657,48 +673,20 @@ def initialize_session_state():
     if 'uploader_key' not in st.session_state:
         st.session_state.uploader_key = 0
 
+    if 'drawing_upload_key' not in st.session_state:
+        st.session_state.drawing_upload_key = 0
+
+    if 'last_upload_failures' not in st.session_state:
+        st.session_state.last_upload_failures = []
+
+    if 'last_upload_summary' not in st.session_state:
+        st.session_state.last_upload_summary = None
+
     if 'prefix_text_input' not in st.session_state:
         st.session_state.prefix_text_input = "\n".join(DEFAULT_PREFIXES)
 
-
-def render_custom_styles():
-    """カスタムCSSスタイルを適用"""
-    st.markdown(f"""
-        <style>
-        .stButton > button {{
-            background-color: {ui_config.PRIMARY_COLOR};
-            color: white;
-            border: 1px solid {ui_config.PRIMARY_COLOR};
-        }}
-        .stButton > button:hover {{
-            background-color: {ui_config.HOVER_COLOR};
-            color: white;
-            border: 1px solid {ui_config.HOVER_COLOR};
-        }}
-        .stButton > button:focus {{
-            background-color: {ui_config.PRIMARY_COLOR};
-            color: white;
-            border: 1px solid {ui_config.PRIMARY_COLOR};
-            box-shadow: 0 0 0 0.2rem {ui_config.FOCUS_SHADOW_COLOR};
-        }}
-        .stDownloadButton > button {{
-            background-color: {ui_config.PRIMARY_COLOR};
-            color: white;
-            border: 1px solid {ui_config.PRIMARY_COLOR};
-        }}
-        .stDownloadButton > button:hover {{
-            background-color: {ui_config.HOVER_COLOR};
-            color: white;
-            border: 1px solid {ui_config.HOVER_COLOR};
-        }}
-        .stDownloadButton > button:focus {{
-            background-color: {ui_config.PRIMARY_COLOR};
-            color: white;
-            border: 1px solid {ui_config.PRIMARY_COLOR};
-            box-shadow: 0 0 0 0.2rem {ui_config.FOCUS_SHADOW_COLOR};
-        }}
-        </style>
-    """, unsafe_allow_html=True)
+    if 'drawing_info_cache' not in st.session_state:
+        st.session_state.drawing_info_cache = {}
 
 
 def update_master_if_needed(pairs):
@@ -757,8 +745,6 @@ def render_pair_list():
 
     # 比較元の旧図面が不足しているペア
     if missing_pairs:
-        st.warning(f"⚠️ 比較元の旧図面がないペア: {len(missing_pairs)}組")
-
         missing_data = []
         missing_drawings = []
         for pair in missing_pairs:
@@ -768,15 +754,18 @@ def render_pair_list():
                 '関係': pair.get('relation', 'なし'),
                 'ステータス': '⚠️ 比較元図面なし'
             })
-            missing_drawings.append(pair['source_drawing'])
+            if pair['source_drawing']:
+                missing_drawings.append(pair['source_drawing'])
 
-        st.dataframe(missing_data, width='stretch', hide_index=True)
-        st.info(f"不足している図面: {', '.join(missing_drawings)}")
+        with st.expander("比較元の旧図面がないペア", expanded=False):
+            st.dataframe(missing_data, width='stretch', hide_index=True)
+
+        if missing_drawings:
+            with st.expander("不足している図面", expanded=False):
+                st.write(", ".join(missing_drawings))
 
     # 流用元図番が指定されていないペア
     if no_source_pairs:
-        st.info(f"流用元図番の記載がない図面: {len(no_source_pairs)}件（比較対象外）")
-
         no_source_data = []
         for pair in no_source_pairs:
             no_source_data.append({
@@ -785,7 +774,7 @@ def render_pair_list():
                 'ステータス': '⚠️ 流用元図番の未記入'
             })
 
-        with st.expander("詳細を表示"):
+        with st.expander("流用元図番の記載がない図面（比較対象外）", expanded=False):
             st.dataframe(no_source_data, width='stretch', hide_index=True)
 
     # 親子関係台帳更新状況の表示
@@ -821,7 +810,6 @@ def app():
     st.title(ui_config.TITLE)
     st.write(ui_config.SUBTITLE)
 
-    render_custom_styles()
     render_help_section()
     initialize_session_state()
 
@@ -860,32 +848,114 @@ def app():
     # ファイルアップロード
     st.subheader("Step 1: DXFファイルのアップロード")
 
-    col1, col2 = st.columns([3, 1])
-
-    with col1:
+    with st.container():
         uploaded_files = st.file_uploader(
             "DXFファイルをアップロードしてください（複数可・フォルダ可・複数回可）",
             type=ui_config.DXF_FILE_TYPES,
             accept_multiple_files=True,
-            key=f"initial_upload_{st.session_state.uploader_key}",
-            help="ファイルを追加するたびに「図番を抽出」ボタンを押すとペアが識別されます"
+            key=f"initial_upload_{st.session_state.drawing_upload_key}",
+            help="ファイルを追加するたびに「図番を抽出」ボタンを押すと図番情報が蓄積されます"
         )
 
-    with col2:
         process_button = st.button("図番を抽出", key="process_files", type="primary")
 
+    upload_summary = st.session_state.get('last_upload_summary')
+    if upload_summary:
+        processed = upload_summary.get('processed', 0)
+        failed = upload_summary.get('failed', 0)
+        elapsed = upload_summary.get('elapsed', 0.0)
+        if processed > 0:
+            st.success(f"直近の図番抽出: {processed}件（経過 {elapsed:.1f} 秒, 失敗 {failed}件）")
+        elif failed > 0:
+            st.warning(f"直近の図番抽出は失敗しました（経過 {elapsed:.1f} 秒）")
+
+    if st.session_state.get('last_upload_failures'):
+        with st.expander("アップロードできなかったファイル", expanded=False):
+            for name in st.session_state.last_upload_failures:
+                st.write(f"- {name}")
+
     # ファイル処理
-    if process_button and uploaded_files:
-        with st.spinner(f'{len(uploaded_files)}個のファイルから図番を抽出中...'):
-            for uploaded_file in uploaded_files:
+    if process_button:
+        if not uploaded_files:
+            st.warning("DXFファイルを選択してから「図番を抽出」を押してください。")
+        else:
+            total_files = len(uploaded_files)
+            processed_count = 0
+            failed_files = []
+            start_time = time.time()
+            progress_placeholder = st.empty()
+            progress_bar = progress_placeholder.progress(0.0, text="図番を抽出中...")
+
+            for idx, uploaded_file in enumerate(uploaded_files, start=1):
                 file_info = extract_drawing_info_from_file(uploaded_file)
                 if file_info:
                     main_drawing = file_info['main_drawing_number']
                     # 既存の図番の場合は上書き
                     st.session_state.uploaded_files_dict[main_drawing] = file_info
+                    processed_count += 1
+                else:
+                    failed_files.append(uploaded_file.name)
 
-            # ペアリストを作成
-            st.session_state.pairs = create_pair_list(st.session_state.uploaded_files_dict)
+                elapsed = time.time() - start_time
+                progress = idx / total_files if total_files else 1.0
+                progress_bar.progress(
+                    min(progress, 1.0),
+                    text=f"{idx}/{total_files}件の図番を抽出中...（経過 {elapsed:.1f} 秒）"
+                )
+
+            progress_placeholder.empty()
+
+            if processed_count > 0:
+                st.session_state.pairs_dirty = True
+            st.session_state.drawing_upload_key += 1
+            st.session_state.last_upload_failures = failed_files
+            st.session_state.last_upload_summary = {
+                'processed': processed_count,
+                'failed': len(failed_files),
+                'elapsed': time.time() - start_time
+            }
+
+            # メモリ解放
+            gc.collect()
+
+            st.rerun()
+
+    st.divider()
+
+    # 図面ペア・リスト作成
+    st.subheader("Step 2: 図面ペア・リスト作成")
+    uploaded_file_count = len(st.session_state.uploaded_files_dict)
+    st.write(f"アップロード済みDXFファイル: {uploaded_file_count}件")
+
+    pair_button = st.button(
+        "図面ペア・リスト作成",
+        key="generate_pairs",
+        type="primary",
+        disabled=uploaded_file_count == 0
+    )
+
+    if uploaded_file_count == 0:
+        st.info("DXFファイルをアップロードして図番を抽出すると、ここでペアリストを作成できます。")
+
+    if pair_button:
+        pairing_start = time.time()
+        progress_placeholder = st.empty()
+        progress_bar = progress_placeholder.progress(0.0, text="図面ペア・リスト作成を開始...")
+
+        def pairing_progress(progress, message, count, total):
+            elapsed = time.time() - pairing_start
+            text = message
+            if total and count is not None:
+                text += f" {count}/{total}件"
+            text += f"（経過 {elapsed:.1f} 秒）"
+            progress_bar.progress(min(max(progress, 0.0), 1.0), text=text)
+
+        try:
+            st.session_state.pairs = create_pair_list(
+                st.session_state.uploaded_files_dict,
+                progress_callback=pairing_progress
+            )
+            st.session_state.pairs_dirty = False
 
             # 親子関係台帳を更新
             added_count = update_master_if_needed(st.session_state.pairs)
@@ -893,17 +963,26 @@ def app():
 
             # メモリ解放
             gc.collect()
-
-        st.success(f"{len(st.session_state.uploaded_files_dict)}個のファイルから図番を抽出しました")
-        st.rerun()
+        finally:
+            progress_placeholder.empty()
 
     complete_pairs = []
     missing_pairs = []
+    pairs_available = bool(st.session_state.pairs)
+    pairs_ready = pairs_available and not st.session_state.get('pairs_dirty', False)
 
-    if st.session_state.pairs:
-        complete_pairs, missing_pairs = render_pair_list()
+    if pairs_available:
+        if pairs_ready:
+            complete_pairs, missing_pairs = render_pair_list()
+        else:
+            st.warning("新しいDXFファイルが追加されています。「図面ペア・リスト作成」を実行して最新のペアを生成してください。")
+    else:
+        if uploaded_file_count > 0:
+            st.info("DXFファイルの図番抽出が完了したら「図面ペア・リスト作成」を押してください。")
 
-        st.subheader("Step 2: 差分比較")
+    st.subheader("Step 3: 差分比較")
+
+    if pairs_ready:
 
         # オプション設定
         with st.expander("オプション設定", expanded=False):
@@ -964,38 +1043,47 @@ def app():
             st.info(f"差分抽出可能なペア: {len(complete_pairs)}組")
 
             if st.button("差分抽出開始", key="start_comparison", type="primary", disabled=len(complete_pairs) == 0):
-                with st.spinner(f'{len(complete_pairs)}組のペアの差分を抽出中...'):
-                    try:
-                        zip_data, results, diff_labels_excel, unchanged_labels_excel = create_diff_zip(
-                            st.session_state.pairs,
-                            master_df=st.session_state.master_df,  # 親子関係台帳を渡す
-                            master_filename=st.session_state.master_file_name,  # アップロードされたファイル名を渡す
-                            tolerance=tolerance,
-                            deleted_color=deleted_color,
-                            added_color=added_color,
-                            unchanged_color=unchanged_color,
-                            prefixes=prefix_list
-                        )
+                total_pairs = len(complete_pairs)
+                progress_placeholder = st.empty()
+                progress_bar = progress_placeholder.progress(0.0, text="差分抽出を開始しています...")
 
-                        # セッション状態に保存
-                        st.session_state.zip_data = zip_data
-                        st.session_state.results = results
-                        st.session_state.diff_labels_excel_data = diff_labels_excel
-                        st.session_state.unchanged_labels_excel_data = unchanged_labels_excel
-                        st.session_state.processing_settings = {
-                            'tolerance': tolerance,
-                            'deleted_color': deleted_color,
-                            'added_color': added_color,
-                            'unchanged_color': unchanged_color
-                        }
+                def diff_progress(current, total, message):
+                    progress = current / total if total else 1.0
+                    progress_bar.progress(min(progress, 1.0), text=f"{message}（{current}/{total}組）")
 
-                        # メモリ解放
-                        gc.collect()
+                try:
+                    zip_data, results, diff_labels_excel, unchanged_labels_excel = create_diff_zip(
+                        st.session_state.pairs,
+                        master_df=st.session_state.master_df,
+                        master_filename=st.session_state.master_file_name,
+                        tolerance=tolerance,
+                        deleted_color=deleted_color,
+                        added_color=added_color,
+                        unchanged_color=unchanged_color,
+                        prefixes=prefix_list,
+                        progress_callback=diff_progress
+                    )
 
-                    except Exception as e:
-                        handle_error(e)
-                        # エラー時もメモリ解放
-                        gc.collect()
+                    # セッション状態に保存
+                    st.session_state.zip_data = zip_data
+                    st.session_state.results = results
+                    st.session_state.diff_labels_excel_data = diff_labels_excel
+                    st.session_state.unchanged_labels_excel_data = unchanged_labels_excel
+                    st.session_state.processing_settings = {
+                        'tolerance': tolerance,
+                        'deleted_color': deleted_color,
+                        'added_color': added_color,
+                        'unchanged_color': unchanged_color
+                    }
+
+                    # メモリ解放
+                    gc.collect()
+
+                except Exception as e:
+                    handle_error(e)
+                    gc.collect()
+                finally:
+                    progress_placeholder.empty()
         else:
             st.warning("比較対象となる旧図面がありません。旧図面をアップロードしてください。")
 
@@ -1093,7 +1181,7 @@ def app():
 
             # ダウンロードボタン
             if successful_count > 0:
-                st.subheader("Step 3: 差分抽出ファイルのダウンロード")
+                st.subheader("Step 4: 差分抽出ファイルのダウンロード")
 
                 # ダウンロードボタンのラベルを作成
                 download_label = f"ZIPでダウンロード ({successful_count}ファイル"
@@ -1128,7 +1216,10 @@ def app():
                 cleanup_temp_files()
 
                 # セッション状態をクリア
-                for key in ['uploaded_files_dict', 'pairs', 'results', 'zip_data', 'processing_settings',
+                for key in ['uploaded_files_dict', 'pairs', 'pairs_dirty', 'drawing_upload_key',
+                            'drawing_info_cache',
+                            'last_upload_failures', 'last_upload_summary',
+                            'results', 'zip_data', 'processing_settings',
                             'master_df', 'master_file_name', 'added_relationships_count',
                             'diff_labels_excel_data', 'unchanged_labels_excel_data']:
                     if key in st.session_state:
@@ -1143,7 +1234,12 @@ def app():
                 st.rerun()
 
     else:
-        st.info("DXFファイルをアップロードして「図番を抽出」ボタンをクリックしてください。")
+        if not st.session_state.uploaded_files_dict:
+            st.info("DXFファイルをアップロードし「図番を抽出」→「図面ペア・リスト作成」の順に実行してください。")
+        elif not pairs_available:
+            st.info("「図面ペア・リスト作成」を実行すると差分比較を開始できます。")
+        else:
+            st.warning("最新ファイルを反映したペアリストを作成してください。")
 
 
 if __name__ == "__main__":

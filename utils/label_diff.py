@@ -7,11 +7,26 @@ diff_labels.xlsx / unchanged_labels.xlsx をアプリ内で生成する。
 
 import io
 from collections import Counter
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 
 import pandas as pd
 
 from .extract_labels import extract_labels
+def _load_labels_with_cache(file_path: str, label_cache: Optional[dict]):
+    """キャッシュを利用してラベルを読み込む。"""
+    cache_key = (file_path, True)  # True: include_coordinates を示す
+    if label_cache is not None and cache_key in label_cache:
+        return label_cache[cache_key]
+
+    labels, _ = extract_labels(
+        file_path,
+        filter_non_parts=False,
+        sort_order="none",
+        include_coordinates=True
+    )
+    if label_cache is not None:
+        label_cache[cache_key] = labels
+    return labels
 
 
 def round_coordinate(value: float, tolerance: float) -> float:
@@ -40,7 +55,7 @@ def group_labels_by_coordinate(rounded_labels: List[Tuple[str, float, float]]):
     return groups
 
 
-def compute_label_differences(new_file: str, old_file: str, tolerance: float = 0.01):
+def compute_label_differences(new_file: str, old_file: str, tolerance: float = 0.01, label_cache: Optional[dict] = None):
     """
     ラベルを抽出（ブロック展開を含む）し、変更候補・未変更候補を計算する。
 
@@ -50,18 +65,8 @@ def compute_label_differences(new_file: str, old_file: str, tolerance: float = 0
         change_rows: 変更候補（座標と旧/新ラベルを含む辞書のリスト）
         unchanged_entries: 同一座標で一致したラベル情報のリスト
     """
-    labels_new, _ = extract_labels(
-        new_file,
-        filter_non_parts=False,
-        sort_order="none",
-        include_coordinates=True
-    )
-    labels_old, _ = extract_labels(
-        old_file,
-        filter_non_parts=False,
-        sort_order="none",
-        include_coordinates=True
-    )
+    labels_new = _load_labels_with_cache(new_file, label_cache)
+    labels_old = _load_labels_with_cache(old_file, label_cache)
 
     rounded_new = round_labels_with_coordinates(labels_new, tolerance)
     rounded_old = round_labels_with_coordinates(labels_old, tolerance)

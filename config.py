@@ -8,11 +8,6 @@ DXF Diff Manager - 設定ファイル
 class UIConfig:
     """UI関連の設定"""
 
-    # カラー設定
-    PRIMARY_COLOR = "#0066cc"      # 青色（ボタンの主色）
-    HOVER_COLOR = "#0052a3"        # ホバー時の色（濃い青）
-    FOCUS_SHADOW_COLOR = "rgba(0, 102, 204, 0.5)"  # フォーカス時の影
-
     # ファイルアップロード設定
     MASTER_FILE_TYPES = ["xlsx"]   # 親子関係台帳ファイルの拡張子
     DXF_FILE_TYPES = ["dxf"]       # DXFファイルの拡張子
