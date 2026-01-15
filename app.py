@@ -557,6 +557,9 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
             unchanged_label_sheets.append({'sheet_name': main_drawing, 'rows': filtered_unchanged})
 
             try:
+                if progress_callback:
+                    progress_callback(index - 1, total_pairs, f"{main_drawing} vs {source_drawing} 処理中")
+
                 # DXF比較処理（図番（新）を基準A、流用元図番（旧）を比較対象B）
                 success, entity_counts = compare_dxf_files_and_generate_dxf(
                     main_file_path,        # 基準ファイルA (新)
