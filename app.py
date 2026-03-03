@@ -56,14 +56,15 @@ def cleanup_temp_files():
     """
     セッション状態に保存された一時ファイルをクリーンアップする
     """
-    if 'uploaded_files_dict' in st.session_state:
-        for drawing_number, file_info in st.session_state.uploaded_files_dict.items():
-            temp_path = file_info.get('temp_path')
-            if temp_path and os.path.exists(temp_path):
-                try:
-                    os.unlink(temp_path)
-                except Exception:
-                    pass  # エラーは無視
+    for dict_key in ('source_files_dict', 'dest_files_dict'):
+        if dict_key in st.session_state:
+            for drawing_number, file_info in st.session_state[dict_key].items():
+                temp_path = file_info.get('temp_path')
+                if temp_path and os.path.exists(temp_path):
+                    try:
+                        os.unlink(temp_path)
+                    except Exception:
+                        pass  # エラーは無視
 
 
 def get_prefix_list_from_state():
@@ -238,12 +239,7 @@ def extract_drawing_info_from_file(uploaded_file):
         uploaded_file: アップロードファイル・オブジェクト
 
     Returns:
-        dict: {
-            'filename': str,
-            'temp_path': str,
-            'main_drawing_number': str or None,
-            'source_drawing_number': str or None
-        }
+        dict or None
     """
     try:
         file_hash = hashlib.sha256(uploaded_file.getbuffer()).hexdigest()
@@ -255,8 +251,6 @@ def extract_drawing_info_from_file(uploaded_file):
         if cached_info:
             info = dict(cached_info)
         else:
-            # 図面番号、タイトル、サブタイトルを抽出
-            # 元のファイル名を渡して、図番のファイル名マッチングを正しく行う
             _, info = extract_labels(
                 temp_path,
                 filter_non_parts=False,
@@ -266,10 +260,9 @@ def extract_drawing_info_from_file(uploaded_file):
                 validate_ref_designators=False,
                 extract_drawing_numbers_option=True,
                 extract_title_option=True,
-                original_filename=uploaded_file.name  # 元のファイル名を渡す
+                original_filename=uploaded_file.name
             )
 
-        # 図番が見つからない場合はファイル名を使用
         main_drawing = info.get('main_drawing_number')
         if not main_drawing:
             main_drawing = Path(uploaded_file.name).stem
@@ -329,72 +322,82 @@ def extract_base_drawing_number(drawing_number):
     return None, None
 
 
-def create_revup_pairs(uploaded_files_dict):
+def create_revup_pairs(source_files_dict, dest_files_dict):
     """
     RevUpペア（Revision識別子のみ異なる同一図面のペア）を作成
+    流用元（source）と流用先（dest）の間でのみマッチングする
 
     Args:
-        uploaded_files_dict: 図番をキーとしたファイル情報の辞書
+        source_files_dict: 流用元（旧）の図番をキーとしたファイル情報の辞書
+        dest_files_dict: 流用先（新）の図番をキーとしたファイル情報の辞書
 
     Returns:
-        tuple: (RevUpペアのリスト, 使用された図番のセット)
+        tuple: (RevUpペアのリスト, 使用された流用元図番のセット, 使用された流用先図番のセット)
     """
-    # ベース図番ごとにグループ化
-    base_groups = defaultdict(list)
-
-    for drawing_number in uploaded_files_dict.keys():
+    # 流用元のベース図番マップを作成
+    source_base_map = defaultdict(list)
+    for drawing_number in source_files_dict.keys():
         base, revision = extract_base_drawing_number(drawing_number)
         if base and revision:
-            base_groups[base].append((drawing_number, revision))
+            source_base_map[base].append((drawing_number, revision))
+
+    # 流用先のベース図番マップを作成
+    dest_base_map = defaultdict(list)
+    for drawing_number in dest_files_dict.keys():
+        base, revision = extract_base_drawing_number(drawing_number)
+        if base and revision:
+            dest_base_map[base].append((drawing_number, revision))
 
     revup_pairs = []
-    used_drawings = set()
+    used_source = set()
+    used_dest = set()
 
-    # 各グループでペアを作成
-    for base, drawings_with_rev in base_groups.items():
-        # 2つ以上ある場合のみペアを作成
-        if len(drawings_with_rev) < 2:
-            continue
+    # 共通のベース図番でペアを作成（流用元×流用先）
+    common_bases = set(source_base_map.keys()) & set(dest_base_map.keys())
 
-        # Revision識別子でソート（アルファベット順）
-        sorted_drawings = sorted(drawings_with_rev, key=lambda x: x[1])
+    for base in common_bases:
+        source_drawings = sorted(source_base_map[base], key=lambda x: x[1])
+        dest_drawings = sorted(dest_base_map[base], key=lambda x: x[1])
 
-        # 2つずつペアを作成
-        for i in range(0, len(sorted_drawings) - 1, 2):
-            old_drawing, old_rev = sorted_drawings[i]
-            new_drawing, new_rev = sorted_drawings[i + 1]
+        # 流用元（旧リビジョン）と流用先（新リビジョン）をマッチング
+        # 流用元のリビジョンが流用先より小さいものをペアにする
+        for old_drawing, old_rev in source_drawings:
+            for new_drawing, new_rev in dest_drawings:
+                if new_rev > old_rev and new_drawing not in used_dest and old_drawing not in used_source:
+                    old_file_info = source_files_dict[old_drawing]
+                    new_file_info = dest_files_dict[new_drawing]
 
-            old_file_info = uploaded_files_dict[old_drawing]
-            new_file_info = uploaded_files_dict[new_drawing]
+                    pair = {
+                        'main_drawing': new_drawing,
+                        'source_drawing': old_drawing,
+                        'main_file_info': new_file_info,
+                        'source_file_info': old_file_info,
+                        'status': 'complete',
+                        'relation': 'RevUp',
+                        'title': new_file_info.get('title'),
+                        'subtitle': new_file_info.get('subtitle')
+                    }
 
-            pair = {
-                'main_drawing': new_drawing,
-                'source_drawing': old_drawing,
-                'main_file_info': new_file_info,
-                'source_file_info': old_file_info,
-                'status': 'complete',
-                'relation': 'RevUp',
-                'title': new_file_info.get('title'),
-                'subtitle': new_file_info.get('subtitle')
-            }
+                    revup_pairs.append(pair)
+                    used_source.add(old_drawing)
+                    used_dest.add(new_drawing)
+                    break  # この流用元は使用済み
 
-            revup_pairs.append(pair)
-            used_drawings.add(old_drawing)
-            used_drawings.add(new_drawing)
-
-    return revup_pairs, used_drawings
+    return revup_pairs, used_source, used_dest
 
 
-def create_pair_list(uploaded_files_dict, progress_callback=None):
+def create_pair_list(source_files_dict, dest_files_dict, progress_callback=None):
     """
-    アップロードされたファイル情報からペアリストを作成
+    流用元と流用先のファイル情報からペアリストを作成
+    ペアリングは流用元と流用先の間でのみ行う（同一グループ内ではペアリングしない）
 
     優先順位:
-    1. RevUpペア（Revision識別子のみ異なる同一図面）
-    2. 流用ペア（図番と流用元図番）
+    1. RevUpペア（Revision識別子のみ異なる同一図面、流用元×流用先）
+    2. 流用ペア（流用先の流用元図番が流用元グループに存在するか）
 
     Args:
-        uploaded_files_dict: 図番をキーとしたファイル情報の辞書
+        source_files_dict: 流用元（旧）の図番をキーとしたファイル情報の辞書
+        dest_files_dict: 流用先（新）の図番をキーとしたファイル情報の辞書
 
     Returns:
         list: ペア情報のリスト
@@ -405,29 +408,27 @@ def create_pair_list(uploaded_files_dict, progress_callback=None):
         if progress_callback:
             progress_callback(progress, message, count, total)
 
-    total_files = len(uploaded_files_dict)
+    total_files = len(source_files_dict) + len(dest_files_dict)
     report_progress(0.0, "RevUpペアを解析中...", 0, total_files)
 
-    # 1. RevUpペアを優先的に作成
-    revup_pairs, used_drawings = create_revup_pairs(uploaded_files_dict)
+    # 1. RevUpペアを優先的に作成（流用元×流用先の間でのみ）
+    revup_pairs, used_source, used_dest = create_revup_pairs(source_files_dict, dest_files_dict)
     pairs.extend(revup_pairs)
-    report_progress(0.3, "RevUpペアの解析が完了しました", len(used_drawings), total_files)
+    report_progress(0.3, "RevUpペアの解析が完了しました", len(used_source) + len(used_dest), total_files)
 
-    # 2. 残りのファイルで流用ペアを作成
-    processed_mains = set(used_drawings)  # RevUpペアで使用された図番は除外
-    remaining_drawings = [d for d in uploaded_files_dict.keys() if d not in processed_mains]
-    total_targets = len(remaining_drawings)
+    # 2. 残りの流用先ファイルで流用ペアを作成（流用元グループから検索）
+    remaining_dest = [d for d in dest_files_dict.keys() if d not in used_dest]
+    total_targets = len(remaining_dest)
     processed_targets = 0
 
-    for main_drawing in remaining_drawings:
-        file_info = uploaded_files_dict[main_drawing]
+    for main_drawing in remaining_dest:
+        file_info = dest_files_dict[main_drawing]
         source_drawing = file_info.get('source_drawing_number')
 
         # 流用元図番がある場合
         if source_drawing:
             # 流用元図番が図番自身と同じ場合はスキップ（無効なペア）
             if source_drawing == main_drawing:
-                # 流用元図番がないものとして扱う
                 pair = {
                     'main_drawing': main_drawing,
                     'source_drawing': None,
@@ -435,13 +436,13 @@ def create_pair_list(uploaded_files_dict, progress_callback=None):
                     'source_file_info': None,
                     'title': file_info.get('title'),
                     'subtitle': file_info.get('subtitle'),
-                    'relation': None,  # 関係なし
+                    'relation': None,
                     'status': 'no_source_defined'
                 }
                 pairs.append(pair)
             else:
-                # 流用元図面が存在するか確認
-                source_file_info = uploaded_files_dict.get(source_drawing)
+                # 流用元グループからのみ検索
+                source_file_info = source_files_dict.get(source_drawing)
 
                 pair = {
                     'main_drawing': main_drawing,
@@ -463,7 +464,7 @@ def create_pair_list(uploaded_files_dict, progress_callback=None):
                 'source_file_info': None,
                 'title': file_info.get('title'),
                 'subtitle': file_info.get('subtitle'),
-                'relation': None,  # 関係なし
+                'relation': None,
                 'status': 'no_source_defined'
             }
             pairs.append(pair)
@@ -664,8 +665,11 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
 
 def initialize_session_state():
     """セッション状態を初期化"""
-    if 'uploaded_files_dict' not in st.session_state:
-        st.session_state.uploaded_files_dict = {}
+    if 'source_files_dict' not in st.session_state:
+        st.session_state.source_files_dict = {}
+
+    if 'dest_files_dict' not in st.session_state:
+        st.session_state.dest_files_dict = {}
 
     if 'pairs' not in st.session_state:
         st.session_state.pairs = []
@@ -685,14 +689,23 @@ def initialize_session_state():
     if 'uploader_key' not in st.session_state:
         st.session_state.uploader_key = 0
 
-    if 'drawing_upload_key' not in st.session_state:
-        st.session_state.drawing_upload_key = 0
+    if 'source_upload_key' not in st.session_state:
+        st.session_state.source_upload_key = 0
 
-    if 'last_upload_failures' not in st.session_state:
-        st.session_state.last_upload_failures = []
+    if 'dest_upload_key' not in st.session_state:
+        st.session_state.dest_upload_key = 0
 
-    if 'last_upload_summary' not in st.session_state:
-        st.session_state.last_upload_summary = None
+    if 'source_upload_failures' not in st.session_state:
+        st.session_state.source_upload_failures = []
+
+    if 'dest_upload_failures' not in st.session_state:
+        st.session_state.dest_upload_failures = []
+
+    if 'source_upload_summary' not in st.session_state:
+        st.session_state.source_upload_summary = None
+
+    if 'dest_upload_summary' not in st.session_state:
+        st.session_state.dest_upload_summary = None
 
     if 'prefix_text_input' not in st.session_state:
         st.session_state.prefix_text_input = "\n".join(DEFAULT_PREFIXES)
@@ -747,8 +760,8 @@ def render_pair_list():
         pair_data = []
         for pair in complete_pairs:
             pair_data.append({
-                '図番（新）': pair['main_drawing'],
-                '比較元図番（旧）': pair['source_drawing'],
+                '流用先（新）': pair['main_drawing'],
+                '流用元（旧）': pair['source_drawing'],
                 '関係': pair.get('relation', 'なし'),
                 'ステータス': '✅ 差分抽出可能'
             })
@@ -758,23 +771,16 @@ def render_pair_list():
     # 比較元の旧図面が不足しているペア
     if missing_pairs:
         missing_data = []
-        missing_drawings = []
         for pair in missing_pairs:
             missing_data.append({
-                '図番（新）': pair['main_drawing'],
-                '比較元図番（旧）': pair['source_drawing'],
+                '流用先（新）': pair['main_drawing'],
+                '流用元（旧）': pair['source_drawing'],
                 '関係': pair.get('relation', 'なし'),
                 'ステータス': '⚠️ 比較元図面なし'
             })
-            if pair['source_drawing']:
-                missing_drawings.append(pair['source_drawing'])
 
         with st.expander("比較元の旧図面がないペア", expanded=False):
             st.dataframe(missing_data, width='stretch', hide_index=True)
-
-        if missing_drawings:
-            with st.expander("不足している図面", expanded=False):
-                st.write(", ".join(missing_drawings))
 
     # 流用元図番が指定されていないペア
     if no_source_pairs:
@@ -818,6 +824,104 @@ def render_help_section():
         st.info("\n".join(help_text.USAGE_STEPS))
 
 
+def process_all_uploaded_files(groups):
+    """
+    複数グループのアップロードDXFファイルを単一の進捗バーで処理する
+
+    Args:
+        groups: 処理グループのリスト。各要素は dict:
+            - uploaded_files: アップロードされたファイルのリスト
+            - files_dict: 格納先の辞書
+            - upload_key_name: アップロードキーのsession_state名
+            - failures_key: 失敗ファイルリストのsession_state名
+            - summary_key: サマリーのsession_state名
+
+    Returns:
+        bool: いずれかのファイルが処理されたかどうか
+    """
+    # 全グループの合計ファイル数を算出
+    all_items = []
+    for g in groups:
+        if g['uploaded_files']:
+            for f in g['uploaded_files']:
+                all_items.append((f, g))
+
+    if not all_items:
+        return False
+
+    total_files = len(all_items)
+    start_time = time.time()
+    progress_placeholder = st.empty()
+    progress_bar = progress_placeholder.progress(0.0, text="図番を抽出中...")
+
+    # グループごとの集計用
+    group_results = {id(g): {'processed': 0, 'failed': []} for _, g in all_items}
+
+    for idx, (uploaded_file, group) in enumerate(all_items, start=1):
+        file_info = extract_drawing_info_from_file(uploaded_file)
+        gid = id(group)
+        if file_info:
+            main_drawing = file_info['main_drawing_number']
+            group['files_dict'][main_drawing] = file_info
+            group_results[gid]['processed'] += 1
+        else:
+            group_results[gid]['failed'].append(uploaded_file.name)
+
+        elapsed = time.time() - start_time
+        progress_bar.progress(
+            min(idx / total_files, 1.0),
+            text=f"{idx}/{total_files}件の図番を抽出中...（経過 {elapsed:.1f} 秒）"
+        )
+
+    progress_placeholder.empty()
+    elapsed_total = time.time() - start_time
+
+    # グループごとにsession_stateを更新
+    processed_any = False
+    for g in groups:
+        if not g['uploaded_files']:
+            continue
+        gid = id(g)
+        res = group_results[gid]
+        if res['processed'] > 0:
+            st.session_state.pairs_dirty = True
+            processed_any = True
+        st.session_state[g['upload_key_name']] += 1
+        st.session_state[g['failures_key']] = res['failed']
+        st.session_state[g['summary_key']] = {
+            'processed': res['processed'],
+            'failed': len(res['failed']),
+            'elapsed': elapsed_total
+        }
+
+    return processed_any
+
+
+def render_upload_status(summary_key, failures_key, label):
+    """
+    アップロード結果のサマリーと失敗ファイルを表示する共通ロジック
+
+    Args:
+        summary_key: サマリーのsession_state名
+        failures_key: 失敗ファイルリストのsession_state名
+        label: 表示ラベル（「流用元」「流用先」など）
+    """
+    upload_summary = st.session_state.get(summary_key)
+    if upload_summary:
+        processed = upload_summary.get('processed', 0)
+        failed = upload_summary.get('failed', 0)
+        elapsed = upload_summary.get('elapsed', 0.0)
+        if processed > 0:
+            st.success(f"直近の{label}図番抽出: {processed}件（経過 {elapsed:.1f} 秒, 失敗 {failed}件）")
+        elif failed > 0:
+            st.warning(f"直近の{label}図番抽出は失敗しました（経過 {elapsed:.1f} 秒）")
+
+    if st.session_state.get(failures_key):
+        with st.expander(f"アップロードできなかった{label}ファイル", expanded=False):
+            for name in st.session_state[failures_key]:
+                st.write(f"- {name}")
+
+
 def app():
     st.title(ui_config.TITLE)
     st.write(ui_config.SUBTITLE)
@@ -857,97 +961,90 @@ def app():
 
     st.divider()
 
-    # ファイルアップロード
-    st.subheader("Step 1: DXFファイルのアップロード")
+    # Step 1-1: 流用元DXFファイルのアップロード
+    st.subheader("Step 1-1: 流用元（旧）DXFファイルのアップロード")
 
-    with st.container():
-        uploaded_files = st.file_uploader(
-            "DXFファイルをアップロードしてください（複数可・フォルダ可・複数回可）",
-            type=ui_config.DXF_FILE_TYPES,
-            accept_multiple_files=True,
-            key=f"initial_upload_{st.session_state.drawing_upload_key}",
-            help="ファイルを追加するたびに「図番を抽出」ボタンを押すと図番情報が蓄積されます"
-        )
+    source_uploaded_files = st.file_uploader(
+        "流用元（旧）DXFファイルをアップロードしてください（複数可・フォルダ可・複数回可）",
+        type=ui_config.DXF_FILE_TYPES,
+        accept_multiple_files=True,
+        key=f"source_upload_{st.session_state.source_upload_key}",
+        help="比較元となる旧図面をアップロードしてください"
+    )
 
-        process_button = st.button("図番を抽出", key="process_files", type="primary")
+    render_upload_status('source_upload_summary', 'source_upload_failures', '流用元')
 
-    upload_summary = st.session_state.get('last_upload_summary')
-    if upload_summary:
-        processed = upload_summary.get('processed', 0)
-        failed = upload_summary.get('failed', 0)
-        elapsed = upload_summary.get('elapsed', 0.0)
-        if processed > 0:
-            st.success(f"直近の図番抽出: {processed}件（経過 {elapsed:.1f} 秒, 失敗 {failed}件）")
-        elif failed > 0:
-            st.warning(f"直近の図番抽出は失敗しました（経過 {elapsed:.1f} 秒）")
+    source_count = len(st.session_state.source_files_dict)
+    if source_count > 0:
+        st.info(f"流用元（旧）図面: {source_count}件 抽出済み")
 
-    if st.session_state.get('last_upload_failures'):
-        with st.expander("アップロードできなかったファイル", expanded=False):
-            for name in st.session_state.last_upload_failures:
-                st.write(f"- {name}")
+    # Step 1-2: 流用先DXFファイルのアップロード
+    st.subheader("Step 1-2: 流用先（新）DXFファイルのアップロード")
 
-    # ファイル処理
+    dest_uploaded_files = st.file_uploader(
+        "流用先（新）DXFファイルをアップロードしてください（複数可・フォルダ可・複数回可）",
+        type=ui_config.DXF_FILE_TYPES,
+        accept_multiple_files=True,
+        key=f"dest_upload_{st.session_state.dest_upload_key}",
+        help="新しく作成した図面をアップロードしてください"
+    )
+
+    render_upload_status('dest_upload_summary', 'dest_upload_failures', '流用先')
+
+    dest_count = len(st.session_state.dest_files_dict)
+    if dest_count > 0:
+        st.info(f"流用先（新）図面: {dest_count}件 抽出済み")
+
+    # 図番抽出ボタン（両グループ共通）
+    process_button = st.button("図番を抽出", key="process_files", type="primary")
+
     if process_button:
-        if not uploaded_files:
-            st.warning("DXFファイルを選択してから「図番を抽出」を押してください。")
+        if not source_uploaded_files and not dest_uploaded_files:
+            st.warning("流用元または流用先のDXFファイルを選択してから「図番を抽出」を押してください。")
         else:
-            total_files = len(uploaded_files)
-            processed_count = 0
-            failed_files = []
-            start_time = time.time()
-            progress_placeholder = st.empty()
-            progress_bar = progress_placeholder.progress(0.0, text="図番を抽出中...")
-
-            for idx, uploaded_file in enumerate(uploaded_files, start=1):
-                file_info = extract_drawing_info_from_file(uploaded_file)
-                if file_info:
-                    main_drawing = file_info['main_drawing_number']
-                    # 既存の図番の場合は上書き
-                    st.session_state.uploaded_files_dict[main_drawing] = file_info
-                    processed_count += 1
-                else:
-                    failed_files.append(uploaded_file.name)
-
-                elapsed = time.time() - start_time
-                progress = idx / total_files if total_files else 1.0
-                progress_bar.progress(
-                    min(progress, 1.0),
-                    text=f"{idx}/{total_files}件の図番を抽出中...（経過 {elapsed:.1f} 秒）"
-                )
-
-            progress_placeholder.empty()
-
-            if processed_count > 0:
-                st.session_state.pairs_dirty = True
-            st.session_state.drawing_upload_key += 1
-            st.session_state.last_upload_failures = failed_files
-            st.session_state.last_upload_summary = {
-                'processed': processed_count,
-                'failed': len(failed_files),
-                'elapsed': time.time() - start_time
-            }
-
-            # メモリ解放
-            gc.collect()
-
-            st.rerun()
+            groups = []
+            if source_uploaded_files:
+                groups.append({
+                    'uploaded_files': source_uploaded_files,
+                    'files_dict': st.session_state.source_files_dict,
+                    'upload_key_name': 'source_upload_key',
+                    'failures_key': 'source_upload_failures',
+                    'summary_key': 'source_upload_summary',
+                })
+            if dest_uploaded_files:
+                groups.append({
+                    'uploaded_files': dest_uploaded_files,
+                    'files_dict': st.session_state.dest_files_dict,
+                    'upload_key_name': 'dest_upload_key',
+                    'failures_key': 'dest_upload_failures',
+                    'summary_key': 'dest_upload_summary',
+                })
+            if process_all_uploaded_files(groups):
+                gc.collect()
+                st.rerun()
 
     st.divider()
 
     # 図面ペア・リスト作成
     st.subheader("Step 2: 図面ペア・リスト作成")
-    uploaded_file_count = len(st.session_state.uploaded_files_dict)
-    st.write(f"アップロード済みDXFファイル: {uploaded_file_count}件")
+    st.write(f"流用元 {source_count}件、流用先 {dest_count}件（合計 {source_count + dest_count}件）")
+
+    both_have_files = source_count > 0 and dest_count > 0
 
     pair_button = st.button(
         "図面ペア・リスト作成",
         key="generate_pairs",
         type="primary",
-        disabled=uploaded_file_count == 0
+        disabled=not both_have_files
     )
 
-    if uploaded_file_count == 0:
-        st.info("DXFファイルをアップロードして図番を抽出すると、ここでペアリストを作成できます。")
+    if not both_have_files:
+        if source_count == 0 and dest_count == 0:
+            st.info("流用元（旧）と流用先（新）のDXFファイルをそれぞれアップロードして図番を抽出してください。")
+        elif source_count == 0:
+            st.info("流用元（旧）DXFファイルをアップロードして図番を抽出してください。")
+        else:
+            st.info("流用先（新）DXFファイルをアップロードして図番を抽出してください。")
 
     if pair_button:
         pairing_start = time.time()
@@ -964,7 +1061,8 @@ def app():
 
         try:
             st.session_state.pairs = create_pair_list(
-                st.session_state.uploaded_files_dict,
+                st.session_state.source_files_dict,
+                st.session_state.dest_files_dict,
                 progress_callback=pairing_progress
             )
             st.session_state.pairs_dirty = False
@@ -989,7 +1087,7 @@ def app():
         else:
             st.warning("新しいDXFファイルが追加されています。「図面ペア・リスト作成」を実行して最新のペアを生成してください。")
     else:
-        if uploaded_file_count > 0:
+        if both_have_files:
             st.info("DXFファイルの図番抽出が完了したら「図面ペア・リスト作成」を押してください。")
 
     st.subheader("Step 3: 差分比較")
@@ -1126,8 +1224,8 @@ def app():
                 entity_counts = result.get('entity_counts')
 
                 row = {
-                    '図番（新）': result['main_drawing'],
-                    '比較元図番（旧）': result['source_drawing'],
+                    '流用先（新）': result['main_drawing'],
+                    '流用元（旧）': result['source_drawing'],
                     '出力ファイル名': result['output_filename'],
                     '関係': result.get('relation', 'なし')
                 }
@@ -1230,9 +1328,12 @@ def app():
                 cleanup_temp_files()
 
                 # セッション状態をクリア
-                for key in ['uploaded_files_dict', 'pairs', 'pairs_dirty', 'drawing_upload_key',
+                for key in ['source_files_dict', 'dest_files_dict',
+                            'pairs', 'pairs_dirty',
+                            'source_upload_key', 'dest_upload_key',
                             'drawing_info_cache',
-                            'last_upload_failures', 'last_upload_summary',
+                            'source_upload_failures', 'dest_upload_failures',
+                            'source_upload_summary', 'dest_upload_summary',
                             'results', 'zip_data', 'processing_settings',
                             'master_df', 'master_file_name', 'added_relationships_count',
                             'diff_labels_excel_data', 'unchanged_labels_excel_data']:
@@ -1248,8 +1349,14 @@ def app():
                 st.rerun()
 
     else:
-        if not st.session_state.uploaded_files_dict:
-            st.info("DXFファイルをアップロードし「図番を抽出」→「図面ペア・リスト作成」の順に実行してください。")
+        has_source = len(st.session_state.source_files_dict) > 0
+        has_dest = len(st.session_state.dest_files_dict) > 0
+        if not has_source and not has_dest:
+            st.info("流用元（旧）と流用先（新）のDXFファイルをそれぞれアップロードし、図番を抽出してから「図面ペア・リスト作成」を実行してください。")
+        elif not has_source:
+            st.info("流用元（旧）DXFファイルをアップロードし「図番を抽出（流用元）」を実行してください。")
+        elif not has_dest:
+            st.info("流用先（新）DXFファイルをアップロードし「図番を抽出（流用先）」を実行してください。")
         elif not pairs_available:
             st.info("「図面ペア・リスト作成」を実行すると差分比較を開始できます。")
         else:
