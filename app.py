@@ -922,14 +922,8 @@ def render_upload_status(summary_key, failures_key, label):
                 st.write(f"- {name}")
 
 
-def app():
-    st.title(ui_config.TITLE)
-    st.write(ui_config.SUBTITLE)
-
-    render_help_section()
-    initialize_session_state()
-
-    # 親子関係台帳ファイルのアップロード
+def render_step0_master():
+    """Step 0: 親子関係台帳ファイルのアップロード"""
     st.subheader("Step 0: 親子関係台帳ファイルのアップロード")
 
     master_file = st.file_uploader(
@@ -959,8 +953,13 @@ def app():
             st.session_state.master_file_name = None
             st.session_state.added_relationships_count = 0
 
-    st.divider()
 
+def render_step1_upload():
+    """Step 1: DXFファイルのアップロードと図番抽出
+
+    Returns:
+        tuple: (source_count, dest_count)
+    """
     # Step 1-1: 流用元DXFファイルのアップロード
     st.subheader("Step 1-1: 流用元（旧）DXFファイルのアップロード")
 
@@ -996,7 +995,8 @@ def app():
         st.info(f"流用先（新）図面: {dest_count}件 抽出済み")
 
     # 図番抽出ボタン（両グループ共通）
-    process_button = st.button("図番を抽出", key="process_files", type="primary")
+    has_new_files = bool(source_uploaded_files) or bool(dest_uploaded_files)
+    process_button = st.button("図番を抽出", key="process_files", type="primary", disabled=not has_new_files)
 
     if process_button:
         if not source_uploaded_files and not dest_uploaded_files:
@@ -1023,19 +1023,32 @@ def app():
                 gc.collect()
                 st.rerun()
 
-    st.divider()
+    return source_count, dest_count
 
+
+def render_step2_pairing(source_count, dest_count):
+    """Step 2: 図面ペア・リスト作成
+
+    Args:
+        source_count: 流用元ファイル数
+        dest_count: 流用先ファイル数
+
+    Returns:
+        tuple: (complete_pairs, pairs_ready)
+    """
     # 図面ペア・リスト作成
     st.subheader("Step 2: 図面ペア・リスト作成")
     st.write(f"流用元 {source_count}件、流用先 {dest_count}件（合計 {source_count + dest_count}件）")
 
     both_have_files = source_count > 0 and dest_count > 0
+    pairs_available = bool(st.session_state.pairs)
+    pairs_ready = pairs_available and not st.session_state.get('pairs_dirty', False)
 
     pair_button = st.button(
         "図面ペア・リスト作成",
         key="generate_pairs",
         type="primary",
-        disabled=not both_have_files
+        disabled=not both_have_files or pairs_ready
     )
 
     if not both_have_files:
@@ -1076,8 +1089,12 @@ def app():
         finally:
             progress_placeholder.empty()
 
+        st.rerun()
+
     complete_pairs = []
     missing_pairs = []
+    # pairs_available / pairs_ready は pair_button の前で計算済み
+    # pair_button ハンドラで pairs が更新された場合に再計算
     pairs_available = bool(st.session_state.pairs)
     pairs_ready = pairs_available and not st.session_state.get('pairs_dirty', False)
 
@@ -1088,231 +1105,242 @@ def app():
             st.warning("新しいDXFファイルが追加されています。「図面ペア・リスト作成」を実行して最新のペアを生成してください。")
     else:
         if both_have_files:
-            st.info("DXFファイルの図番抽出が完了したら「図面ペア・リスト作成」を押してください。")
+            st.info("DXFファイルの図番抽出が完了しました。「図面ペア・リスト作成」を押してください。")
 
-    st.subheader("Step 3: 差分比較")
+    return complete_pairs, pairs_ready
 
-    if pairs_ready:
 
-        # オプション設定
-        with st.expander("オプション設定", expanded=False):
-            col1, col2 = st.columns(2)
+def render_step3_diff(complete_pairs):
+    """Step 3: 差分比較（ペアが準備完了時）
 
-            with col1:
-                tolerance = st.number_input(
-                    "座標許容誤差",
-                    min_value=1e-8,
-                    max_value=1.0,
-                    value=diff_config.DEFAULT_TOLERANCE,
-                    format="%.8f",
-                    help="差分判定の位置座標の比較における許容誤差です。大きくするほど座標の差を無視します。"
-                )
+    Args:
+        complete_pairs: 差分抽出可能なペアのリスト
+    """
+    # オプション設定
+    with st.expander("オプション設定", expanded=False):
+        col1, col2 = st.columns(2)
 
-            with col2:
-                st.write("**レイヤー色設定**")
-
-                # デフォルト値のインデックスを取得
-                deleted_default_index = next(i for i, (val, _) in enumerate(diff_config.COLOR_OPTIONS) if val == diff_config.DEFAULT_DELETED_COLOR)
-                added_default_index = next(i for i, (val, _) in enumerate(diff_config.COLOR_OPTIONS) if val == diff_config.DEFAULT_ADDED_COLOR)
-                unchanged_default_index = next(i for i, (val, _) in enumerate(diff_config.COLOR_OPTIONS) if val == diff_config.DEFAULT_UNCHANGED_COLOR)
-
-                deleted_color = st.selectbox(
-                    "削除図形の色（比較元図面のみ）",
-                    options=diff_config.COLOR_OPTIONS,
-                    index=deleted_default_index,
-                    format_func=lambda x: x[1]
-                )[0]
-
-                added_color = st.selectbox(
-                    "追加図形の色（新図面のみ）",
-                    options=diff_config.COLOR_OPTIONS,
-                    index=added_default_index,
-                    format_func=lambda x: x[1]
-                )[0]
-
-                unchanged_color = st.selectbox(
-                    "変更なし図形の色",
-                    options=diff_config.COLOR_OPTIONS,
-                    index=unchanged_default_index,
-                    format_func=lambda x: x[1]
-                )[0]
-
-            st.markdown("**未変更ラベルの中から抽出したい先頭文字列**")
-            prefix_text = st.text_area(
-                "1行につき1件を入力してください",
-                value=st.session_state.prefix_text_input,
-                height=150,
-                help="prefix_config.txt に定義された初期値を基に編集できます。空行は無視されます。",
-                key=f"prefix_text_area_{st.session_state.uploader_key}"
+        with col1:
+            tolerance = st.number_input(
+                "座標許容誤差",
+                min_value=1e-8,
+                max_value=1.0,
+                value=diff_config.DEFAULT_TOLERANCE,
+                format="%.8f",
+                help="差分判定の位置座標の比較における許容誤差です。大きくするほど座標の差を無視します。"
             )
-            st.session_state.prefix_text_input = prefix_text
-            prefix_list = get_prefix_list_from_state()
 
-        # 比較開始ボタン
-        if complete_pairs:
-            st.info(f"差分抽出可能なペア: {len(complete_pairs)}組")
+        with col2:
+            st.write("**レイヤー色設定**")
 
-            if st.button("差分抽出開始", key="start_comparison", type="primary", disabled=len(complete_pairs) == 0):
-                total_pairs = len(complete_pairs)
-                progress_placeholder = st.empty()
-                progress_bar = progress_placeholder.progress(0.0, text="差分抽出を開始しています...")
+            # デフォルト値のインデックスを取得
+            deleted_default_index = next(i for i, (val, _) in enumerate(diff_config.COLOR_OPTIONS) if val == diff_config.DEFAULT_DELETED_COLOR)
+            added_default_index = next(i for i, (val, _) in enumerate(diff_config.COLOR_OPTIONS) if val == diff_config.DEFAULT_ADDED_COLOR)
+            unchanged_default_index = next(i for i, (val, _) in enumerate(diff_config.COLOR_OPTIONS) if val == diff_config.DEFAULT_UNCHANGED_COLOR)
 
-                def diff_progress(current, total, message):
-                    progress = current / total if total else 1.0
-                    progress_bar.progress(min(progress, 1.0), text=f"{message}（{current}/{total}組）")
+            deleted_color = st.selectbox(
+                "削除図形の色（比較元図面のみ）",
+                options=diff_config.COLOR_OPTIONS,
+                index=deleted_default_index,
+                format_func=lambda x: x[1]
+            )[0]
 
-                try:
-                    zip_data, results, diff_labels_excel, unchanged_labels_excel, updated_master = create_diff_zip(
-                        st.session_state.pairs,
-                        master_df=st.session_state.master_df,
-                        master_filename=st.session_state.master_file_name,
-                        tolerance=tolerance,
-                        deleted_color=deleted_color,
-                        added_color=added_color,
-                        unchanged_color=unchanged_color,
-                        prefixes=prefix_list,
-                        progress_callback=diff_progress
-                    )
+            added_color = st.selectbox(
+                "追加図形の色（新図面のみ）",
+                options=diff_config.COLOR_OPTIONS,
+                index=added_default_index,
+                format_func=lambda x: x[1]
+            )[0]
 
-                    # セッション状態に保存
-                    st.session_state.zip_data = zip_data
-                    st.session_state.results = results
-                    st.session_state.diff_labels_excel_data = diff_labels_excel
-                    st.session_state.unchanged_labels_excel_data = unchanged_labels_excel
-                    st.session_state.processing_settings = {
-                        'tolerance': tolerance,
-                        'deleted_color': deleted_color,
-                        'added_color': added_color,
-                        'unchanged_color': unchanged_color
-                    }
-                    if updated_master is not None:
-                        st.session_state.master_df = updated_master
+            unchanged_color = st.selectbox(
+                "変更なし図形の色",
+                options=diff_config.COLOR_OPTIONS,
+                index=unchanged_default_index,
+                format_func=lambda x: x[1]
+            )[0]
 
-                    # メモリ解放
-                    gc.collect()
+        st.markdown("**未変更ラベルの中から抽出したい先頭文字列**")
+        prefix_text = st.text_area(
+            "1行につき1件を入力してください",
+            value=st.session_state.prefix_text_input,
+            height=150,
+            help="prefix_config.txt に定義された初期値を基に編集できます。空行は無視されます。",
+            key=f"prefix_text_area_{st.session_state.uploader_key}"
+        )
+        st.session_state.prefix_text_input = prefix_text
+        prefix_list = get_prefix_list_from_state()
 
-                except Exception as e:
-                    handle_error(e)
-                    gc.collect()
-                finally:
-                    progress_placeholder.empty()
-        else:
-            st.warning("比較対象となる旧図面がありません。旧図面をアップロードしてください。")
+    # 比較開始ボタン
+    if complete_pairs:
+        st.info(f"差分抽出可能なペア: {len(complete_pairs)}組")
 
-        # 結果の表示
-        if 'results' in st.session_state and st.session_state.results:
-            st.subheader("差分抽出結果")
+        has_results = bool(st.session_state.get('results'))
+        if st.button("差分抽出開始", key="start_comparison", type="primary", disabled=has_results):
+            total_pairs = len(complete_pairs)
+            progress_placeholder = st.empty()
+            progress_bar = progress_placeholder.progress(0.0, text="差分抽出を開始しています...")
 
-            results = st.session_state.results
-            settings = st.session_state.get('processing_settings', {})
+            def diff_progress(current, total, message):
+                progress = current / total if total else 1.0
+                progress_bar.progress(min(progress, 1.0), text=f"{message}（{current}/{total}組）")
 
-            # 成功/失敗のサマリー
-            successful_count = sum(1 for r in results if r['success'])
-            total_count = len(results)
-
-            if successful_count == total_count:
-                st.success(f"全{total_count}組のペアの差分抽出が完了しました")
-            elif successful_count > 0:
-                st.warning(f"{successful_count}/{total_count}組のペアの差分抽出が完了しましたが、一部のペアで処理に失敗しました。")
-            else:
-                st.error("全てのペアで処理に失敗しました ❌")
-
-            # 結果詳細
-            result_data = []
-            for result in results:
-                status = "✅ 成功" if result['success'] else "❌ 失敗"
-                entity_counts = result.get('entity_counts')
-
-                row = {
-                    '流用先（新）': result['main_drawing'],
-                    '流用元（旧）': result['source_drawing'],
-                    '出力ファイル名': result['output_filename'],
-                    '関係': result.get('relation', 'なし')
-                }
-
-                # エンティティ数を追加（成功した場合のみ）
-                if entity_counts:
-                    row['削除図形数'] = entity_counts.get('deleted_entities', '-')
-                    row['追加図形数'] = entity_counts.get('added_entities', '-')
-                    row['総図形数'] = entity_counts.get('total_entities', '-')
-                else:
-                    row['削除図形数'] = '-'
-                    row['追加図形数'] = '-'
-                    row['総図形数'] = '-'
-                row['変更ラベル数'] = result.get('change_label_count', '-')
-                row['未変更抽出ラベル数'] = result.get('unchanged_label_count', '-')
-
-                row['ステータス'] = status
-                result_data.append(row)
-
-            st.dataframe(result_data, width='stretch', hide_index=True)
-
-            # プレビューセクション
-            preview_available = st.session_state.get('diff_labels_excel_data') is not None or \
-                                st.session_state.get('unchanged_labels_excel_data') is not None or \
-                                st.session_state.master_df is not None
-
-            if preview_available:
-                st.subheader("出力内容プレビュー")
-
-                preview_items = []
-                if st.session_state.master_df is not None:
-                    preview_items.append("親子関係台帳")
-                if st.session_state.get('diff_labels_excel_data'):
-                    preview_items.append("diff_labels.xlsx")
-                if st.session_state.get('unchanged_labels_excel_data'):
-                    preview_items.append("unchanged_labels.xlsx")
-                if preview_items:
-                    st.caption("表示可能: " + ", ".join(preview_items))
-
-                if st.session_state.master_df is not None:
-                    with st.expander("親子関係台帳プレビュー", expanded=False):
-                        render_preview_dataframe(st.session_state.master_df, "master_preview")
-
-                if st.session_state.get('diff_labels_excel_data'):
-                    diff_expanded = st.session_state.get('diff_preview_expanded', False)
-                    with st.expander("diff_labels.xlsx プレビュー", expanded=diff_expanded):
-                        diff_xl = pd.ExcelFile(BytesIO(st.session_state.diff_labels_excel_data))
-                        sheet_name = st.selectbox(
-                            "シートを選択（diff_labels）",
-                            diff_xl.sheet_names,
-                            key="diff_labels_preview_sheet"
-                        )
-                        render_preview_dataframe(diff_xl.parse(sheet_name), "diff_preview")
-                        st.session_state['diff_preview_expanded'] = True
-
-                if st.session_state.get('unchanged_labels_excel_data'):
-                    with st.expander("unchanged_labels.xlsx プレビュー", expanded=False):
-                        unchanged_xl = pd.ExcelFile(BytesIO(st.session_state.unchanged_labels_excel_data))
-                        sheet_name = st.selectbox(
-                            "シートを選択（unchanged_labels）",
-                            unchanged_xl.sheet_names,
-                            key="unchanged_labels_preview_sheet"
-                        )
-                        render_preview_dataframe(unchanged_xl.parse(sheet_name), "unchanged_preview")
-
-            # ダウンロードボタン
-            if successful_count > 0:
-                st.subheader("Step 4: 差分抽出ファイルのダウンロード")
-
-                # ダウンロードボタンのラベルを作成
-                download_label = f"ZIPでダウンロード ({successful_count}ファイル"
-                if st.session_state.master_df is not None:
-                    master_name = st.session_state.master_file_name if st.session_state.master_file_name else "親子関係台帳"
-                    download_label += f" + {master_name}"
-                download_label += " + diff_labels.xlsx + unchanged_labels.xlsx)"
-
-                st.download_button(
-                    label=download_label,
-                    data=st.session_state.zip_data,
-                    file_name="dxf_diff_results.zip",
-                    mime="application/zip",
-                    key="download_zip",
-                    type="primary"
+            try:
+                zip_data, results, diff_labels_excel, unchanged_labels_excel, updated_master = create_diff_zip(
+                    st.session_state.pairs,
+                    master_df=st.session_state.master_df,
+                    master_filename=st.session_state.master_file_name,
+                    tolerance=tolerance,
+                    deleted_color=deleted_color,
+                    added_color=added_color,
+                    unchanged_color=unchanged_color,
+                    prefixes=prefix_list,
+                    progress_callback=diff_progress
                 )
 
-                # オプション設定の情報を表示
-                st.info(f"""
+                # セッション状態に保存
+                st.session_state.zip_data = zip_data
+                st.session_state.results = results
+                st.session_state.diff_labels_excel_data = diff_labels_excel
+                st.session_state.unchanged_labels_excel_data = unchanged_labels_excel
+                st.session_state.processing_settings = {
+                    'tolerance': tolerance,
+                    'deleted_color': deleted_color,
+                    'added_color': added_color,
+                    'unchanged_color': unchanged_color
+                }
+                if updated_master is not None:
+                    st.session_state.master_df = updated_master
+
+                # メモリ解放
+                gc.collect()
+
+            except Exception as e:
+                handle_error(e)
+                gc.collect()
+            finally:
+                progress_placeholder.empty()
+
+            st.rerun()
+    else:
+        st.warning("比較対象となる旧図面がありません。旧図面をアップロードしてください。")
+
+    # 結果の表示
+    if 'results' in st.session_state and st.session_state.results:
+        st.subheader("差分抽出結果")
+
+        results = st.session_state.results
+        settings = st.session_state.get('processing_settings', {})
+
+        # 成功/失敗のサマリー
+        successful_count = sum(1 for r in results if r['success'])
+        total_count = len(results)
+
+        if successful_count == total_count:
+            st.success(f"全{total_count}組のペアの差分抽出が完了しました")
+        elif successful_count > 0:
+            st.warning(f"{successful_count}/{total_count}組のペアの差分抽出が完了しましたが、一部のペアで処理に失敗しました。")
+        else:
+            st.error("全てのペアで処理に失敗しました ❌")
+
+        # 結果詳細
+        result_data = []
+        for result in results:
+            status = "✅ 成功" if result['success'] else "❌ 失敗"
+            entity_counts = result.get('entity_counts')
+
+            row = {
+                '流用先（新）': result['main_drawing'],
+                '流用元（旧）': result['source_drawing'],
+                '出力ファイル名': result['output_filename'],
+                '関係': result.get('relation', 'なし')
+            }
+
+            # エンティティ数を追加（成功した場合のみ）
+            if entity_counts:
+                row['削除図形数'] = entity_counts.get('deleted_entities', '-')
+                row['追加図形数'] = entity_counts.get('added_entities', '-')
+                row['総図形数'] = entity_counts.get('total_entities', '-')
+            else:
+                row['削除図形数'] = '-'
+                row['追加図形数'] = '-'
+                row['総図形数'] = '-'
+            row['変更ラベル数'] = result.get('change_label_count', '-')
+            row['未変更抽出ラベル数'] = result.get('unchanged_label_count', '-')
+
+            row['ステータス'] = status
+            result_data.append(row)
+
+        st.dataframe(result_data, width='stretch', hide_index=True)
+
+        # プレビューセクション
+        preview_available = st.session_state.get('diff_labels_excel_data') is not None or \
+                            st.session_state.get('unchanged_labels_excel_data') is not None or \
+                            st.session_state.master_df is not None
+
+        if preview_available:
+            st.subheader("出力内容プレビュー")
+
+            preview_items = []
+            if st.session_state.master_df is not None:
+                preview_items.append("親子関係台帳")
+            if st.session_state.get('diff_labels_excel_data'):
+                preview_items.append("diff_labels.xlsx")
+            if st.session_state.get('unchanged_labels_excel_data'):
+                preview_items.append("unchanged_labels.xlsx")
+            if preview_items:
+                st.caption("表示可能: " + ", ".join(preview_items))
+
+            if st.session_state.master_df is not None:
+                with st.expander("親子関係台帳プレビュー", expanded=False):
+                    render_preview_dataframe(st.session_state.master_df, "master_preview")
+
+            if st.session_state.get('diff_labels_excel_data'):
+                diff_expanded = st.session_state.get('diff_preview_expanded', False)
+                with st.expander("diff_labels.xlsx プレビュー", expanded=diff_expanded):
+                    diff_xl = pd.ExcelFile(BytesIO(st.session_state.diff_labels_excel_data))
+                    sheet_name = st.selectbox(
+                        "シートを選択（diff_labels）",
+                        diff_xl.sheet_names,
+                        key="diff_labels_preview_sheet"
+                    )
+                    render_preview_dataframe(diff_xl.parse(sheet_name), "diff_preview")
+                    st.session_state['diff_preview_expanded'] = True
+
+            if st.session_state.get('unchanged_labels_excel_data'):
+                with st.expander("unchanged_labels.xlsx プレビュー", expanded=False):
+                    unchanged_xl = pd.ExcelFile(BytesIO(st.session_state.unchanged_labels_excel_data))
+                    sheet_name = st.selectbox(
+                        "シートを選択（unchanged_labels）",
+                        unchanged_xl.sheet_names,
+                        key="unchanged_labels_preview_sheet"
+                    )
+                    render_preview_dataframe(unchanged_xl.parse(sheet_name), "unchanged_preview")
+
+        # ダウンロードボタン
+        if successful_count > 0:
+            st.subheader("Step 4: 差分抽出ファイルのダウンロード")
+
+            # ダウンロードボタンのラベルを作成
+            download_label = f"ZIPでダウンロード ({successful_count}ファイル"
+            if st.session_state.master_df is not None:
+                master_name = st.session_state.master_file_name if st.session_state.master_file_name else "親子関係台帳"
+                download_label += f" + {master_name}"
+            download_label += " + diff_labels.xlsx + unchanged_labels.xlsx)"
+
+            downloaded = st.session_state.get('downloaded', False)
+            st.download_button(
+                label=download_label,
+                data=st.session_state.zip_data,
+                file_name="dxf_diff_results.zip",
+                mime="application/zip",
+                key="download_zip",
+                type="primary",
+                disabled=downloaded,
+                on_click=lambda: st.session_state.update({'downloaded': True})
+            )
+
+            # オプション設定の情報を表示
+            st.info(f"""
                 **生成されたファイルについて：**
                 - ADDED: 新図面にのみ存在する要素（追加された図形）
                 - DELETED: 旧図面にのみ存在する要素（削除された図形）
@@ -1322,45 +1350,77 @@ def app():
                 - 座標許容誤差: {settings.get('tolerance', 0.01)}
                 """)
 
-            # 新しい比較を開始するボタン
-            if st.button("🔄 新しい差分抽出を開始", key="restart_button"):
-                # 一時ファイルのクリーンアップ
-                cleanup_temp_files()
+        # 新しい比較を開始するボタン
+        if st.button("🔄 新しい差分抽出を開始", key="restart_button"):
+            # 一時ファイルのクリーンアップ
+            cleanup_temp_files()
 
-                # セッション状態をクリア
-                for key in ['source_files_dict', 'dest_files_dict',
-                            'pairs', 'pairs_dirty',
-                            'source_upload_key', 'dest_upload_key',
-                            'drawing_info_cache',
-                            'source_upload_failures', 'dest_upload_failures',
-                            'source_upload_summary', 'dest_upload_summary',
-                            'results', 'zip_data', 'processing_settings',
-                            'master_df', 'master_file_name', 'added_relationships_count',
-                            'diff_labels_excel_data', 'unchanged_labels_excel_data']:
-                    if key in st.session_state:
-                        del st.session_state[key]
+            # セッション状態をクリア
+            for key in ['source_files_dict', 'dest_files_dict',
+                        'pairs', 'pairs_dirty',
+                        'source_upload_key', 'dest_upload_key',
+                        'drawing_info_cache',
+                        'source_upload_failures', 'dest_upload_failures',
+                        'source_upload_summary', 'dest_upload_summary',
+                        'results', 'zip_data', 'processing_settings',
+                        'master_df', 'master_file_name', 'added_relationships_count',
+                        'diff_labels_excel_data', 'unchanged_labels_excel_data',
+                        'downloaded']:
+                if key in st.session_state:
+                    del st.session_state[key]
 
-                # ファイルアップロード入力をクリアするためにキーをインクリメント
-                st.session_state.uploader_key += 1
+            # ファイルアップロード入力をクリアするためにキーをインクリメント
+            st.session_state.uploader_key += 1
 
-                # ガベージコレクションを実行してメモリを解放
-                gc.collect()
+            # ガベージコレクションを実行してメモリを解放
+            gc.collect()
 
-                st.rerun()
+            st.rerun()
 
+
+def render_step3_inactive(source_count, dest_count, pairs_available):
+    """Step 3: 差分比較（ペアが未準備時のガイダンス表示）
+
+    Args:
+        source_count: 流用元ファイル数
+        dest_count: 流用先ファイル数
+        pairs_available: ペアが存在するかどうか
+    """
+    has_source = source_count > 0
+    has_dest = dest_count > 0
+    if not has_source and not has_dest:
+        st.info("流用元（旧）と流用先（新）のDXFファイルをそれぞれアップロードし、図番を抽出してから「図面ペア・リスト作成」を実行してください。")
+    elif not has_source:
+        st.info("流用元（旧）DXFファイルをアップロードし「図番を抽出（流用元）」を実行してください。")
+    elif not has_dest:
+        st.info("流用先（新）DXFファイルをアップロードし「図番を抽出（流用先）」を実行してください。")
+    elif not pairs_available:
+        st.info("「図面ペア・リスト作成」を実行後に差分比較を開始できます。")
     else:
-        has_source = len(st.session_state.source_files_dict) > 0
-        has_dest = len(st.session_state.dest_files_dict) > 0
-        if not has_source and not has_dest:
-            st.info("流用元（旧）と流用先（新）のDXFファイルをそれぞれアップロードし、図番を抽出してから「図面ペア・リスト作成」を実行してください。")
-        elif not has_source:
-            st.info("流用元（旧）DXFファイルをアップロードし「図番を抽出（流用元）」を実行してください。")
-        elif not has_dest:
-            st.info("流用先（新）DXFファイルをアップロードし「図番を抽出（流用先）」を実行してください。")
-        elif not pairs_available:
-            st.info("「図面ペア・リスト作成」を実行すると差分比較を開始できます。")
-        else:
-            st.warning("最新ファイルを反映したペアリストを作成してください。")
+        st.warning("最新ファイルを反映したペアリストを作成してください。")
+
+
+def app():
+    st.title(ui_config.TITLE)
+    st.write(ui_config.SUBTITLE)
+
+    render_help_section()
+    initialize_session_state()
+
+    render_step0_master()
+    st.divider()
+
+    source_count, dest_count = render_step1_upload()
+    st.divider()
+
+    complete_pairs, pairs_ready = render_step2_pairing(source_count, dest_count)
+
+    st.subheader("Step 3: 差分比較")
+    if pairs_ready:
+        render_step3_diff(complete_pairs)
+    else:
+        pairs_available = bool(st.session_state.pairs)
+        render_step3_inactive(source_count, dest_count, pairs_available)
 
 
 if __name__ == "__main__":
