@@ -1348,7 +1348,7 @@ def _render_step1_pair_list_mode():
     st.subheader("Step 1-1: ペアリストのアップロード")
     st.caption(
         "比較元図番（旧）と比較先図番（新）のペアを記載したExcelまたはCSVファイルをアップロードしてください。\n"
-        "必須カラム: **比較元図番**・**比較先図番**（または **Reference**・**Target**）"
+        "必須カラム：**比較元図番** と **比較先図番**（または **Reference** と **Target**）"
     )
 
     pair_list_file = st.file_uploader(
