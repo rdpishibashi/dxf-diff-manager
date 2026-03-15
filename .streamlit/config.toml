@@ -7,6 +7,8 @@ font = "sans serif"
 
 [server]
 maxUploadSize = 200
+address = "0.0.0.0"
+port = 8501
 
 [browser]
 gatherUsageStats = false
