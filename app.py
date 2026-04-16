@@ -885,7 +885,7 @@ def initialize_session_state():
 
     # ペアリストモード用
     if 'step1_mode' not in st.session_state:
-        st.session_state.step1_mode = 'auto'
+        st.session_state.step1_mode = 'all_in_one'
 
     if 'pair_list_df' not in st.session_state:
         st.session_state.pair_list_df = None
@@ -1903,15 +1903,16 @@ def app():
     # ペアリング方式の選択（プログラム説明の直後）
     prev_mode = st.session_state.step1_mode
     with st.container(border=True):
-        st.markdown("#### :gear: ペアリング方式の選択")
+#        st.markdown("#### :gear: ペアリング方式の選択")
+        st.markdown("### ペアリング方式の選択")
         st.caption("方式によってDXFファイルのアップロード方法が変わります")
         mode = st.radio(
             "ペアリング方式を選択してください",
-            options=['auto', 'all_in_one', 'pair_list'],
+            options=['all_in_one', 'auto', 'pair_list'],
             format_func=lambda x: {
-                'auto':       '流用元と流用先とを別々にアップロードし、流用先ファイルから流用元図番を抽出してペアを自動作成',
-                'all_in_one': '全ファイルをまとめてアップロードし、各DXFファイルから流用元図番を抽出してペアを自動作成',
-                'pair_list':  '全ファイルをまとめてアップロードし、ペアリストの内容でペアを作成',
+                'all_in_one': 'A: 全ファイルをまとめてアップロードし、各DXFファイルから流用元図番を抽出してペアを自動作成',
+                'auto':       'B: 流用元と流用先とを別々にアップロードし、流用先ファイルから流用元図番を抽出してペアを自動作成',
+                'pair_list':  'C: 全ファイルをまとめてアップロードし、ペアリストの内容でペアを作成',
             }[x],
             horizontal=False,
             key='step1_mode',
