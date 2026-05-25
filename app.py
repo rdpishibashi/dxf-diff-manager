@@ -214,20 +214,115 @@ def update_parent_child_master(master_df, new_pairs):
     return updated_df, added_count
 
 
-def save_master_to_bytes(master_df, filename=None):
+def create_empty_master_df():
+    """空の親子関係台帳DataFrameを作成（図面親子管理台帳.xlsx のフォーマットに準拠）"""
+    return pd.DataFrame({
+        'Child': pd.Series(dtype='object'),
+        'Parent': pd.Series(dtype='object'),
+        'Relation': pd.Series(dtype='object'),
+        'Title': pd.Series(dtype='object'),
+        'Subtitle': pd.Series(dtype='object'),
+        'Recorded Date': pd.Series(dtype='object'),
+        'Note': pd.Series(dtype='object'),
+        'Deleted Entities': pd.Series(dtype='Int64'),
+        'Added Entities': pd.Series(dtype='Int64'),
+        'Diff Entities': pd.Series(dtype='Int64'),
+        'Unchanged Entities': pd.Series(dtype='Int64'),
+        'Total Entities': pd.Series(dtype='Int64'),
+    })
+
+
+def save_master_to_bytes(master_df, pairs=None):
     """
     親子関係台帳DataFrameをExcelバイトデータに変換
 
+    シート構成:
+      1. Summary  : 統計サマリー（エンティティ合計・図形変更率・図面統計・流用率）
+      2. Diff List: 親子関係台帳データ
+
     Args:
         master_df: 親子関係台帳DataFrame
-        filename: 出力ファイル名（使用しないが、インターフェースの一貫性のために保持）
+        pairs: ペア情報リスト（図面統計の計算に使用。Noneの場合は 0 で埋める）
 
     Returns:
         bytes: Excelファイルのバイトデータ
     """
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        master_df.to_excel(writer, sheet_name='Sheet1', index=False)
+        workbook = writer.book
+
+        # --- Summary シート（先に追加してタブ順を先頭にする） ---
+        summary_ws = workbook.add_worksheet('Summary')
+
+        bold = workbook.add_format({'bold': True, 'font_size': 11})
+        label_fmt = workbook.add_format({
+            'bold': True, 'bg_color': '#D9E1F2', 'border': 1, 'align': 'left'
+        })
+        value_fmt = workbook.add_format({'border': 1, 'align': 'right', 'num_format': '#,##0'})
+        pct_fmt = workbook.add_format({'border': 1, 'align': 'right', 'num_format': '0.00%'})
+
+        summary_ws.set_column(0, 0, 22)
+        summary_ws.set_column(1, 1, 14)
+
+        row = 0
+
+        # ── エンティティ統計 ──
+        summary_ws.write(row, 0, 'エンティティ統計', bold)
+        row += 1
+
+        entity_specs = [
+            ('Deleted Entities',   '削除図形数 合計'),
+            ('Added Entities',     '追加図形数 合計'),
+            ('Diff Entities',      '差分図形数 合計'),
+            ('Unchanged Entities', '変更なし図形数 合計'),
+            ('Total Entities',     '総図形数 合計'),
+        ]
+        entity_sums = {}
+        for col, _ in entity_specs:
+            if col in master_df.columns and not master_df[col].isna().all():
+                entity_sums[col] = int(master_df[col].sum(skipna=True))
+            else:
+                entity_sums[col] = 0
+
+        for col, label in entity_specs:
+            summary_ws.write(row, 0, label, label_fmt)
+            summary_ws.write(row, 1, entity_sums[col], value_fmt)
+            row += 1
+
+        total_ent = entity_sums.get('Total Entities', 0)
+        diff_ent = entity_sums.get('Diff Entities', 0)
+        change_rate = (diff_ent / total_ent) if total_ent > 0 else 0.0
+
+        summary_ws.write(row, 0, '図形変更率 [%]', label_fmt)
+        summary_ws.write(row, 1, change_rate, pct_fmt)
+        row += 2  # 空行を挟む
+
+        # ── 図面統計 ──
+        summary_ws.write(row, 0, '図面統計', bold)
+        row += 1
+
+        if pairs is not None:
+            total_drawings = len(set(p['main_drawing'] for p in pairs))
+            pair_count = len([p for p in pairs if p['status'] == 'complete'])
+        else:
+            total_drawings = 0
+            pair_count = 0
+        reuse_rate = (pair_count / total_drawings) if total_drawings > 0 else 0.0
+
+        summary_ws.write(row, 0, '入力図面総数', label_fmt)
+        summary_ws.write(row, 1, total_drawings, value_fmt)
+        row += 1
+
+        summary_ws.write(row, 0, '差分抽出ペア数', label_fmt)
+        summary_ws.write(row, 1, pair_count, value_fmt)
+        row += 1
+
+        summary_ws.write(row, 0, '流用率 [%]', label_fmt)
+        summary_ws.write(row, 1, reuse_rate, pct_fmt)
+
+        # --- Diff List シート ---
+        master_df.to_excel(writer, sheet_name='Diff List', index=False)
+
     output.seek(0)
     return output.getvalue()
 
@@ -701,7 +796,7 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
             zip_file.writestr(UNCHANGED_LABELS_FILENAME, unchanged_labels_excel)
 
         if master_df is not None:
-            master_excel_data = save_master_to_bytes(master_df)
+            master_excel_data = save_master_to_bytes(master_df, pairs=pairs)
             output_master_filename = master_filename if master_filename else diff_config.MASTER_FILENAME
             zip_file.writestr(output_master_filename, master_excel_data)
 
@@ -835,6 +930,12 @@ def create_pairs_from_pair_list(pair_list_df, all_files_dict):
 
 def initialize_session_state():
     """セッション状態を初期化"""
+    if 'step0_mode' not in st.session_state:
+        st.session_state.step0_mode = 'new'
+
+    if 'new_master_filename_input' not in st.session_state:
+        st.session_state.new_master_filename_input = '図面親子管理台帳'
+
     if 'source_files_dict' not in st.session_state:
         st.session_state.source_files_dict = {}
 
@@ -1214,35 +1315,72 @@ def render_upload_status(summary_key, failures_key, label):
 
 
 def render_step0_master():
-    """Step 0: 親子関係台帳ファイルのアップロード"""
-    st.subheader("Step 0: 親子関係台帳ファイルのアップロード")
+    """Step 0: 親子関係台帳の設定"""
+    st.subheader("Step 0: 親子関係台帳の設定")
 
-    master_file = st.file_uploader(
-        "親子関係台帳Excelファイルをアップロードしてください（オプション）",
-        type=ui_config.MASTER_FILE_TYPES,
-        key=f"master_upload_{st.session_state.uploader_key}",
-        help="親子関係を一元管理するExcelファイルです。新しく見つかった親子関係が自動的に追加されます。"
+    prev_step0_mode = st.session_state.step0_mode
+
+    step0_mode = st.radio(
+        "台帳の利用方法",
+        options=['new', 'upload'],
+        format_func=lambda x: {
+            'new': '新規作成',
+            'upload': '既存ファイルをアップロードする',
+        }[x],
+        key='step0_mode',
+        horizontal=True,
+        label_visibility='collapsed',
     )
 
-    # 台帳ファイルの読み込み（ファイルがアップロードされた時点で自動処理）
-    if master_file is not None:
-        # まだ読み込まれていない場合、または異なるファイルの場合のみ読み込む
-        if st.session_state.master_df is None or st.session_state.get('master_file_name') != master_file.name:
-            master_df = load_parent_child_master(master_file)
-            if master_df is not None:
-                st.session_state.master_df = master_df
-                st.session_state.master_file_name = master_file.name  # アップロードされたファイルの元の名前を保存
-                st.session_state.added_relationships_count = 0  # リセット
-                st.success(f"記録済み親子関係（{len(master_df)}件のレコード）")
-        else:
-            # 既に読み込まれている場合は状態表示のみ
-            st.info(f"既存の親子関係に追加します（{len(st.session_state.master_df)}件のレコード）")
-    else:
-        # ファイルがアップロードされていない場合、セッション状態をクリア
-        if st.session_state.master_df is not None:
-            st.session_state.master_df = None
-            st.session_state.master_file_name = None
+    if prev_step0_mode != step0_mode:
+        st.session_state.master_df = None
+        st.session_state.master_file_name = None
+        st.session_state.added_relationships_count = 0
+
+    if step0_mode == 'new':
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            filename_base = st.text_input(
+                "台帳ファイル名（.xlsx は自動付与されます）",
+                key='new_master_filename_input',
+            )
+        filename_base = (filename_base or '').strip() or '図面親子管理台帳'
+        with col2:
+            st.write("")
+            st.caption(f"→ **{filename_base}.xlsx**")
+
+        master_filename = f"{filename_base}.xlsx"
+
+        if st.session_state.master_df is None:
+            st.session_state.master_df = create_empty_master_df()
             st.session_state.added_relationships_count = 0
+        st.session_state.master_file_name = master_filename
+
+        st.info(f"新規台帳「{master_filename}」を作成します。差分抽出後、台帳が自動更新されてダウンロードZIPに含まれます。")
+
+    else:
+        master_file = st.file_uploader(
+            "親子関係台帳Excelファイルをアップロードしてください",
+            type=ui_config.MASTER_FILE_TYPES,
+            key=f"master_upload_{st.session_state.uploader_key}",
+            help="親子関係を一元管理するExcelファイルです。新しく見つかった親子関係が自動的に追加されます。"
+        )
+
+        if master_file is not None:
+            if st.session_state.master_df is None or st.session_state.get('master_file_name') != master_file.name:
+                master_df = load_parent_child_master(master_file)
+                if master_df is not None:
+                    st.session_state.master_df = master_df
+                    st.session_state.master_file_name = master_file.name
+                    st.session_state.added_relationships_count = 0
+                    st.success(f"記録済み親子関係（{len(master_df)}件のレコード）")
+            else:
+                st.info(f"既存の親子関係に追加します（{len(st.session_state.master_df)}件のレコード）")
+        else:
+            if st.session_state.master_df is not None:
+                st.session_state.master_df = None
+                st.session_state.master_file_name = None
+                st.session_state.added_relationships_count = 0
 
 
 def render_step1_upload():
@@ -1800,16 +1938,9 @@ def render_step3_diff(complete_pairs):
         if successful_count > 0:
             st.subheader("Step 4: 差分抽出ファイルのダウンロード")
 
-            # ダウンロードボタンのラベルを作成
-            download_label = f"ZIPでダウンロード ({successful_count}ファイル"
-            if st.session_state.master_df is not None:
-                master_name = st.session_state.master_file_name if st.session_state.master_file_name else "親子関係台帳"
-                download_label += f" + {master_name}"
-            download_label += " + diff_labels.xlsx + unchanged_labels.xlsx)"
-
             downloaded = st.session_state.get('downloaded', False)
             st.download_button(
-                label=download_label,
+                label="ZIPでダウンロード",
                 data=st.session_state.zip_data,
                 file_name="dxf_diff_results.zip",
                 mime="application/zip",
