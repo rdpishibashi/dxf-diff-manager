@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 import zipfile
 from io import BytesIO
-from collections import defaultdict
+from collections import defaultdict, Counter
 import pandas as pd
 from datetime import datetime
 import gc
@@ -628,7 +628,8 @@ def create_pair_list(source_files_dict, dest_files_dict, progress_callback=None)
 
 
 def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None, deleted_color=None, added_color=None,
-                    unchanged_color=None, prefixes=None, progress_callback=None):
+                    unchanged_color=None, prefixes=None, progress_callback=None,
+                    filter_non_parts=False, validate_ref_designators=False):
     """
     ペアリストに基づいて差分DXFファイルを作成し、ZIPアーカイブを生成
 
@@ -658,6 +659,10 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
     prefixes = prefixes or []
     diff_label_sheets = []
     unchanged_label_sheets = []
+    summary_data = []
+    total_counter = Counter()
+    invalid_dict = defaultdict(lambda: {'count': 0, 'files': set()})
+    pair_extracted_info = {}  # main_drawing → {title, subtitle} (DXF から抽出)
     label_cache = {}
     zip_buffer = BytesIO()
     complete_pairs = [p for p in pairs if p['status'] == 'complete']
@@ -682,12 +687,15 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
             change_label_count = 0
             unchanged_label_count = 0
 
+            extra_info = {'labels_new': [], 'invalid_ref_designators': []}
             try:
-                change_rows, unchanged_entries = compute_label_differences(
+                change_rows, unchanged_entries, extra_info = compute_label_differences(
                     main_file_path,
                     source_file_path,
                     tolerance=tolerance,
-                    label_cache=label_cache
+                    label_cache=label_cache,
+                    filter_non_parts=filter_non_parts,
+                    validate_ref_designators=validate_ref_designators,
                 )
                 filtered_unchanged = filter_unchanged_by_prefix(unchanged_entries, prefixes)
                 change_label_count = len(change_rows)
@@ -696,6 +704,34 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                 st.error(f"ラベル比較中にエラーが発生しました ({main_drawing}): {str(e)}")
                 change_rows = []
                 filtered_unchanged = []
+
+            # Summary 行を収集
+            added_count = sum(1 for r in change_rows if r['Old Label'] is None)
+            deleted_count = sum(1 for r in change_rows if r['New Label'] is None)
+            changed_count = sum(1 for r in change_rows if r['Old Label'] is not None and r['New Label'] is not None)
+            resolved_title = extra_info.get('title') or pair.get('title')
+            resolved_subtitle = extra_info.get('subtitle') or pair.get('subtitle')
+            pair_extracted_info[main_drawing] = {'title': resolved_title, 'subtitle': resolved_subtitle}
+            summary_data.append({
+                '図番': main_drawing,
+                '流用元図番': source_drawing,
+                '追加ラベル数': added_count,
+                '削除ラベル数': deleted_count,
+                '変更ラベル数': changed_count,
+                'タイトル': resolved_title,
+                'サブタイトル': resolved_subtitle,
+            })
+
+            # Total 用ラベル集計
+            if filter_non_parts:
+                for label, _x, _y in extra_info['labels_new']:
+                    total_counter[label] += 1
+
+            # Invalid 集計
+            if validate_ref_designators:
+                for sym in extra_info['invalid_ref_designators']:
+                    invalid_dict[sym]['count'] += 1
+                    invalid_dict[sym]['files'].add(main_drawing)
 
             diff_label_sheets.append({
                 'sheet_name': main_drawing,
@@ -782,12 +818,35 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                     if original_pair:
                         pair_with_counts = original_pair.copy()
                         pair_with_counts['entity_counts'] = result['entity_counts']
+                        extracted = pair_extracted_info.get(result['main_drawing'], {})
+                        if extracted.get('title'):
+                            pair_with_counts['title'] = extracted['title']
+                        if extracted.get('subtitle'):
+                            pair_with_counts['subtitle'] = extracted['subtitle']
                         pairs_with_entity_counts.append(pair_with_counts)
 
             if pairs_with_entity_counts:
                 master_df, _ = update_parent_child_master(master_df, pairs_with_entity_counts)
 
-        diff_labels_excel = build_diff_labels_workbook(diff_label_sheets)
+        # Total データ生成
+        total_data = None
+        if filter_non_parts and total_counter:
+            total_data = [{'ラベル': lbl, '個数': cnt} for lbl, cnt in sorted(total_counter.items())]
+
+        # Invalid データ生成
+        invalid_data = None
+        if validate_ref_designators and invalid_dict:
+            invalid_data = [
+                {'機器符号': sym, '個数': v['count'], 'ファイル名': ', '.join(sorted(v['files']))}
+                for sym, v in sorted(invalid_dict.items())
+            ]
+
+        diff_labels_excel = build_diff_labels_workbook(
+            diff_label_sheets,
+            summary_data=summary_data if summary_data else None,
+            total_data=total_data,
+            invalid_data=invalid_data,
+        )
         unchanged_labels_excel = build_unchanged_labels_workbook(unchanged_label_sheets)
 
         if diff_labels_excel:
@@ -1739,14 +1798,32 @@ def render_step3_diff(complete_pairs):
         col1, col2 = st.columns(2)
 
         with col1:
+            validate_ref_designators = st.checkbox(
+                "**機器符号妥当性チェック**",
+                value=False,
+                help="機器符号パターンに一致するラベルのみを抽出し（Total シート追加）、標準フォーマット非適合の機器符号を Invalid シートに出力します。"
+            )
+            filter_non_parts = validate_ref_designators
+
+            st.write("")
             tolerance = st.number_input(
-                "座標許容誤差",
+                "**差分検出の際の座標マージン**",
                 min_value=1e-8,
                 max_value=1.0,
                 value=diff_config.DEFAULT_TOLERANCE,
                 format="%.8f",
-                help="差分判定の位置座標の比較における許容誤差です。大きくするほど座標の差を無視します。"
+                help="同じ図形と判定する座標の許容誤差です。大きくするほど位置ずれを無視します。",
             )
+
+            prefix_text = st.text_area(
+                "**未変更ラベルの中から抽出したい先頭文字列**（1行1件）",
+                value=st.session_state.prefix_text_input,
+                height=150,
+                help="prefix_config.txt に定義された初期値を基に編集できます。空行は無視されます。",
+                key=f"prefix_text_area_{st.session_state.uploader_key}"
+            )
+            st.session_state.prefix_text_input = prefix_text
+            prefix_list = get_prefix_list_from_state()
 
         with col2:
             st.write("**レイヤー色設定**")
@@ -1777,17 +1854,6 @@ def render_step3_diff(complete_pairs):
                 format_func=lambda x: x[1]
             )[0]
 
-        st.markdown("**未変更ラベルの中から抽出したい先頭文字列**")
-        prefix_text = st.text_area(
-            "1行につき1件を入力してください",
-            value=st.session_state.prefix_text_input,
-            height=150,
-            help="prefix_config.txt に定義された初期値を基に編集できます。空行は無視されます。",
-            key=f"prefix_text_area_{st.session_state.uploader_key}"
-        )
-        st.session_state.prefix_text_input = prefix_text
-        prefix_list = get_prefix_list_from_state()
-
     # 比較開始ボタン
     if complete_pairs:
         st.info(f"差分抽出可能なペア: {len(complete_pairs)}組")
@@ -1812,7 +1878,9 @@ def render_step3_diff(complete_pairs):
                     added_color=added_color,
                     unchanged_color=unchanged_color,
                     prefixes=prefix_list,
-                    progress_callback=diff_progress
+                    progress_callback=diff_progress,
+                    filter_non_parts=filter_non_parts,
+                    validate_ref_designators=validate_ref_designators,
                 )
 
                 # セッション状態に保存
@@ -1824,7 +1892,8 @@ def render_step3_diff(complete_pairs):
                     'tolerance': tolerance,
                     'deleted_color': deleted_color,
                     'added_color': added_color,
-                    'unchanged_color': unchanged_color
+                    'unchanged_color': unchanged_color,
+                    'validate_ref_designators': validate_ref_designators,
                 }
                 if updated_master is not None:
                     st.session_state.master_df = updated_master
