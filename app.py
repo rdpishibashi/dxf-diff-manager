@@ -1193,7 +1193,6 @@ def render_pair_list():
                 '比較先（新）': pair['main_drawing'],
                 '比較元（旧）': pair['source_drawing'],
                 '関係': pair.get('relation', 'なし'),
-                'ステータス': '✅ 差分抽出可能'
             })
 
         st.dataframe(pair_data, width='stretch', hide_index=True)
@@ -1245,7 +1244,6 @@ def render_pair_list():
             one_sided_data.append({
                 '比較先（新）': pair['main_drawing'] or '（なし）',
                 '比較元（旧）': pair['source_drawing'] or '（なし）',
-                'ステータス': '➖ 片側のみ（差分抽出対象外）'
             })
 
         with st.expander(f"➖ 片側のみのペア（{len(one_sided_pairs)}件）", expanded=True):
