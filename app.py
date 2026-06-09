@@ -1612,9 +1612,15 @@ def _render_step1_pair_list_mode():
 
 def _show_missing_drawings(pair_list_df, all_files_dict):
     """ペアリストにあるがアップロードされていない図番を表示"""
-    ref_drawings = set(pair_list_df['比較元図番'].tolist())
-    target_drawings = set(pair_list_df['比較先図番'].tolist())
-    uploaded = set(all_files_dict.keys())
+    def _to_drawing_set(series):
+        # 空セル(NaN=float)と文字列が混在すると sorted() が TypeError になるため、
+        # 文字列化してから空値・'nan' を除外する
+        values = series.astype(str).str.strip()
+        return {v for v in values if v and v.lower() != 'nan'}
+
+    ref_drawings = _to_drawing_set(pair_list_df['比較元図番'])
+    target_drawings = _to_drawing_set(pair_list_df['比較先図番'])
+    uploaded = {str(k) for k in all_files_dict.keys()}
 
     missing_ref = sorted(ref_drawings - uploaded)
     missing_target = sorted(target_drawings - uploaded)
