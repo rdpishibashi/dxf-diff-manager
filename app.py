@@ -963,7 +963,10 @@ def create_pairs_from_pair_list(pair_list_df, all_files_dict):
         ref_file_info = all_files_dict.get(ref_drawing) if ref_drawing else None
         target_file_info = all_files_dict.get(target_drawing) if target_drawing else None
 
-        if not ref_drawing or not target_drawing:
+        if ref_drawing and target_drawing and ref_drawing == target_drawing:
+            # 比較元と比較先が同一図番のため比較対象外
+            status = 'identical'
+        elif not ref_drawing or not target_drawing:
             # 相手図番がそもそも存在しない（ペアリストで片側を空白にしたケース）
             status = 'one_sided'
         elif ref_file_info and target_file_info:
@@ -1178,6 +1181,7 @@ def render_pair_list():
     missing_target_pairs = [p for p in st.session_state.pairs if p['status'] == 'missing_target']
     missing_both_pairs = [p for p in st.session_state.pairs if p['status'] == 'missing_both']
     one_sided_pairs = [p for p in st.session_state.pairs if p['status'] == 'one_sided']
+    identical_pairs = [p for p in st.session_state.pairs if p['status'] == 'identical']
     no_source_pairs = [p for p in st.session_state.pairs if p['status'] == 'no_source_defined']
 
     # 差分抽出可能なペア
@@ -1234,6 +1238,19 @@ def render_pair_list():
 
         with st.expander(f"⚠️ 比較元・比較先ともに未アップロード（{len(missing_both_pairs)}件）", expanded=True):
             st.dataframe(missing_both_data, width='stretch', hide_index=True)
+
+    # 比較元と比較先が同一図番のペア（比較対象外）
+    if identical_pairs:
+        identical_data = []
+        for pair in identical_pairs:
+            identical_data.append({
+                '図番': pair['source_drawing'],
+                'ステータス': '➖ 同一図番（差分抽出対象外）'
+            })
+
+        with st.expander(f"➖ 比較元・比較先が同一図番のペア（{len(identical_pairs)}件）", expanded=True):
+            st.caption("比較元と比較先が同じ図番のため、差分抽出の対象外としています。")
+            st.dataframe(identical_data, width='stretch', hide_index=True)
 
     # 片側のみのペア（ペアリストで比較元または比較先を空白にしたケース）
     if one_sided_pairs:
@@ -1630,15 +1647,25 @@ def _render_step1_pair_list_mode():
 
 def _show_missing_drawings(pair_list_df, all_files_dict):
     """ペアリストにあるがアップロードされていない図番を表示"""
-    def _to_drawing_set(series):
-        # 空セル(NaN=float)と文字列が混在すると sorted() が TypeError になるため、
-        # 文字列化してから空値・'nan' を除外する
-        values = series.astype(str).str.strip()
-        return {v for v in values if v and v.lower() != 'nan'}
+    def _norm(value):
+        # 空セル(NaN=float)対策で文字列化し、前後空白を除去
+        s = str(value).strip()
+        return '' if s.lower() == 'nan' else s
 
-    ref_drawings = _to_drawing_set(pair_list_df['比較元図番'])
-    target_drawings = _to_drawing_set(pair_list_df['比較先図番'])
-    uploaded = {str(k) for k in all_files_dict.keys()}
+    ref_drawings = set()
+    target_drawings = set()
+    for _, row in pair_list_df.iterrows():
+        ref = _norm(row['比較元図番'])
+        target = _norm(row['比較先図番'])
+        # 比較元と比較先が同一図番の行は比較対象外のため未アップロード判定から除外
+        if ref and target and ref == target:
+            continue
+        if ref:
+            ref_drawings.add(ref)
+        if target:
+            target_drawings.add(target)
+
+    uploaded = {str(k).strip() for k in all_files_dict.keys()}
 
     missing_ref = sorted(ref_drawings - uploaded)
     missing_target = sorted(target_drawings - uploaded)
