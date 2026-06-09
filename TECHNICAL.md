@@ -176,7 +176,9 @@ Step 1 の先頭でペアリング方式を選択する。選択は `st.session_
   - 必須カラム: `比較元図番` / `比較先図番`（または英語名 `Reference` / `Target`）
 - Step 1-2: 比較元・比較先のすべてのDXFファイルをまとめてアップロードし「ファイルを読み込む」をクリック
   - DXF解析なし（ファイル名のみを図番として使用）
-- アップロード直後に不足DXFファイルの一覧が表示される
+- アップロード直後に不足DXFファイルの一覧が表示される（`_show_missing_drawings`）
+  - 比較元と比較先が同一図番の行は比較対象外のため、未アップロード判定からも除外される
+  - アップロード済みファイルのキーは前後空白を除去（`strip`）して照合する
 
 ### ステップ 2: 図面ペア・リスト確認
 
@@ -192,7 +194,13 @@ Step 1 の先頭でペアリング方式を選択する。選択は `st.session_
 | `missing_source` | 流用元（旧）ファイルが未アップロード |
 | `missing_target` | 流用先（新）ファイルが未アップロード（pair_list のみ） |
 | `missing_both` | 両ファイルが未アップロード（pair_list のみ） |
+| `one_sided` | 比較元・比較先の片側が空白（相手図番が存在しない、pair_list のみ） |
+| `identical` | 比較元・比較先が同一図番（差分なしのため比較対象外、pair_list のみ） |
 | `no_source_defined` | 流用元図番が未記載（差分比較スキップ） |
+
+> **比較元と比較先が同一図番の行**（`比較元図番 == 比較先図番`）は `status='identical'` として分類される。差分が存在しないため `complete_pairs`（差分比較対象）には含まれず、ペア・リストの一覧にも表示しない。
+>
+> **表示について**: 「差分抽出が可能なペア」「片側のみのペア」の一覧では、値が常に一定となる「ステータス」列は表示しない。
 
 ### ステップ 3: 差分比較の実行
 
@@ -504,9 +512,11 @@ def load_pair_list(uploaded_file):
 **カラム名の正規化**: 英語名 `Reference` → `比較元図番`、`Target` → `比較先図番` に自動変換する。
 
 **後処理**:
-- 両カラムを文字列に変換してストリップ
-- 空文字・`'nan'` 行を除外
+- 両カラムを文字列に変換してストリップ。空セル（`NaN`）・`'nan'` は空文字に正規化
+- **両方が空白の行のみ除外**（片側だけ空白の行は「片側のみペア」として残す → `status='one_sided'`）
 - インデックスをリセット
+
+> 空セル（`NaN` は float 型）が図番文字列と混在すると後段の `sorted()` が `TypeError` になるため、必ず文字列化してから扱う。
 
 ---
 
@@ -569,16 +579,22 @@ auto モード用のペアリング関数。
 
 #### `create_pairs_from_pair_list(pair_list_df, all_files_dict)`
 
-pair_list モード用のペアリング関数。`pair_list_df` の各行について `all_files_dict` を参照し、ファイルの有無でステータスを決定する。
+pair_list モード用のペアリング関数。`pair_list_df` の各行について `all_files_dict` を参照し、図番の有無・ファイルの有無でステータスを決定する。
 
 ```python
-if ref_file_info and target_file_info:     status = 'complete'
+if ref_drawing and target_drawing and ref_drawing == target_drawing:
+                                             status = 'identical'      # 同一図番 → 比較対象外
+elif not ref_drawing or not target_drawing:  status = 'one_sided'      # 片側空白
+elif ref_file_info and target_file_info:     status = 'complete'
 elif not ref_file_info and target_file_info: status = 'missing_source'
 elif ref_file_info and not target_file_info: status = 'missing_target'
 else:                                        status = 'missing_both'
 ```
 
 `relation = 'ペアリスト'` が設定される。
+
+- **`identical`**（比較元 == 比較先）: 差分が無いため `complete_pairs` に含めず、一覧にも表示しない。
+- **`one_sided`**（片側空白）: 相手図番が存在しないため差分比較は行わないが、「片側のみのペア」一覧に表示する。
 
 ---
 
@@ -661,7 +677,11 @@ def render_pair_list():
     """
 ```
 
-`st.session_state.pairs` の内容を5種類のステータス別に分類して表示する。戻り値は `complete_pairs` のみのリスト（タプルではない）。
+`st.session_state.pairs` の内容をステータス別に分類して表示する。戻り値は `complete_pairs` のみのリスト（タプルではない）。
+
+- 表示する区分: `complete`（差分抽出が可能なペア）/ `missing_source` / `missing_target` / `missing_both` / `one_sided`（片側のみのペア）/ `no_source_defined`
+- `identical`（同一図番）は分類・表示の対象外（一覧に現れない）
+- 「差分抽出が可能なペア」「片側のみのペア」の表では、値が常に一定となる「ステータス」列は出力しない（前者は `比較先（新）`/`比較元（旧）`/`関係`、後者は `比較先（新）`/`比較元（旧）` のみ）
 
 ---
 
@@ -743,21 +763,35 @@ def _render_step1_all_in_one_mode():
 
 #### `_show_missing_drawings(pair_list_df, all_files_dict)`
 
-pair_list モードでアップロード後すぐに呼ばれ、ペアリストに記載されているが未アップロードのDXFファイルを警告表示する。
+pair_list モードでアップロード後すぐに呼ばれ、ペアリストに記載されているが未アップロードのDXFファイルを比較元・比較先別に警告表示する。
 
 ```python
 def _show_missing_drawings(pair_list_df, all_files_dict):
-    """ペアリストに記載されているが未アップロードの図番を表示する"""
-    all_drawing_numbers = set()
-    for _, row in pair_list_df.iterrows():
-        all_drawing_numbers.add(str(row['比較元図番']).strip())
-        all_drawing_numbers.add(str(row['比較先図番']).strip())
+    """ペアリストにあるがアップロードされていない図番を表示"""
+    def _norm(value):                          # NaN(float)対策で文字列化＋strip
+        s = str(value).strip()
+        return '' if s.lower() == 'nan' else s
 
-    missing = [dn for dn in sorted(all_drawing_numbers) if dn not in all_files_dict]
-    if missing:
-        st.warning(f"以下の図番のDXFファイルがアップロードされていません（{len(missing)}件）")
-        ...
+    ref_drawings, target_drawings = set(), set()
+    for _, row in pair_list_df.iterrows():
+        ref = _norm(row['比較元図番'])
+        target = _norm(row['比較先図番'])
+        if ref and target and ref == target:   # 同一図番は比較対象外 → 除外
+            continue
+        if ref:    ref_drawings.add(ref)
+        if target: target_drawings.add(target)
+
+    uploaded = {str(k).strip() for k in all_files_dict.keys()}
+    missing_ref = sorted(ref_drawings - uploaded)
+    missing_target = sorted(target_drawings - uploaded)
+    ...
 ```
+
+**ポイント**:
+- 値はすべて文字列化してから扱う（空セル `NaN` と文字列が混在した状態で `sorted()` すると `TypeError` になるため）
+- 比較元と比較先が同一図番の行は未アップロード判定から除外する
+- アップロード済みキーも `strip` して照合の取りこぼしを防ぐ
+- 比較元・比較先それぞれの未アップロード一覧を別々に表示する
 
 ---
 
