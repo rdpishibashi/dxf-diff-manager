@@ -2,9 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleDisplayName</key>
-	<string>Streamlit</string>
-	<key>CFBundleName</key>
-	<string>Streamlit</string>
+	<key>URL</key>
+	<string>https://dxf-diff-manager-cyapxlphcaajzu5mcchlcp.streamlit.app/</string>
 </dict>
 </plist>
