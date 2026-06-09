@@ -1181,7 +1181,6 @@ def render_pair_list():
     missing_target_pairs = [p for p in st.session_state.pairs if p['status'] == 'missing_target']
     missing_both_pairs = [p for p in st.session_state.pairs if p['status'] == 'missing_both']
     one_sided_pairs = [p for p in st.session_state.pairs if p['status'] == 'one_sided']
-    identical_pairs = [p for p in st.session_state.pairs if p['status'] == 'identical']
     no_source_pairs = [p for p in st.session_state.pairs if p['status'] == 'no_source_defined']
 
     # 差分抽出可能なペア
@@ -1238,19 +1237,6 @@ def render_pair_list():
 
         with st.expander(f"⚠️ 比較元・比較先ともに未アップロード（{len(missing_both_pairs)}件）", expanded=True):
             st.dataframe(missing_both_data, width='stretch', hide_index=True)
-
-    # 比較元と比較先が同一図番のペア（比較対象外）
-    if identical_pairs:
-        identical_data = []
-        for pair in identical_pairs:
-            identical_data.append({
-                '図番': pair['source_drawing'],
-                'ステータス': '➖ 同一図番（差分抽出対象外）'
-            })
-
-        with st.expander(f"➖ 比較元・比較先が同一図番のペア（{len(identical_pairs)}件）", expanded=True):
-            st.caption("比較元と比較先が同じ図番のため、差分抽出の対象外としています。")
-            st.dataframe(identical_data, width='stretch', hide_index=True)
 
     # 片側のみのペア（ペアリストで比較元または比較先を空白にしたケース）
     if one_sided_pairs:
