@@ -903,12 +903,12 @@ def load_pair_list(uploaded_file):
             return None
 
         df = df[required_columns].copy()
-        df['比較元図番'] = df['比較元図番'].astype(str).str.strip()
-        df['比較先図番'] = df['比較先図番'].astype(str).str.strip()
-        df = df[
-            (df['比較元図番'] != '') & (df['比較先図番'] != '')
-            & (df['比較元図番'] != 'nan') & (df['比較先図番'] != 'nan')
-        ]
+        # 文字列化し、空セル(NaN→'nan')や空白は空文字に正規化
+        for col in required_columns:
+            df[col] = df[col].astype(str).str.strip()
+            df[col] = df[col].where(df[col].str.lower() != 'nan', '')
+        # 両方が空白の行のみ除外（片側だけ空白の行は「片側のみペア」として残す）
+        df = df[(df['比較元図番'] != '') | (df['比較先図番'] != '')]
         return df.reset_index(drop=True)
 
     except Exception as e:
@@ -960,10 +960,13 @@ def create_pairs_from_pair_list(pair_list_df, all_files_dict):
         ref_drawing = str(row['比較元図番']).strip()
         target_drawing = str(row['比較先図番']).strip()
 
-        ref_file_info = all_files_dict.get(ref_drawing)
-        target_file_info = all_files_dict.get(target_drawing)
+        ref_file_info = all_files_dict.get(ref_drawing) if ref_drawing else None
+        target_file_info = all_files_dict.get(target_drawing) if target_drawing else None
 
-        if ref_file_info and target_file_info:
+        if not ref_drawing or not target_drawing:
+            # 相手図番がそもそも存在しない（ペアリストで片側を空白にしたケース）
+            status = 'one_sided'
+        elif ref_file_info and target_file_info:
             status = 'complete'
         elif not ref_file_info and target_file_info:
             status = 'missing_source'
@@ -1174,6 +1177,7 @@ def render_pair_list():
     missing_pairs = [p for p in st.session_state.pairs if p['status'] == 'missing_source']
     missing_target_pairs = [p for p in st.session_state.pairs if p['status'] == 'missing_target']
     missing_both_pairs = [p for p in st.session_state.pairs if p['status'] == 'missing_both']
+    one_sided_pairs = [p for p in st.session_state.pairs if p['status'] == 'one_sided']
     no_source_pairs = [p for p in st.session_state.pairs if p['status'] == 'no_source_defined']
 
     # 差分抽出可能なペア
@@ -1230,6 +1234,20 @@ def render_pair_list():
 
         with st.expander(f"⚠️ 比較元・比較先ともに未アップロード（{len(missing_both_pairs)}件）", expanded=True):
             st.dataframe(missing_both_data, width='stretch', hide_index=True)
+
+    # 片側のみのペア（ペアリストで比較元または比較先を空白にしたケース）
+    if one_sided_pairs:
+        one_sided_data = []
+        for pair in one_sided_pairs:
+            one_sided_data.append({
+                '比較先（新）': pair['main_drawing'] or '（なし）',
+                '比較元（旧）': pair['source_drawing'] or '（なし）',
+                'ステータス': '➖ 片側のみ（差分抽出対象外）'
+            })
+
+        with st.expander(f"➖ 片側のみのペア（{len(one_sided_pairs)}件）", expanded=True):
+            st.caption("ペアリストで比較元または比較先が空白の行です。相手図番がないため差分抽出は行いません。")
+            st.dataframe(one_sided_data, width='stretch', hide_index=True)
 
     # 流用元図番が指定されていないペア（自動ペアリングモード用）
     if no_source_pairs:
