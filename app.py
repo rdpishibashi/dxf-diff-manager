@@ -26,6 +26,7 @@ from utils.label_diff import (
     build_diff_labels_workbook,
     build_unchanged_labels_workbook
 )
+from utils.pairing import build_pairs, build_pairs_from_list
 
 # 設定をインポート
 from config import ui_config, diff_config, extraction_config, help_text
@@ -439,192 +440,13 @@ def extract_drawing_info_from_file(uploaded_file):
         return None
 
 
-def extract_base_drawing_number(drawing_number):
-    """
-    図番から最後の1英文字（Revision識別子）を除いたベース図番を抽出
-
-    Args:
-        drawing_number: 図番文字列
-
-    Returns:
-        tuple: (ベース図番, Revision識別子) または (None, None)
-    """
-    if not drawing_number or len(drawing_number) < 2:
-        return None, None
-
-    # 最後の1文字を確認
-    last_char = drawing_number[-1]
-
-    # 英大文字（半角または全角）の場合のみRevision識別子として扱う
-    if last_char.isalpha() and last_char.isupper():
-        base = drawing_number[:-1]
-        revision = last_char
-        return base, revision
-
-    # 全角英大文字の場合
-    if '\uff21' <= last_char <= '\uff3a':  # 全角A-Z
-        base = drawing_number[:-1]
-        revision = last_char
-        return base, revision
-
-    return None, None
-
-
-def create_revup_pairs(source_files_dict, dest_files_dict):
-    """
-    RevUpペア（Revision識別子のみ異なる同一図面のペア）を作成
-    流用元（source）と流用先（dest）の間でのみマッチングする
-
-    Args:
-        source_files_dict: 流用元（旧）の図番をキーとしたファイル情報の辞書
-        dest_files_dict: 流用先（新）の図番をキーとしたファイル情報の辞書
-
-    Returns:
-        tuple: (RevUpペアのリスト, 使用された流用元図番のセット, 使用された流用先図番のセット)
-    """
-    # 流用元のベース図番マップを作成
-    source_base_map = defaultdict(list)
-    for drawing_number in source_files_dict.keys():
-        base, revision = extract_base_drawing_number(drawing_number)
-        if base and revision:
-            source_base_map[base].append((drawing_number, revision))
-
-    # 流用先のベース図番マップを作成
-    dest_base_map = defaultdict(list)
-    for drawing_number in dest_files_dict.keys():
-        base, revision = extract_base_drawing_number(drawing_number)
-        if base and revision:
-            dest_base_map[base].append((drawing_number, revision))
-
-    revup_pairs = []
-    used_source = set()
-    used_dest = set()
-
-    # 共通のベース図番でペアを作成（流用元×流用先）
-    common_bases = set(source_base_map.keys()) & set(dest_base_map.keys())
-
-    for base in common_bases:
-        source_drawings = sorted(source_base_map[base], key=lambda x: x[1])
-        dest_drawings = sorted(dest_base_map[base], key=lambda x: x[1])
-
-        # 流用元（旧リビジョン）と流用先（新リビジョン）をマッチング
-        # 流用元のリビジョンが流用先より小さいものをペアにする
-        for old_drawing, old_rev in source_drawings:
-            for new_drawing, new_rev in dest_drawings:
-                if new_rev > old_rev and new_drawing not in used_dest and old_drawing not in used_source:
-                    old_file_info = source_files_dict[old_drawing]
-                    new_file_info = dest_files_dict[new_drawing]
-
-                    pair = {
-                        'main_drawing': new_drawing,
-                        'source_drawing': old_drawing,
-                        'main_file_info': new_file_info,
-                        'source_file_info': old_file_info,
-                        'status': 'complete',
-                        'relation': 'RevUp',
-                        'title': new_file_info.get('title'),
-                        'subtitle': new_file_info.get('subtitle')
-                    }
-
-                    revup_pairs.append(pair)
-                    used_source.add(old_drawing)
-                    used_dest.add(new_drawing)
-                    break  # この流用元は使用済み
-
-    return revup_pairs, used_source, used_dest
-
-
 def create_pair_list(source_files_dict, dest_files_dict, progress_callback=None):
+    """auto モード用ペアリング（薄いシム）。
+
+    実体は流用判定と RevUp 判定を独立実行する `utils.pairing.build_pairs`。
+    比較元は流用元グループ、比較先は流用先グループに限定される。
     """
-    流用元と流用先のファイル情報からペアリストを作成
-    ペアリングは流用元と流用先の間でのみ行う（同一グループ内ではペアリングしない）
-
-    優先順位:
-    1. RevUpペア（Revision識別子のみ異なる同一図面、流用元×流用先）
-    2. 流用ペア（流用先の流用元図番が流用元グループに存在するか）
-
-    Args:
-        source_files_dict: 流用元（旧）の図番をキーとしたファイル情報の辞書
-        dest_files_dict: 流用先（新）の図番をキーとしたファイル情報の辞書
-
-    Returns:
-        list: ペア情報のリスト
-    """
-    pairs = []
-
-    def report_progress(progress, message, count=None, total=None):
-        if progress_callback:
-            progress_callback(progress, message, count, total)
-
-    total_files = len(source_files_dict) + len(dest_files_dict)
-    report_progress(0.0, "RevUpペアを解析中...", 0, total_files)
-
-    # 1. RevUpペアを優先的に作成（流用元×流用先の間でのみ）
-    revup_pairs, used_source, used_dest = create_revup_pairs(source_files_dict, dest_files_dict)
-    pairs.extend(revup_pairs)
-    report_progress(0.3, "RevUpペアの解析が完了しました", len(used_source) + len(used_dest), total_files)
-
-    # 2. 残りの流用先ファイルで流用ペアを作成（流用元グループから検索）
-    remaining_dest = [d for d in dest_files_dict.keys() if d not in used_dest]
-    total_targets = len(remaining_dest)
-    processed_targets = 0
-
-    for main_drawing in remaining_dest:
-        file_info = dest_files_dict[main_drawing]
-        source_drawing = file_info.get('source_drawing_number')
-
-        # 流用元図番がある場合
-        if source_drawing:
-            # 流用元図番が図番自身と同じ場合はスキップ（無効なペア）
-            if source_drawing == main_drawing:
-                pair = {
-                    'main_drawing': main_drawing,
-                    'source_drawing': None,
-                    'main_file_info': file_info,
-                    'source_file_info': None,
-                    'title': file_info.get('title'),
-                    'subtitle': file_info.get('subtitle'),
-                    'relation': None,
-                    'status': 'no_source_defined'
-                }
-                pairs.append(pair)
-            else:
-                # 流用元グループからのみ検索
-                source_file_info = source_files_dict.get(source_drawing)
-
-                pair = {
-                    'main_drawing': main_drawing,
-                    'source_drawing': source_drawing,
-                    'main_file_info': file_info,
-                    'source_file_info': source_file_info,
-                    'status': 'complete' if source_file_info else 'missing_source',
-                    'relation': '流用',
-                    'title': file_info.get('title'),
-                    'subtitle': file_info.get('subtitle')
-                }
-                pairs.append(pair)
-        else:
-            # 流用元図番がない場合もリストに追加（流用元なし）
-            pair = {
-                'main_drawing': main_drawing,
-                'source_drawing': None,
-                'main_file_info': file_info,
-                'source_file_info': None,
-                'title': file_info.get('title'),
-                'subtitle': file_info.get('subtitle'),
-                'relation': None,
-                'status': 'no_source_defined'
-            }
-            pairs.append(pair)
-
-        processed_targets += 1
-        progress_fraction = 0.3 + 0.7 * (processed_targets / total_targets) if total_targets else 1.0
-        report_progress(min(progress_fraction, 1.0), "流用ペアを作成中...", processed_targets, total_targets)
-
-    final_total = total_targets if total_targets else total_files
-    report_progress(1.0, "図面ペア・リストの作成が完了しました", processed_targets, final_total)
-
-    return pairs
+    return build_pairs(source_files_dict, dest_files_dict, progress_callback=progress_callback)
 
 
 def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None, deleted_color=None, added_color=None,
@@ -945,52 +767,12 @@ def process_dxf_files_by_filename(uploaded_files, files_dict, upload_key_name, f
 
 
 def create_pairs_from_pair_list(pair_list_df, all_files_dict):
+    """pair_list モード用ペアリング（薄いシム）。
+
+    実体は明示ペアをそのまま解決する `utils.pairing.build_pairs_from_list`。
+    RevUp の自動補完は行わない。
     """
-    ペアリストとアップロードされたファイルからペアを作成
-
-    Args:
-        pair_list_df: 比較元図番・比較先図番カラムを持つDataFrame
-        all_files_dict: 図番をキーとしたファイル情報の辞書
-
-    Returns:
-        list: ペア情報のリスト
-    """
-    pairs = []
-    for _, row in pair_list_df.iterrows():
-        ref_drawing = str(row['比較元図番']).strip()
-        target_drawing = str(row['比較先図番']).strip()
-
-        ref_file_info = all_files_dict.get(ref_drawing) if ref_drawing else None
-        target_file_info = all_files_dict.get(target_drawing) if target_drawing else None
-
-        if ref_drawing and target_drawing and ref_drawing == target_drawing:
-            # 比較元と比較先が同一図番のため比較対象外
-            status = 'identical'
-        elif not ref_drawing or not target_drawing:
-            # 相手図番がそもそも存在しない（ペアリストで片側を空白にしたケース）
-            status = 'one_sided'
-        elif ref_file_info and target_file_info:
-            status = 'complete'
-        elif not ref_file_info and target_file_info:
-            status = 'missing_source'
-        elif ref_file_info and not target_file_info:
-            status = 'missing_target'
-        else:
-            status = 'missing_both'
-
-        pair = {
-            'main_drawing': target_drawing,
-            'source_drawing': ref_drawing,
-            'main_file_info': target_file_info,
-            'source_file_info': ref_file_info,
-            'status': status,
-            'relation': 'ペアリスト',
-            'title': None,
-            'subtitle': None,
-        }
-        pairs.append(pair)
-
-    return pairs
+    return build_pairs_from_list(pair_list_df, all_files_dict)
 
 
 def initialize_session_state():
@@ -1086,59 +868,12 @@ def initialize_session_state():
 
 
 def create_pairs_from_single_pool(files_dict):
+    """all_in_one モード用ペアリング（薄いシム）。
+
+    実体は単一プールに対し流用判定と RevUp 判定を独立実行する
+    `utils.pairing.build_pairs`（source と target に同一プールを渡す）。
     """
-    単一ファイルプールからペアを作成する（一括アップロードモード用）。
-
-    各ファイルの source_drawing_number を参照し、同じプール内に
-    対応する流用元ファイルがあればペアとして登録する。
-
-    Args:
-        files_dict: 図番をキーとしたファイル情報の辞書
-
-    Returns:
-        list: ペア情報のリスト
-    """
-    pairs = []
-    used_as_source = set()
-
-    for drawing_number, file_info in files_dict.items():
-        source_drawing = file_info.get('source_drawing_number')
-
-        if not source_drawing or source_drawing == drawing_number:
-            continue
-
-        source_file_info = files_dict.get(source_drawing)
-        pair = {
-            'main_drawing': drawing_number,
-            'source_drawing': source_drawing,
-            'main_file_info': file_info,
-            'source_file_info': source_file_info,
-            'status': 'complete' if source_file_info else 'missing_source',
-            'relation': '流用',
-            'title': None,
-            'subtitle': None,
-        }
-        pairs.append(pair)
-        if source_file_info:
-            used_as_source.add(source_drawing)
-
-    # 流用元図番が未記入かつ他のファイルから参照されていないファイルを追記
-    for drawing_number, file_info in files_dict.items():
-        source_drawing = file_info.get('source_drawing_number')
-        if (not source_drawing or source_drawing == drawing_number) \
-                and drawing_number not in used_as_source:
-            pairs.append({
-                'main_drawing': drawing_number,
-                'source_drawing': None,
-                'main_file_info': file_info,
-                'source_file_info': None,
-                'status': 'no_source_defined',
-                'relation': None,
-                'title': None,
-                'subtitle': None,
-            })
-
-    return pairs
+    return build_pairs(files_dict, files_dict)
 
 
 def update_master_if_needed(pairs):
