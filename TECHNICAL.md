@@ -114,6 +114,19 @@ Step 1 の先頭でペアリング方式を選択する。選択は `st.session_
    - 例: `DE5313-008-02A` (流用元) と `DE5313-008-02B` (流用先) → ペア
 2. **流用ペア**: 流用先DXFファイルに記載された流用元図番が流用元グループに存在する場合
 
+なお **auto モードでは RevUp ペアが流用ペアより優先**され、RevUp として消費された図番は流用ペアリングの対象外となる（同一比較先が重複しない）。一方 **all_in_one モードでは流用判定と RevUp 判定を独立して行い**、同一比較先が両方に登場し得る（3.3.1 参照）。
+
+#### 3.3.1 一括ペアリングの判定（all_in_one モード）
+
+all_in_one モードでは単一プール内で次の2判定を**独立して**実行し、両方のペアを出力する。
+
+1. **RevUp 判定**: プール内の同一ベース図番でリビジョン差のあるファイル同士をペア化（`relation='RevUp'`）。連続リビジョンが揃う場合は `A→B`, `B→C` のように連続ペアを生成する。
+2. **流用判定**: 各ファイルの流用元図番（`source_drawing_number`）がプール内に完全一致で存在すれば `complete`、なければ `missing_source`（`relation='流用'`）。
+
+- 流用元図番がプールに**完全一致で存在しなくても**、同一ベース図番の別リビジョン（RevUp 相手）がプールにあれば RevUp ペアとして検出される。
+- 完全に同一の（比較先, 比較元）ペアは重複排除し、RevUp 側を残す。
+- 同一の比較先図番が「RevUp ペア」と「流用ペア」の双方に登場し得る（意図的な仕様）。
+
 ### 3.4 差分比較処理
 
 - 図番（新）= 比較対象A、流用元図番（旧）= 比較対象B として処理
@@ -600,12 +613,16 @@ else:                                        status = 'missing_both'
 
 #### `create_pairs_from_single_pool(files_dict)`
 
-all_in_one モード用のペアリング関数。単一のファイルプールから自己完結型のペアを生成する。
+all_in_one モード用のペアリング関数。単一のファイルプールから自己完結型のペアを生成する。流用判定と RevUp 判定を**独立した2パス**で実行し、両方のペアを出力する。
 
 **ロジック**:
-1. `source_drawing_number` がある（かつ自分自身と異なる）ファイルをペアの主図面（流用先）とする
-2. 同じプール内に対応する `source_drawing_number` のファイルがあれば `status='complete'`、なければ `'missing_source'`
-3. `source_drawing_number` がないファイルのうち、他のファイルから流用元として参照されていないものを `status='no_source_defined'` として追記
+1. **RevUp パス**: `create_revup_pairs(files_dict, files_dict)` を単一プールに適用し、同一ベース図番・リビジョン差のペアを `status='complete'`, `relation='RevUp'` で生成する（連続リビジョンは `A→B`, `B→C` の連続ペア）。生成したペアのキー `(比較先, 比較元)` を記録する。
+2. **流用パス**: `source_drawing_number` がある（かつ自分自身と異なる）ファイルについて、同じキーが RevUp パスで生成済みなら重複させずスキップする。未生成なら、対応する流用元ファイルがプールにあれば `status='complete'`、なければ `'missing_source'`（`relation='流用'`）。
+3. **孤立ファイル**: いずれの役割でもペアに登場せず、`source_drawing_number` も未記入（または自分自身）のファイルを `status='no_source_defined'` として追記する。RevUp 相手として使われた旧リビジョンや RevUp 比較先は孤立扱いしない。
+
+> **流用元図番がプールに完全一致で存在しなくても**、同一ベース図番の別リビジョンがプールにあれば RevUp ペアとして `complete` で検出される。同一の比較先図番が流用ペア・RevUp ペアの双方に登場し得る。
+>
+> 回帰テスト: `tests/regression/test_single_pool_revup.py`
 
 ---
 
@@ -1629,4 +1646,4 @@ BASE_DIR = Path("/Users/ryozo/Dropbox/Client/ULVAC/ElectricDesignManagement/Tool
 
 ---
 
-*最終更新: 2026-05-28*
+*最終更新: 2026-06-12*
