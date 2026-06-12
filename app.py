@@ -933,14 +933,25 @@ def render_pair_list():
         st.dataframe(pair_data, width='stretch', hide_index=True)
 
     # 比較元のDXFファイルが未アップロードのペア
+    # 同じ比較先に RevUp の差分抽出可能ペアがある場合は、その比較元図番を併記する
     if missing_pairs:
+        revup_source_by_target = {
+            p['main_drawing']: p['source_drawing']
+            for p in complete_pairs
+            if p.get('relation') == 'RevUp'
+        }
         missing_data = []
         for pair in missing_pairs:
+            revup_source = revup_source_by_target.get(pair['main_drawing'])
+            if revup_source:
+                status = f'⚠️ 比較元のDXFなし・RevUpあり（{revup_source}）'
+            else:
+                status = '⚠️ 比較元のDXFなし'
             missing_data.append({
                 '比較先（新）': pair['main_drawing'],
                 '比較元（旧）': pair['source_drawing'],
                 '関係': pair.get('relation', 'なし'),
-                'ステータス': '⚠️ 比較元のDXFなし'
+                'ステータス': status
             })
 
         with st.expander(f"⚠️ 比較元のDXFファイルが未アップロード（{len(missing_pairs)}件）", expanded=True):
