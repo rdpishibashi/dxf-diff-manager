@@ -1,0 +1,193 @@
+"""
+utils.pairing コア（UI 非依存）のユニットテスト。
+
+streamlit に依存しないため app.py をインポートせず、コアを直接検証する。
+
+実行:
+    cd DXF-diff-manager
+    python -m tests.unit.test_pairing
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+import pandas as pd
+
+from utils import pairing
+from utils.pairing import (
+    build_pairs,
+    build_pairs_from_list,
+    find_revup_pairs,
+    extract_base_drawing_number,
+    RELATION_REVUP,
+    RELATION_DEPENDENCY,
+    RELATION_PAIR_LIST,
+    STATUS_COMPLETE,
+    STATUS_MISSING_SOURCE,
+    STATUS_MISSING_TARGET,
+    STATUS_MISSING_BOTH,
+    STATUS_ONE_SIDED,
+    STATUS_IDENTICAL,
+    STATUS_NO_SOURCE_DEFINED,
+)
+
+
+def _f(dn, source=None, title=None):
+    return {
+        'filename': f'{dn}.dxf', 'temp_path': f'/tmp/{dn}.dxf',
+        'main_drawing_number': dn, 'source_drawing_number': source, 'title': title,
+    }
+
+
+def _keys(pairs, status=None, relation=None):
+    return {
+        (p['main_drawing'], p['source_drawing']) for p in pairs
+        if (status is None or p['status'] == status)
+        and (relation is None or p['relation'] == relation)
+    }
+
+
+# --- extract_base_drawing_number ---
+
+def test_extract_base_halfwidth():
+    assert extract_base_drawing_number('DE5313-008-02B') == ('DE5313-008-02', 'B')
+
+
+def test_extract_base_fullwidth():
+    assert extract_base_drawing_number('DE5313-008-02Ｂ') == ('DE5313-008-02', 'Ｂ')
+
+
+def test_extract_base_no_revision():
+    assert extract_base_drawing_number('DE5313-008-02') == (None, None)
+    assert extract_base_drawing_number('') == (None, None)
+    assert extract_base_drawing_number('A') == (None, None)
+
+
+# --- find_revup_pairs ---
+
+def test_find_revup_consecutive():
+    pool = {dn: _f(dn) for dn in ['EE6333-365-61A', 'EE6333-365-61B', 'EE6333-365-61C']}
+    revup, used_src, used_tgt = find_revup_pairs(pool, pool)
+    keys = {(p['main_drawing'], p['source_drawing']) for p in revup}
+    assert keys == {('EE6333-365-61B', 'EE6333-365-61A'), ('EE6333-365-61C', 'EE6333-365-61B')}
+    assert all(p['relation'] == RELATION_REVUP and p['status'] == STATUS_COMPLETE for p in revup)
+
+
+def test_find_revup_cross_groups():
+    source = {'EE6333-365-61A': _f('EE6333-365-61A')}
+    target = {'EE6333-365-61B': _f('EE6333-365-61B')}
+    revup, _, _ = find_revup_pairs(source, target)
+    assert _keys(revup) == {('EE6333-365-61B', 'EE6333-365-61A')}
+
+
+# --- build_pairs (mode A: pool, pool) ---
+
+def test_build_pairs_single_pool_revup_when_source_missing():
+    pool = {
+        'EE6333-365-61C': _f('EE6333-365-61C', source='EE6331-365-61A'),  # 別系統・未UP
+        'EE6333-365-61B': _f('EE6333-365-61B'),
+    }
+    pairs = build_pairs(pool, pool)
+    assert ('EE6333-365-61C', 'EE6333-365-61B') in _keys(pairs, relation=RELATION_REVUP)
+    assert ('EE6333-365-61C', 'EE6331-365-61A') in _keys(pairs, status=STATUS_MISSING_SOURCE)
+
+
+def test_build_pairs_single_pool_same_target_twice():
+    pool = {
+        'EE6333-365-61C': _f('EE6333-365-61C', source='XX9999-000-01A'),
+        'EE6333-365-61B': _f('EE6333-365-61B'),
+        'XX9999-000-01A': _f('XX9999-000-01A'),
+    }
+    pairs = build_pairs(pool, pool)
+    rels = {p['relation'] for p in pairs if p['main_drawing'] == 'EE6333-365-61C'}
+    assert rels == {RELATION_REVUP, RELATION_DEPENDENCY}
+
+
+def test_build_pairs_single_pool_revup_source_not_orphan():
+    pool = {'EE6333-365-61C': _f('EE6333-365-61C'), 'EE6333-365-61B': _f('EE6333-365-61B')}
+    pairs = build_pairs(pool, pool)
+    orphans = {p['main_drawing'] for p in pairs if p['status'] == STATUS_NO_SOURCE_DEFINED}
+    assert orphans == set()
+
+
+def test_build_pairs_single_pool_isolated_orphan():
+    pool = {'EE6666-610-05A': _f('EE6666-610-05A')}
+    pairs = build_pairs(pool, pool)
+    assert len(pairs) == 1 and pairs[0]['status'] == STATUS_NO_SOURCE_DEFINED
+
+
+# --- build_pairs (mode B: source, target) ---
+
+def test_build_pairs_auto_independent_passes():
+    source = {'EE6333-365-61B': _f('EE6333-365-61B')}
+    target = {'EE6333-365-61C': _f('EE6333-365-61C', source='EE6331-365-61A')}
+    pairs = build_pairs(source, target)
+    assert ('EE6333-365-61C', 'EE6333-365-61B') in _keys(pairs, relation=RELATION_REVUP)
+    assert ('EE6333-365-61C', 'EE6331-365-61A') in _keys(pairs, status=STATUS_MISSING_SOURCE)
+
+
+def test_build_pairs_auto_exact_dup_dedup():
+    source = {'EE6333-365-61B': _f('EE6333-365-61B')}
+    target = {'EE6333-365-61C': _f('EE6333-365-61C', source='EE6333-365-61B')}
+    pairs = build_pairs(source, target)
+    c_to_b = [p for p in pairs if (p['main_drawing'], p['source_drawing']) == ('EE6333-365-61C', 'EE6333-365-61B')]
+    assert len(c_to_b) == 1 and c_to_b[0]['relation'] == RELATION_REVUP
+
+
+def test_build_pairs_auto_plain_dependency():
+    source = {'EE6097-039-06C': _f('EE6097-039-06C')}
+    target = {'EE6321-039-06A': _f('EE6321-039-06A', source='EE6097-039-06C')}
+    pairs = build_pairs(source, target)
+    assert ('EE6321-039-06A', 'EE6097-039-06C') in _keys(pairs, status=STATUS_COMPLETE, relation=RELATION_DEPENDENCY)
+
+
+def test_build_pairs_progress_callback_invoked():
+    calls = []
+    source = {'A1A': _f('A1A')}
+    target = {'A1B': _f('A1B', source='A1A')}
+    build_pairs(source, target, progress_callback=lambda *a: calls.append(a))
+    assert calls and calls[0][0] == 0.0 and calls[-1][0] == 1.0
+
+
+# --- build_pairs_from_list (mode C) ---
+
+def test_build_pairs_from_list_statuses():
+    files = {'A': _f('A'), 'C': _f('C')}
+    df = pd.DataFrame({
+        '比較元図番': ['A', 'A', 'X', 'A', '',  'A'],
+        '比較先図番': ['C', 'A', 'C', 'Z', 'C', ''],
+    })
+    pairs = build_pairs_from_list(df, files)
+    statuses = [p['status'] for p in pairs]
+    assert statuses == [
+        STATUS_COMPLETE,        # A->C 両方有
+        STATUS_IDENTICAL,       # A->A 同一
+        STATUS_MISSING_SOURCE,  # X(無)->C(有)
+        STATUS_MISSING_TARGET,  # A(有)->Z(無)
+        STATUS_ONE_SIDED,       # 空白->C
+        STATUS_ONE_SIDED,       # A->空白
+    ]
+    assert all(p['relation'] == RELATION_PAIR_LIST for p in pairs)
+
+
+def test_build_pairs_from_list_missing_both():
+    df = pd.DataFrame({'比較元図番': ['X'], '比較先図番': ['Y']})
+    pairs = build_pairs_from_list(df, {})
+    assert pairs[0]['status'] == STATUS_MISSING_BOTH
+
+
+def _run_all():
+    tests = [v for k, v in sorted(globals().items()) if k.startswith('test_') and callable(v)]
+    failures = []
+    for t in tests:
+        try:
+            t(); print(f"PASS: {t.__name__}")
+        except AssertionError as e:
+            failures.append(t.__name__); print(f"FAIL: {t.__name__}\n      {e}")
+    print(f"\n{len(tests) - len(failures)}/{len(tests)} passed")
+    return 1 if failures else 0
+
+
+if __name__ == '__main__':
+    sys.exit(_run_all())
