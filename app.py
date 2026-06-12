@@ -539,9 +539,13 @@ def create_pair_list(source_files_dict, dest_files_dict, progress_callback=None)
     流用元と流用先のファイル情報からペアリストを作成
     ペアリングは流用元と流用先の間でのみ行う（同一グループ内ではペアリングしない）
 
-    優先順位:
+    判定方式（流用判定と RevUp 判定を独立して実行し、両方のペアを出力する）:
     1. RevUpペア（Revision識別子のみ異なる同一図面、流用元×流用先）
     2. 流用ペア（流用先の流用元図番が流用元グループに存在するか）
+
+    RevUp で生成済みの同一ペアのみ重複排除する。RevUp で対応済みの比較先でも
+    別の流用元図番を持つ場合は独立した流用ペアとして追加するため、同一の
+    比較先図番が RevUp ペア・流用ペアの双方に登場し得る。
 
     Args:
         source_files_dict: 流用元（旧）の図番をキーとしたファイル情報の辞書
@@ -551,6 +555,8 @@ def create_pair_list(source_files_dict, dest_files_dict, progress_callback=None)
         list: ペア情報のリスト
     """
     pairs = []
+    pair_keys = set()        # 重複ペア排除用 (比較先, 比較元)
+    paired_drawings = set()  # いずれかの役割でペアに登場した比較先（孤立判定用）
 
     def report_progress(progress, message, count=None, total=None):
         if progress_callback:
@@ -559,40 +565,28 @@ def create_pair_list(source_files_dict, dest_files_dict, progress_callback=None)
     total_files = len(source_files_dict) + len(dest_files_dict)
     report_progress(0.0, "RevUpペアを解析中...", 0, total_files)
 
-    # 1. RevUpペアを優先的に作成（流用元×流用先の間でのみ）
-    revup_pairs, used_source, used_dest = create_revup_pairs(source_files_dict, dest_files_dict)
-    pairs.extend(revup_pairs)
-    report_progress(0.3, "RevUpペアの解析が完了しました", len(used_source) + len(used_dest), total_files)
+    # 1. RevUpペアを作成（流用元×流用先の間でのみ）。流用判定とは独立して出力する。
+    revup_pairs, _, used_dest = create_revup_pairs(source_files_dict, dest_files_dict)
+    for pair in revup_pairs:
+        pair_keys.add((pair['main_drawing'], pair['source_drawing']))
+        paired_drawings.add(pair['main_drawing'])
+        pairs.append(pair)
+    report_progress(0.3, "RevUpペアの解析が完了しました", len(used_dest), total_files)
 
-    # 2. 残りの流用先ファイルで流用ペアを作成（流用元グループから検索）
-    remaining_dest = [d for d in dest_files_dict.keys() if d not in used_dest]
-    total_targets = len(remaining_dest)
+    # 2. 流用ペアを作成（流用先の流用元図番を流用元グループから検索）。
+    #    RevUp で生成済みの同一ペアは重複させないが、RevUp 対応済みの比較先でも
+    #    別の流用元図番を持つ場合は独立した流用ペアとして追加する。
+    total_targets = len(dest_files_dict)
     processed_targets = 0
 
-    for main_drawing in remaining_dest:
-        file_info = dest_files_dict[main_drawing]
+    for main_drawing, file_info in dest_files_dict.items():
         source_drawing = file_info.get('source_drawing_number')
 
-        # 流用元図番がある場合
-        if source_drawing:
-            # 流用元図番が図番自身と同じ場合はスキップ（無効なペア）
-            if source_drawing == main_drawing:
-                pair = {
-                    'main_drawing': main_drawing,
-                    'source_drawing': None,
-                    'main_file_info': file_info,
-                    'source_file_info': None,
-                    'title': file_info.get('title'),
-                    'subtitle': file_info.get('subtitle'),
-                    'relation': None,
-                    'status': 'no_source_defined'
-                }
-                pairs.append(pair)
-            else:
-                # 流用元グループからのみ検索
+        if source_drawing and source_drawing != main_drawing:
+            key = (main_drawing, source_drawing)
+            if key not in pair_keys:
                 source_file_info = source_files_dict.get(source_drawing)
-
-                pair = {
+                pairs.append({
                     'main_drawing': main_drawing,
                     'source_drawing': source_drawing,
                     'main_file_info': file_info,
@@ -600,12 +594,21 @@ def create_pair_list(source_files_dict, dest_files_dict, progress_callback=None)
                     'status': 'complete' if source_file_info else 'missing_source',
                     'relation': '流用',
                     'title': file_info.get('title'),
-                    'subtitle': file_info.get('subtitle')
-                }
-                pairs.append(pair)
-        else:
-            # 流用元図番がない場合もリストに追加（流用元なし）
-            pair = {
+                    'subtitle': file_info.get('subtitle'),
+                })
+                pair_keys.add(key)
+            paired_drawings.add(main_drawing)
+
+        processed_targets += 1
+        progress_fraction = 0.3 + 0.7 * (processed_targets / total_targets) if total_targets else 1.0
+        report_progress(min(progress_fraction, 1.0), "流用ペアを作成中...", processed_targets, total_targets)
+
+    # 3. どのペアにも登場せず、流用元図番も未記入（または自分自身）の流用先を追記
+    for main_drawing, file_info in dest_files_dict.items():
+        source_drawing = file_info.get('source_drawing_number')
+        if (not source_drawing or source_drawing == main_drawing) \
+                and main_drawing not in paired_drawings:
+            pairs.append({
                 'main_drawing': main_drawing,
                 'source_drawing': None,
                 'main_file_info': file_info,
@@ -613,13 +616,8 @@ def create_pair_list(source_files_dict, dest_files_dict, progress_callback=None)
                 'title': file_info.get('title'),
                 'subtitle': file_info.get('subtitle'),
                 'relation': None,
-                'status': 'no_source_defined'
-            }
-            pairs.append(pair)
-
-        processed_targets += 1
-        progress_fraction = 0.3 + 0.7 * (processed_targets / total_targets) if total_targets else 1.0
-        report_progress(min(progress_fraction, 1.0), "流用ペアを作成中...", processed_targets, total_targets)
+                'status': 'no_source_defined',
+            })
 
     final_total = total_targets if total_targets else total_files
     report_progress(1.0, "図面ペア・リストの作成が完了しました", processed_targets, final_total)
