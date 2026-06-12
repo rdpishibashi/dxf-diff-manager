@@ -1089,8 +1089,11 @@ def create_pairs_from_single_pool(files_dict):
     """
     単一ファイルプールからペアを作成する（一括アップロードモード用）。
 
-    各ファイルの source_drawing_number を参照し、同じプール内に
-    対応する流用元ファイルがあればペアとして登録する。
+    流用判定（source_drawing_number の完全一致）と RevUp 判定（同一ベース図番・
+    リビジョン差）を独立して行い、両方のペアを出力する。流用元図番がプールに
+    存在しなくても、同一ベース図番の別リビジョン（RevUp 相手）がプール内にあれば
+    RevUp ペアとして検出する。同一の比較先図番が流用ペア・RevUp ペアの双方に
+    登場することを許容する（完全に同一のペアのみ重複排除）。
 
     Args:
         files_dict: 図番をキーとしたファイル情報の辞書
@@ -1099,16 +1102,34 @@ def create_pairs_from_single_pool(files_dict):
         list: ペア情報のリスト
     """
     pairs = []
-    used_as_source = set()
+    pair_keys = set()        # 重複ペア排除用 (比較先, 比較元)
+    paired_drawings = set()  # いずれかの役割でペアに登場した図番（孤立判定用）
 
+    # 1. RevUp ペア（同一ベース図番・リビジョン差）を生成
+    #    単一プール内でマッチングするため source/dest に同じ辞書を渡す
+    revup_pairs, _, _ = create_revup_pairs(files_dict, files_dict)
+    for pair in revup_pairs:
+        pair_keys.add((pair['main_drawing'], pair['source_drawing']))
+        paired_drawings.add(pair['main_drawing'])
+        paired_drawings.add(pair['source_drawing'])
+        pairs.append(pair)
+
+    # 2. 流用ペア（source_drawing_number の完全一致）を生成
     for drawing_number, file_info in files_dict.items():
         source_drawing = file_info.get('source_drawing_number')
 
         if not source_drawing or source_drawing == drawing_number:
             continue
 
+        key = (drawing_number, source_drawing)
+        if key in pair_keys:
+            # RevUp パスで生成済みの同一ペアは重複させない
+            paired_drawings.add(drawing_number)
+            paired_drawings.add(source_drawing)
+            continue
+
         source_file_info = files_dict.get(source_drawing)
-        pair = {
+        pairs.append({
             'main_drawing': drawing_number,
             'source_drawing': source_drawing,
             'main_file_info': file_info,
@@ -1117,16 +1138,17 @@ def create_pairs_from_single_pool(files_dict):
             'relation': '流用',
             'title': None,
             'subtitle': None,
-        }
-        pairs.append(pair)
+        })
+        pair_keys.add(key)
+        paired_drawings.add(drawing_number)
         if source_file_info:
-            used_as_source.add(source_drawing)
+            paired_drawings.add(source_drawing)
 
-    # 流用元図番が未記入かつ他のファイルから参照されていないファイルを追記
+    # 3. どのペアにも登場せず、流用元図番も未記入のファイルを追記
     for drawing_number, file_info in files_dict.items():
         source_drawing = file_info.get('source_drawing_number')
         if (not source_drawing or source_drawing == drawing_number) \
-                and drawing_number not in used_as_source:
+                and drawing_number not in paired_drawings:
             pairs.append({
                 'main_drawing': drawing_number,
                 'source_drawing': None,
