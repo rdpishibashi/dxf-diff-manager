@@ -725,6 +725,7 @@ def render_pair_list():
 - 表示する区分: `complete`（差分抽出が可能なペア）/ `missing_source` / `missing_target` / `missing_both` / `one_sided`（片側のみのペア）/ `no_source_defined`
 - `identical`（同一図番）は分類・表示の対象外（一覧に現れない）
 - 「差分抽出が可能なペア」「片側のみのペア」の表では、値が常に一定となる「ステータス」列は出力しない（前者は `比較先（新）`/`比較元（旧）`/`関係`、後者は `比較先（新）`/`比較元（旧）` のみ）
+- **`missing_source`（比較元のDXFファイル未アップロード）の表では、同じ比較先に RevUp の `complete` ペアがある場合**、ステータス列を `⚠️ 比較元のDXFなし・RevUpあり（<RevUp比較元図番>）` と表示し、RevUp による差分抽出が可能であることを示す。RevUp が無ければ `⚠️ 比較元のDXFなし`。判定は `complete` かつ `relation='RevUp'` のペアを `比較先 → 比較元` で引く辞書で行う。
 
 ---
 
