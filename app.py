@@ -1592,7 +1592,8 @@ def render_step3_diff(complete_pairs):
                 min_value=1e-8,
                 max_value=1.0,
                 value=diff_config.DEFAULT_TOLERANCE,
-                format="%.8f",
+                step=0.01,
+                format="%.2f",
                 help="同じ図形と判定する座標の許容誤差です。大きくするほど位置ずれを無視します。",
             )
 
