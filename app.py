@@ -704,6 +704,8 @@ def load_pair_list(uploaded_file):
     try:
         if uploaded_file.name.lower().endswith('.csv'):
             df = pd.read_csv(uploaded_file)
+        elif uploaded_file.name.lower().endswith('.xls'):
+            df = pd.read_excel(uploaded_file, engine='xlrd')
         else:
             df = pd.read_excel(uploaded_file)
 
