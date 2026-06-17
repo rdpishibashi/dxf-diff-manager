@@ -76,13 +76,13 @@ def get_prefix_list_from_state():
 
 def load_parent_child_master(uploaded_file):
     """
-    親子関係台帳ファイルを読み込む
+    図面管理台帳ファイルを読み込む
 
     Args:
         uploaded_file: アップロードされたExcelファイル
 
     Returns:
-        DataFrame: 親子関係台帳のデータフレーム
+        DataFrame: 図面管理台帳のデータフレーム
     """
     try:
         df = pd.read_excel(uploaded_file)
@@ -97,16 +97,16 @@ def load_parent_child_master(uploaded_file):
         return df
 
     except Exception as e:
-        st.error(f"親子関係台帳ファイルの読み込み中にエラーが発生しました: {str(e)}")
+        st.error(f"図面管理台帳ファイルの読み込み中にエラーが発生しました: {str(e)}")
         return None
 
 
 def update_parent_child_master(master_df, new_pairs):
     """
-    親子関係台帳に新しいペアを追加、もしくは既存ペアを更新する
+    図面管理台帳に新しいペアを追加、もしくは既存ペアを更新する
 
     Args:
-        master_df: 既存の親子関係台帳DataFrame
+        master_df: 既存の図面管理台帳DataFrame
         new_pairs: 新しいペア情報のリスト
 
     Returns:
@@ -216,7 +216,7 @@ def update_parent_child_master(master_df, new_pairs):
 
 
 def create_empty_master_df():
-    """空の親子関係台帳DataFrameを作成（図面親子管理台帳.xlsx のフォーマットに準拠）"""
+    """空の図面管理台帳DataFrameを作成（図面管理台帳.xlsx のフォーマットに準拠）"""
     return pd.DataFrame({
         'Child': pd.Series(dtype='object'),
         'Parent': pd.Series(dtype='object'),
@@ -235,14 +235,14 @@ def create_empty_master_df():
 
 def save_master_to_bytes(master_df, pairs=None):
     """
-    親子関係台帳DataFrameをExcelバイトデータに変換
+    図面管理台帳DataFrameをExcelバイトデータに変換
 
     シート構成:
       1. Summary  : 統計サマリー（エンティティ合計・図形変更率・図面統計・流用率）
-      2. Diff List: 親子関係台帳データ
+      2. Diff List: 図面管理台帳データ
 
     Args:
-        master_df: 親子関係台帳DataFrame
+        master_df: 図面管理台帳DataFrame
         pairs: ペア情報リスト（図面統計の計算に使用。Noneの場合は 0 で埋める）
 
     Returns:
@@ -457,8 +457,8 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
 
     Args:
         pairs: ペア情報のリスト
-        master_df: 親子関係台帳DataFrame（Noneでない場合はZIPに含める）
-        master_filename: 親子関係台帳のファイル名（Noneの場合はデフォルト名を使用）
+        master_df: 図面管理台帳DataFrame（Noneでない場合はZIPに含める）
+        master_filename: 図面管理台帳のファイル名（Noneの場合はデフォルト名を使用）
         tolerance: 座標許容誤差（Noneの場合はconfigのデフォルト値を使用）
         deleted_color: 削除エンティティの色（Noneの場合はconfigのデフォルト値を使用）
         added_color: 追加エンティティの色（Noneの場合はconfigのデフォルト値を使用）
@@ -628,7 +628,7 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
             if progress_callback:
                 progress_callback(index, total_pairs, f"{main_drawing} vs {source_drawing} 処理完了")
 
-        # 親子関係台帳を結果で更新（エンティティ数を含む）
+        # 図面管理台帳を結果で更新（エンティティ数を含む）
         if master_df is not None:
             pairs_with_entity_counts = []
             for result in results:
@@ -783,7 +783,7 @@ def initialize_session_state():
         st.session_state.step0_mode = 'new'
 
     if 'new_master_filename_input' not in st.session_state:
-        st.session_state.new_master_filename_input = '図面親子管理台帳'
+        st.session_state.new_master_filename_input = '図面管理台帳'
 
     if 'source_files_dict' not in st.session_state:
         st.session_state.source_files_dict = {}
@@ -879,7 +879,7 @@ def create_pairs_from_single_pool(files_dict):
 
 
 def update_master_if_needed(pairs):
-    """親子関係台帳を更新（必要な場合のみ）
+    """図面管理台帳を更新（必要な場合のみ）
 
     Args:
         pairs: ペア情報のリスト
@@ -1011,9 +1011,9 @@ def render_pair_list():
         with st.expander("流用元図番の記載がない図面（比較対象外）", expanded=False):
             st.dataframe(no_source_data, width='stretch', hide_index=True)
 
-    # 親子関係台帳更新状況の表示
+    # 図面管理台帳更新状況の表示
     if st.session_state.master_df is not None and st.session_state.added_relationships_count > 0:
-        st.success(f"親子関係台帳に {st.session_state.added_relationships_count} 件の新しい関係を追加しました")
+        st.success(f"図面管理台帳に {st.session_state.added_relationships_count} 件の新しい関係を追加しました")
 
     return complete_pairs
 
@@ -1141,8 +1141,8 @@ def render_upload_status(summary_key, failures_key, label):
 
 
 def render_step0_master():
-    """Step 0: 親子関係台帳の設定"""
-    st.subheader("Step 0: 親子関係台帳の設定")
+    """Step 1: 図面管理台帳の設定"""
+    st.subheader("Step 1: 図面管理台帳の設定")
 
     prev_step0_mode = st.session_state.step0_mode
 
@@ -1170,7 +1170,7 @@ def render_step0_master():
                 "台帳ファイル名（.xlsx は自動付与されます）",
                 key='new_master_filename_input',
             )
-        filename_base = (filename_base or '').strip() or '図面親子管理台帳'
+        filename_base = (filename_base or '').strip() or '図面管理台帳'
         with col2:
             st.write("")
             st.caption(f"→ **{filename_base}.xlsx**")
@@ -1186,7 +1186,7 @@ def render_step0_master():
 
     else:
         master_file = st.file_uploader(
-            "親子関係台帳Excelファイルをアップロードしてください",
+            "図面管理台帳Excelファイルをアップロードしてください",
             type=ui_config.MASTER_FILE_TYPES,
             key=f"master_upload_{st.session_state.uploader_key}",
             help="親子関係を一元管理するExcelファイルです。新しく見つかった親子関係が自動的に追加されます。"
@@ -1210,7 +1210,7 @@ def render_step0_master():
 
 
 def render_step1_upload():
-    """Step 1: DXFファイルのアップロードと図番抽出
+    """Step 2: DXFファイルのアップロードと図番抽出
 
     Returns:
         tuple: (source_count, dest_count)
@@ -1228,9 +1228,9 @@ def render_step1_upload():
 
 
 def _render_step1_auto_mode():
-    """自動ペアリングモードのStep 1"""
-    # Step 1-1: 流用元DXFファイルのアップロード
-    st.subheader("Step 1-1: 流用元（旧）DXFファイルのアップロード")
+    """自動ペアリングモードのStep 2"""
+    # Step 2-1: 流用元DXFファイルのアップロード
+    st.subheader("Step 2-1: 流用元（旧）DXFファイルのアップロード")
     st.caption("ファイル名（拡張子なし）が図番として使用されます。")
 
     source_uploaded_files = st.file_uploader(
@@ -1247,8 +1247,8 @@ def _render_step1_auto_mode():
     if source_count > 0:
         st.info(f"流用元（旧）図面: {source_count}件 読み込み済み")
 
-    # Step 1-2: 流用先DXFファイルのアップロード
-    st.subheader("Step 1-2: 流用先（新）DXFファイルのアップロード")
+    # Step 2-2: 流用先DXFファイルのアップロード
+    st.subheader("Step 2-2: 流用先（新）DXFファイルのアップロード")
 
     dest_uploaded_files = st.file_uploader(
         "流用先（新）DXFファイルをアップロードしてください（複数可・フォルダ可・複数回可）",
@@ -1303,13 +1303,13 @@ def _render_step1_auto_mode():
 
 
 def _render_step1_pair_list_mode():
-    """ペアリストモードのStep 1
+    """ペアリストモードのStep 2
 
     Returns:
         tuple: (all_count, 0)
     """
-    # Step 1-1: ペアリストのアップロード
-    st.subheader("Step 1-1: ペアリストのアップロード")
+    # Step 2-1: ペアリストのアップロード
+    st.subheader("Step 2-1: ペアリストのアップロード")
     st.caption(
         "比較元図番（旧）と比較先図番（新）のペアを記載したExcelまたはCSVファイルをアップロードしてください。\n"
         "必須カラム：**比較元図番** と **比較先図番**（または **Reference** と **Target**）"
@@ -1341,8 +1341,8 @@ def _render_step1_pair_list_mode():
         with st.expander("ペアリストプレビュー", expanded=False):
             st.dataframe(df, hide_index=True, width='stretch')
 
-    # Step 1-2: DXFファイルのアップロード
-    st.subheader("Step 1-2: DXFファイルのアップロード（比較元・比較先まとめて）")
+    # Step 2-2: DXFファイルのアップロード
+    st.subheader("Step 2-2: DXFファイルのアップロード（比較元・比較先まとめて）")
     st.caption("ファイル名（拡張子なし）が図番として使用されます。比較元と比較先のファイルをまとめてアップロードしてください。")
 
     all_uploaded_files = st.file_uploader(
@@ -1422,7 +1422,7 @@ def _show_missing_drawings(pair_list_df, all_files_dict):
 
 
 def _render_step1_all_in_one_mode():
-    """一括アップロードモードのStep 1
+    """一括アップロードモードのStep 2
 
     全DXFファイルをまとめてアップロードし、各ファイルのDXFから
     流用元図番を抽出してペアを自動作成する。
@@ -1430,7 +1430,7 @@ def _render_step1_all_in_one_mode():
     Returns:
         tuple: (all_in_one_count, 0)
     """
-    st.subheader("Step 1: DXFファイルの一括アップロード")
+    st.subheader("Step 2: DXFファイルの一括アップロード")
     st.caption(
         "流用元・流用先を区別せず全DXFファイルをアップロードしてください。\n"
         "ファイル名（拡張子なし）が図番として使用され、DXFから抽出した流用元図番でペアを自動作成します。"
@@ -1467,7 +1467,7 @@ def _render_step1_all_in_one_mode():
 
 
 def render_step2_pairing(source_count, dest_count):
-    """Step 2: 図面ペア・リスト作成
+    """Step 3: 図面ペア・リスト作成
 
     Args:
         source_count: 流用元件数（auto）またはDXFファイル件数（その他モード）
@@ -1477,21 +1477,21 @@ def render_step2_pairing(source_count, dest_count):
         tuple: (complete_pairs, pairs_ready)
     """
     mode = st.session_state.step1_mode
-    st.subheader("Step 2: 図面ペア・リスト確認")
+    st.subheader("Step 3: 図面ペア・リスト確認")
 
     if mode == 'pair_list':
         pair_list_ready = st.session_state.pair_list_df is not None
         has_files = source_count > 0
         ready_to_pair = pair_list_ready and has_files
         if not ready_to_pair:
-            st.info("Step 1-1でペアリストをアップロードしてください。" if not pair_list_ready
-                    else "Step 1-2でDXFファイルをアップロードしてください。")
+            st.info("Step 2-1でペアリストをアップロードしてください。" if not pair_list_ready
+                    else "Step 2-2でDXFファイルをアップロードしてください。")
         else:
             st.write(f"ペアリスト: {len(st.session_state.pair_list_df)}組、DXFファイル: {source_count}件")
     elif mode == 'all_in_one':
         ready_to_pair = source_count > 0
         if not ready_to_pair:
-            st.info("Step 1でDXFファイルをアップロードしてください。")
+            st.info("Step 2でDXFファイルをアップロードしてください。")
         else:
             st.write(f"DXFファイル: {source_count}件")
     else:  # auto
@@ -1571,7 +1571,7 @@ def render_step2_pairing(source_count, dest_count):
 
 
 def render_step3_diff(complete_pairs):
-    """Step 3: 差分比較（ペアが準備完了時）
+    """Step 4: 差分比較（ペアが準備完了時）
 
     Args:
         complete_pairs: 差分抽出可能なペアのリスト
@@ -1753,7 +1753,7 @@ def render_step3_diff(complete_pairs):
 
             preview_items = []
             if st.session_state.master_df is not None:
-                preview_items.append("親子関係台帳")
+                preview_items.append("図面管理台帳")
             if st.session_state.get('diff_labels_excel_data'):
                 preview_items.append("diff_labels.xlsx")
             if st.session_state.get('unchanged_labels_excel_data'):
@@ -1762,7 +1762,7 @@ def render_step3_diff(complete_pairs):
                 st.caption("表示可能: " + ", ".join(preview_items))
 
             if st.session_state.master_df is not None:
-                with st.expander("親子関係台帳プレビュー", expanded=False):
+                with st.expander("図面管理台帳プレビュー", expanded=False):
                     render_preview_dataframe(st.session_state.master_df, "master_preview")
 
             if st.session_state.get('diff_labels_excel_data'):
@@ -1789,7 +1789,7 @@ def render_step3_diff(complete_pairs):
 
         # ダウンロードボタン
         if successful_count > 0:
-            st.subheader("Step 4: 差分抽出ファイルのダウンロード")
+            st.subheader("Step 5: 差分抽出ファイルのダウンロード")
 
             downloaded = st.session_state.get('downloaded', False)
             st.download_button(
@@ -1848,7 +1848,7 @@ def render_step3_diff(complete_pairs):
 
 
 def render_step3_inactive(source_count, dest_count, pairs_available):
-    """Step 3: 差分比較（ペアが未準備時のガイダンス表示）
+    """Step 4: 差分比較（ペアが未準備時のガイダンス表示）
 
     Args:
         source_count: 流用元件数（auto）またはDXFファイル件数（その他モード）
@@ -1894,9 +1894,9 @@ def app():
             "ペアリング方式を選択してください",
             options=['all_in_one', 'auto', 'pair_list'],
             format_func=lambda x: {
-                'all_in_one': 'A: 全ファイルをまとめてアップロードし、各DXFファイルから流用元図番を抽出してペアを自動作成',
-                'auto':       'B: 流用元と流用先とを別々にアップロードし、流用先ファイルから流用元図番を抽出してペアを自動作成',
-                'pair_list':  'C: 全ファイルをまとめてアップロードし、ペアリストの内容でペアを作成',
+                'all_in_one': 'Type A: 全ファイルをまとめてアップロードし、各DXFファイルから流用元図番を抽出してペアを自動作成',
+                'auto':       'Type B: 流用元と流用先とを別々にアップロードし、流用先ファイルから流用元図番を抽出してペアを自動作成',
+                'pair_list':  'Type C: 全ファイルをまとめてアップロードし、ペアリストの内容でペアを作成',
             }[x],
             horizontal=False,
             key='step1_mode',
@@ -1916,7 +1916,7 @@ def app():
 
     complete_pairs, pairs_ready = render_step2_pairing(source_count, dest_count)
 
-    st.subheader("Step 3: 差分比較")
+    st.subheader("Step 4: 差分比較")
     if pairs_ready:
         render_step3_diff(complete_pairs)
     else:
