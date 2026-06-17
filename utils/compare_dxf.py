@@ -836,7 +836,13 @@ class OutputGenerator:
                         new_entity = target_space.add_lwpolyline(points=vertex_points)
                         new_entity.dxf.layer = layer_name
                         new_entity.dxf.color = layer_color
-                        if len(vertex_points) >= 3:
+                        if 'lineweight' in attrs and attrs['lineweight'] is not None:
+                            try:
+                                new_entity.dxf.lineweight = attrs['lineweight']
+                            except Exception:
+                                pass
+                        # flags bit 0 = closed; respect original state
+                        if attrs.get('flags', 0) & 1:
                             new_entity.close()
             
             else:
