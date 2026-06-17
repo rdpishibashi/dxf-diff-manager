@@ -1687,6 +1687,16 @@ BASE_DIR = Path("/Users/ryozo/Dropbox/Client/ULVAC/ElectricDesignManagement/Tool
 
 旧実装では `dest_count == -1`（pair_list モード）・`dest_count == -2`（all_in_one モード）というセンチネル値を `render_step2_pairing()` に渡してモード判定していたが、現在は廃止済み。モードは `st.session_state.step1_mode` を直接参照して判断する。Step 1 の各関数は常に実際のファイル件数を返す。
 
+### 15.10 LWPOLYLINE の closed 状態の保持（2026-06-17 修正）
+
+`compare_dxf.py` の `OutputGenerator.create_entity_from_absolute()` では以前、3頂点以上の LWPOLYLINE に対して**無条件に `close()` を呼んでいた**。
+
+**問題**: L 字型など 3 頂点の open な LWPOLYLINE（`flags=0`）を差分 DXF に書き出す際に `close()` が呼ばれ、始点と終点を結ぶ斜めの線分が追加されてしまっていた。元ファイルでは直角に折れ曲がった形状が差分ファイルでは三角形に変形して見える。
+
+**修正**: `if len(vertex_points) >= 3: new_entity.close()` を `if attrs.get('flags', 0) & 1: new_entity.close()` に変更。`dxf.flags` の bit 0（= 1 で closed、0 で open）を元ファイルから `all_existing_dxf_attribs()` 経由で取得し、元の closed 状態を正確に引き継ぐ。
+
+**副次修正**: LWPOLYLINE の `lineweight` も `attrs` から取得して保持するよう追加。
+
 ---
 
-*最終更新: 2026-06-16*
+*最終更新: 2026-06-17*
