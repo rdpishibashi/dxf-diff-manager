@@ -1081,7 +1081,24 @@ def expand_insert_entities(self, doc, doc_label: str) -> List[Dict]:
 
 **対応エンティティタイプ**: TEXT, MTEXT, LINE, ARC, CIRCLE, ELLIPSE, LWPOLYLINE, POINT, etc.
 
-**LWPOLYLINE 特別処理**: 頂点データは3通りの方法で取得を試みる（`get_points()` / `entity.vertices` のx,y属性 / `entity.vertices` のインデックス）。
+**LWPOLYLINE / LEADER 特別処理**: 頂点データはDXF属性ではなく専用APIから取得する。
+`_extract_polyline_like_vertices()` が3通りの方法で取得を試みる（`get_points()` /
+`entity.vertices` のx,y属性 / `entity.vertices` のインデックス）。LEADER は
+`get_points()` を持たないため3番目の方法（インデックスアクセス）でフォールバックする。
+
+**LEADER対応（2026-06 追加）**:
+
+以前は LEADER の頂点情報（`entity.vertices`）を抽出していなかったため、署名に位置情報が
+一切含まれず、**同一図面内の複数のLEADERが全て同一ハッシュに畳まれてしまう**問題と、
+`OutputGenerator.create_entity_from_absolute()` に LEADER 用の分岐が無く未対応エンティティの
+フォールバックで `"[LEADER]"` というTEXTが出力される問題があった。
+`safe_get_dxf_attributes()` で LWPOLYLINE と同様に `vertices` を抽出し、
+`SignatureGenerator._add_geometry_details()` で LWPOLYLINE と共通の頂点ベース署名
+（`leader_vertices_...` / `lwpolyline_vertices_...`）を生成するようにし、
+`create_entity_from_absolute()` には `target_space.add_leader(vertices=..., dimstyle='Standard', ...)`
+で実際の矢印線（LEADER）として出力する分岐を追加した。
+`dimstyle='Standard'` は `ezdxf.new(..., setup=True)` で生成する出力ドキュメントに
+常に存在するため追加のセットアップは不要。
 
 **ネストINSERTの再帰展開（`_expand_insert_recursive`、2026-06 追加）**:
 
