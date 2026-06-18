@@ -181,21 +181,21 @@ class EntityExpander:
             clean_attrs = {k: v for k, v in all_attrs.items() 
                           if k not in self.excluded_attributes}
             
-            # LWPOLYLINE特別処理
-            if entity.dxftype() == 'LWPOLYLINE':
-                vertices = self._extract_lwpolyline_vertices(entity)
+            # LWPOLYLINE / LEADER 特別処理（頂点列はDXF属性ではなく専用APIで取得する）
+            if entity.dxftype() in ('LWPOLYLINE', 'LEADER'):
+                vertices = self._extract_polyline_like_vertices(entity)
                 if vertices:
                     clean_attrs['vertices'] = vertices
-            
+
             return clean_attrs
-            
+
         except Exception as e:
             if self.debug:
                 logger.debug(f"Error getting attributes for {entity.dxftype()}: {e}")
             return {}
-    
-    def _extract_lwpolyline_vertices(self, entity) -> List[Tuple[float, float]]:
-        """LWPOLYLINE頂点情報を抽出"""
+
+    def _extract_polyline_like_vertices(self, entity) -> List[Tuple[float, float]]:
+        """LWPOLYLINE / LEADER の頂点情報を抽出"""
         vertices = []
         
         # 複数の方法で頂点を取得を試行
@@ -548,7 +548,7 @@ class SignatureGenerator:
                 math.radians(self.transformer.tolerance_config.angle_tolerance))
             signature_parts.append(f"ellipse_{center}_{major_axis}_{ratio}_{start_param}_{end_param}")
         
-        elif entity_type == 'LWPOLYLINE' and 'vertices' in attrs:
+        elif entity_type in ('LWPOLYLINE', 'LEADER') and 'vertices' in attrs:
             vertices = attrs['vertices']
             if vertices:
                 normalized_vertices = []
@@ -558,7 +558,7 @@ class SignatureGenerator:
                             (vertex[0], vertex[1]), entity_type)
                         normalized_vertices.append(norm_vertex)
                 if normalized_vertices:
-                    signature_parts.append(f"lwpoly_vertices_{normalized_vertices}")
+                    signature_parts.append(f"{entity_type.lower()}_vertices_{normalized_vertices}")
 
 
 class DiffAnalyzer:
@@ -847,7 +847,20 @@ class OutputGenerator:
             elif entity_type == 'POINT':
                 location = attrs.get('location', (0, 0, 0))
                 target_space.add_point(location=location, dxfattribs=dxfattribs)
-            
+
+            elif entity_type == 'LEADER':
+                vertices = attrs.get('vertices', [])
+                vertex_points = [(v[0], v[1]) for v in vertices if len(v) >= 2]
+                if len(vertex_points) >= 2:
+                    leader_attrs = {'layer': layer_name, 'color': layer_color}
+                    if 'lineweight' in attrs and attrs['lineweight'] is not None:
+                        leader_attrs['lineweight'] = attrs['lineweight']
+                    # dimstyle='Standard' は ezdxf.new(setup=True) で常に用意される
+                    target_space.add_leader(vertices=vertex_points, dimstyle='Standard',
+                                          dxfattribs=leader_attrs)
+                else:
+                    return False
+
             elif entity_type == 'LWPOLYLINE':
                 vertices = attrs.get('vertices', [])
                 if vertices:
