@@ -2,7 +2,7 @@ import ezdxf
 import hashlib
 import json
 import math
-from collections import defaultdict
+from collections import defaultdict, Counter
 from pathlib import Path
 from typing import Dict, List, Tuple, Set, Optional, Any
 from decimal import Decimal, getcontext
@@ -173,20 +173,31 @@ class EntityExpander:
             'objectid', 'uuid', 'app_data', 'doc', 'entitydb', 'is_alive',
             'is_virtual', 'is_copy', 'soft_pointer_ids', 'hard_pointer_ids'
         }
-    
+        # ブロック内エンティティのローカル属性（変換行列に依存しない部分）のキャッシュ。
+        # 同じブロックが多数のINSERTから参照される手描き回路図（記号の繰り返し配置）で、
+        # entity.dxf.all_existing_dxf_attribs() の再計算を避けるため id(entity) で
+        # メモ化する。transform_entity_to_absolute() 側は常に .copy() してから
+        # 座標変換するため、このキャッシュの中身が書き換わることはない。
+        self._local_attrs_cache: Dict[int, Dict] = {}
+
     def safe_get_dxf_attributes(self, entity) -> Dict:
-        """安全なDXF属性取得"""
+        """安全なDXF属性取得（変換行列に依存しないローカル属性。エンティティ単位でキャッシュする）"""
+        cache_key = id(entity)
+        if cache_key in self._local_attrs_cache:
+            return self._local_attrs_cache[cache_key]
+
         try:
             all_attrs = entity.dxf.all_existing_dxf_attribs()
-            clean_attrs = {k: v for k, v in all_attrs.items() 
+            clean_attrs = {k: v for k, v in all_attrs.items()
                           if k not in self.excluded_attributes}
-            
+
             # LWPOLYLINE / LEADER 特別処理（頂点列はDXF属性ではなく専用APIで取得する）
             if entity.dxftype() in ('LWPOLYLINE', 'LEADER'):
                 vertices = self._extract_polyline_like_vertices(entity)
                 if vertices:
                     clean_attrs['vertices'] = vertices
 
+            self._local_attrs_cache[cache_key] = clean_attrs
             return clean_attrs
 
         except Exception as e:
@@ -989,12 +1000,44 @@ class OutputGenerator:
             return False
 
 
+class PairFileCache:
+    """create_diff_zip() のバッチ処理内で、同じDXFファイルが複数ペアの
+    main/source として再利用される場合に、ezdxf読み込み＋エンティティ展開の
+    再計算を避けるキャッシュ（RevUp/流用チェーンで同じ親図面が複数の子の
+    比較対象になるケース等で有効）。
+
+    バッチ内での使用予定回数を事前に数えておき、最後の使用が終わったエントリは
+    その場で破棄する。1回しか使われないファイルはそもそもキャッシュしない。
+    そのため「バッチ内の全ファイルを無条件に保持する」方式とは異なり、
+    実際に再利用される分だけピークメモリが増える（メモリ最適化の方針と両立する）。
+    """
+
+    def __init__(self, keys):
+        self._remaining = Counter(keys)
+        self._cache: Dict[Tuple[str, Optional[Tuple[float, float]]], Tuple] = {}
+
+    def get_or_compute(self, key, compute_fn):
+        if key in self._cache:
+            result = self._cache[key]
+        else:
+            result = compute_fn()
+            if self._remaining[key] > 1:
+                self._cache[key] = result
+
+        self._remaining[key] -= 1
+        if self._remaining[key] <= 0:
+            self._cache.pop(key, None)
+
+        return result
+
+
 def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: str,
                                        tolerance: float = 0.01,
                                        deleted_color: int = 6,
                                        added_color: int = 4,
                                        unchanged_color: int = 7,
-                                       offset_b: Optional[Tuple[float, float]] = None) -> Tuple[bool, Optional[Dict[str, int]]]:
+                                       offset_b: Optional[Tuple[float, float]] = None,
+                                       pair_cache: Optional[PairFileCache] = None) -> Tuple[bool, Optional[Dict[str, int]]]:
     """
     DXFファイル比較メイン処理（Streamlit用インターフェース）
 
@@ -1007,6 +1050,9 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
         added_color: 追加エンティティの色（デフォルト: 4=シアン）
         unchanged_color: 変更なしエンティティの色（デフォルト: 7=白/黒）
         offset_b: ファイルBに適用するオフセット (dx, dy) のタプル (オプション)
+        pair_cache: バッチ内で同じファイルが複数ペアに登場する場合の再解析回避キャッシュ
+                    （省略時はキャッシュなしで毎回読み込む。呼び出し元が
+                    create_diff_zip() のバッチ単位で1つ生成し、全ペアに渡す想定）
 
     Returns:
         Tuple[bool, Optional[Dict[str, int]]]: (成功フラグ, エンティティ数情報)
@@ -1028,16 +1074,24 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
         layer_config = LayerConfig(deleted_color, added_color, unchanged_color)
         output_generator = OutputGenerator(transformer, layer_config, debug=False)
 
-        # DXFファイル読み込み
-        doc_a = ezdxf.readfile(file_a)
-        doc_b = ezdxf.readfile(file_b)
+        def _load_entities(file_path, doc_label, expander):
+            doc = ezdxf.readfile(file_path)
+            result = diff_analyzer.extract_entities_from_doc(doc, doc_label, expander)
+            del doc
+            return result
 
         # エンティティ抽出（ファイルBにはオフセット適用済み）
-        entities_a, data_a, locations_a = diff_analyzer.extract_entities_from_doc(
-            doc_a, "A", expander_a)
-        entities_b, data_b, locations_b = diff_analyzer.extract_entities_from_doc(
-            doc_b, "B", expander_b)
-        
+        # pair_cache がある場合、バッチ内で同じファイルが他のペアにも登場するなら
+        # 読み込み・展開済みの結果を再利用する（再利用がないファイルはキャッシュしない）
+        if pair_cache is not None:
+            entities_a, data_a, locations_a = pair_cache.get_or_compute(
+                (file_a, None), lambda: _load_entities(file_a, "A", expander_a))
+            entities_b, data_b, locations_b = pair_cache.get_or_compute(
+                (file_b, offset_b), lambda: _load_entities(file_b, "B", expander_b))
+        else:
+            entities_a, data_a, locations_a = _load_entities(file_a, "A", expander_a)
+            entities_b, data_b, locations_b = _load_entities(file_b, "B", expander_b)
+
         # 差分計算
         hashes_a = set(entities_a.keys())
         hashes_b = set(entities_b.keys())
@@ -1065,9 +1119,10 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
         success = output_generator.create_diff_dxf(
             entities_a, entities_b, deleted_hashes, added_hashes, common_hashes, output_file)
 
-        # メモリ解放: 大きなデータ構造を削除
-        del doc_a
-        del doc_b
+        # メモリ解放: ローカル変数を削除
+        # entities_a/entities_b 等が pair_cache 内でまだ別ペアから参照される場合、
+        # del はこの関数内のローカル名だけを外す（実体は pair_cache 側の参照で
+        # 生き続け、最後の使用後に pair_cache が自分で破棄する。get_or_compute 参照）
         del entities_a
         del entities_b
         del data_a

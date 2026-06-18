@@ -18,7 +18,7 @@ utils_path = os.path.join(current_dir, 'utils')
 sys.path.insert(0, utils_path)
 
 from utils.extract_labels import extract_labels
-from utils.compare_dxf import compare_dxf_files_and_generate_dxf
+from utils.compare_dxf import compare_dxf_files_and_generate_dxf, PairFileCache
 from utils.common_utils import save_uploadedfile, handle_error, cleanup_stale_temp_files
 from utils.label_diff import (
     compute_label_differences,
@@ -507,6 +507,15 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
     complete_pairs = [p for p in pairs if p['status'] == 'complete']
     total_pairs = len(complete_pairs)
 
+    # 同じファイルが複数ペアの基準/比較対象として再利用される場合（RevUp/流用
+    # チェーンで同じ親図面が複数の子の比較元になる等）の再解析を避けるキャッシュ。
+    # offset_b は常に None（このバッチ全体で固定値）なのでキーに含めて一致させる。
+    pair_cache_keys = (
+        [(p['main_file_info']['temp_path'], None) for p in complete_pairs] +
+        [(p['source_file_info']['temp_path'], None) for p in complete_pairs]
+    )
+    pair_cache = PairFileCache(pair_cache_keys)
+
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
 
         for index, pair in enumerate(complete_pairs, start=1):
@@ -593,7 +602,8 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                     deleted_color=deleted_color,
                     added_color=added_color,
                     unchanged_color=unchanged_color,
-                    offset_b=None
+                    offset_b=None,
+                    pair_cache=pair_cache
                 )
 
                 if success:
@@ -978,7 +988,7 @@ def render_pair_list():
                 'ステータス': status
             })
 
-        with st.expander(f"⚠️ 比較元のDXFファイルが未アップロード（{len(missing_pairs)}件）", expanded=True):
+        with st.expander(f"⚠️ 比較元のDXFファイルが未アップロード（{len(missing_pairs)}件）", expanded=False):
             st.dataframe(missing_data, width='stretch', hide_index=True)
 
     # 比較先のDXFファイルが未アップロードのペア（ペアリストモード用）

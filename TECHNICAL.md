@@ -779,6 +779,7 @@ def render_pair_list():
 - `identical`（同一図番）は分類・表示の対象外（一覧に現れない）
 - 「差分抽出が可能なペア」「片側のみのペア」の表では、値が常に一定となる「ステータス」列は出力しない（前者は `比較先（新）`/`比較元（旧）`/`関係`、後者は `比較先（新）`/`比較元（旧）` のみ）
 - **`missing_source`（比較元のDXFファイル未アップロード）の表では、同じ比較先に RevUp の `complete` ペアがある場合**、ステータス列を `⚠️ 比較元のDXFなし・RevUpあり（<RevUp比較元図番>）` と表示し、RevUp による差分抽出が可能であることを示す。RevUp が無ければ `⚠️ 比較元のDXFなし`。判定は `complete` かつ `relation='RevUp'` のペアを `比較先 → 比較元` で引く辞書で行う。
+- `missing_source` の `st.expander` は `expanded=False`（2026-06 変更。以前は `True` で初期表示時から開いていた）。`missing_target` / `missing_both`（pair_list モード用）は従来通り `expanded=True`。
 
 ---
 
@@ -1047,6 +1048,18 @@ def extract_labels(dxf_file, filter_non_parts=False, sort_order="asc", debug=Fal
 
 **ラベル座標付き返却**: `include_coordinates=True` の場合、`labels_with_coordinates` リスト（`(ラベル, X, Y)` タプルのリスト）を返す。`label_diff.py` からこのモードで呼ばれる。
 
+**INSERT展開のスキップ最適化（`_block_has_text_content()`、2026-06 追加）**:
+
+INSERT エンティティの展開は `e.virtual_entities()`（変換・複製を伴う重い処理）で行うが、
+手描き回路図ではテキストを持たないブロック（コネクタ等の記号）の INSERT が非常に多い。
+`_block_has_text_content(doc, block_name, cache)` で「ブロックが TEXT/MTEXT を含むか
+（ネストINSERTを再帰的にたどった先も含む）」をブロック名単位でメモ化し、含まない
+INSERT は `virtual_entities()` を呼ぶ前にスキップする。判定不能時は安全側（展開する）
+に倒すため出力結果は変わらない。サンプル161ファイルで最適化前後の抽出結果が
+完全一致することを確認済み（処理時間は計測環境で約10%短縮）。Step 2「ファイルを
+読み込む」の高速化対策。`DXF-extract-labels`（primary）で実装し、本プロジェクトへ
+伝播済み（バイト一致）。
+
 ---
 
 ## 8. utils/compare_dxf.py 詳解
@@ -1163,6 +1176,19 @@ def _expand_insert_recursive(self, doc, insert_entity, transform_matrix, expande
 これにより、ネストブロック内の実体（LINE等）が UNCHANGED/ADDED/DELETED の各レイヤーに
 正しく展開・分類されるようになった。
 
+**ローカル属性キャッシュ（`safe_get_dxf_attributes()`、2026-06 追加、Step 4 高速化）**:
+
+同じブロックが多数の INSERT から参照される手描き回路図（記号の繰り返し配置）では、
+`transform_entity_to_absolute()` が呼ぶ `safe_get_dxf_attributes()`（座標変換**前**の
+ローカル属性取得）がINSERTの数だけ再計算されていた。座標変換行列はINSERTごとに
+異なるが、変換前のローカル属性自体はブロック内エンティティ単位で不変なので、
+`EntityExpander._local_attrs_cache`（`id(entity)` をキーとする dict、インスタンス単位）
+でメモ化する。`transform_entity_to_absolute()` は必ず `clean_attrs.copy()` してから
+座標変換するため、このキャッシュの中身が書き換わることはない（`_transform_*_attributes()`
+はいずれも新しい dict/list に結果を書き込む実装で、`clean_attrs` 側を in-place 変更しない
+ことを確認済み）。`EntityExpander` インスタンスは1回の `compare_dxf_files_and_generate_dxf()`
+呼び出し内でのみ生成・破棄されるため、`id(entity)` の再利用によるキャッシュ衝突は発生しない。
+
 ### 8.5 `SignatureGenerator`
 
 各エンティティを一意に識別するための署名（SHA-256ハッシュ文字列）を生成する。
@@ -1213,6 +1239,36 @@ def compare_dxf_files_and_generate_dxf(
 3. `SignatureGenerator` で各エンティティの署名を生成
 4. 署名の集合差分（set difference）で ADDED / DELETED / UNCHANGED を分類
 5. 新しい DXF ドキュメントを作成し、3つのレイヤー（ADDED / DELETED / UNCHANGED）に色付きでエンティティを書き出す
+
+**`pair_cache: Optional[PairFileCache]`（2026-06 追加、Step 4 高速化）**:
+
+バッチ内で同じファイルが複数ペアの main/source として再利用される場合
+（RevUp/流用チェーンで同じ親図面が複数の子の比較対象になる等）、従来は
+ペアごとに `ezdxf.readfile()` から再パース＋再展開していた。`PairFileCache`
+（クラス定義は本関数の直前）は呼び出し元（`create_diff_zip()`、app.py）が
+バッチ単位で1つ生成し、全ペアの呼び出しに渡す。
+
+```python
+class PairFileCache:
+    """バッチ内での使用予定回数を事前に数え、最後の使用が終わったエントリは
+    その場で破棄する。1回しか使われないファイルはそもそもキャッシュしない
+    ため、実際に再利用される分だけピークメモリが増える（無条件に全ファイルを
+    保持するわけではない）。"""
+
+    def get_or_compute(self, key, compute_fn):
+        # key = (file_path, global_offset) — A は常に offset=None、
+        # B は呼び出し時の offset_b（現状は常に None）
+        ...
+```
+
+`entities_a`/`data_a`/`locations_a` 等はいずれも読み取り専用（`create_diff_dxf()` /
+`create_entity_from_absolute()` は新しい dict にコピーしてから書き込むのみで、
+キャッシュされた構造を in-place 変更しない）ため、複数ペアで安全に共有できる。
+関数末尾の `del entities_a` 等は、このローカル名を関数スコープから外すだけで、
+`pair_cache` 側がまだ参照を保持していれば実体は維持される（キャッシュ側の
+`get_or_compute()` が最後の使用後に自分で破棄する）。`pair_cache=None`（デフォルト）
+の場合は従来通りキャッシュなしで毎回読み込む。サンプルファイルで同一ファイルが
+5ペアに再利用されるケースで実測約30%短縮、有無での diff 結果完全一致を確認済み。
 
 ---
 
@@ -1807,4 +1863,4 @@ BASE_DIR = Path("/Users/ryozo/Dropbox/Client/ULVAC/ElectricDesignManagement/Tool
 
 ---
 
-*最終更新: 2026-06-18（Streamlit Community Cloud リソース制限対策: 出力Excelの二重保持解消・一時ファイルの孤立防止と掃除を追加）*
+*最終更新: 2026-06-18（Step 2/Step 4 高速化: INSERT展開スキップ・ローカル属性キャッシュ・バッチ内ファイル再利用キャッシュを追加。Streamlit Community Cloud リソース制限対策: 出力Excelの二重保持解消・一時ファイルの孤立防止と掃除も追加）*
