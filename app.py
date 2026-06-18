@@ -19,7 +19,7 @@ sys.path.insert(0, utils_path)
 
 from utils.extract_labels import extract_labels
 from utils.compare_dxf import compare_dxf_files_and_generate_dxf
-from utils.common_utils import save_uploadedfile, handle_error
+from utils.common_utils import save_uploadedfile, handle_error, cleanup_stale_temp_files
 from utils.label_diff import (
     compute_label_differences,
     filter_unchanged_by_prefix,
@@ -40,6 +40,23 @@ st.set_page_config(
 PREFIX_CONFIG_PATH = Path(current_dir) / "prefix_config.txt"
 DIFF_LABELS_FILENAME = "diff_labels.xlsx"
 UNCHANGED_LABELS_FILENAME = "unchanged_labels.xlsx"
+
+
+def read_zip_member(zip_data, member_name):
+    """zip_data（bytes）からメンバーを読み出す。存在しない場合は None。
+
+    diff_labels.xlsx / unchanged_labels.xlsx を session_state に二重保持しないため、
+    プレビュー表示時に zip_data から都度読み出す用途で使う。
+    """
+    if not zip_data:
+        return None
+    try:
+        with zipfile.ZipFile(BytesIO(zip_data)) as zf:
+            if member_name in zf.namelist():
+                return zf.read(member_name)
+    except Exception:
+        pass
+    return None
 
 
 def load_default_prefixes():
@@ -779,6 +796,11 @@ def create_pairs_from_pair_list(pair_list_df, all_files_dict):
 
 def initialize_session_state():
     """セッション状態を初期化"""
+    if '_stale_tmp_swept' not in st.session_state:
+        # リスタートを押さずに離脱した過去セッションの孤立一時ファイルを掃除する（新規セッションで一度だけ）
+        cleanup_stale_temp_files()
+        st.session_state['_stale_tmp_swept'] = True
+
     if 'step0_mode' not in st.session_state:
         st.session_state.step0_mode = 'new'
 
@@ -1080,6 +1102,15 @@ def process_all_uploaded_files(groups):
         gid = id(group)
         if file_info:
             main_drawing = file_info['main_drawing_number']
+            # 同じ図番への再アップロードで上書きする場合、古い一時ファイルが孤立しないよう削除する
+            old_info = group['files_dict'].get(main_drawing)
+            if old_info:
+                old_path = old_info.get('temp_path')
+                if old_path and old_path != file_info.get('temp_path') and os.path.exists(old_path):
+                    try:
+                        os.unlink(old_path)
+                    except Exception:
+                        pass
             group['files_dict'][main_drawing] = file_info
             group_results[gid]['processed'] += 1
         else:
@@ -1668,10 +1699,13 @@ def render_step3_diff(complete_pairs):
                 )
 
                 # セッション状態に保存
+                # diff_labels.xlsx / unchanged_labels.xlsx は zip_data の中にも同内容が
+                # 含まれるため、二重に保持しない。プレビュー表示時に zip から読み出す
+                # （has_* フラグのみ保持し、実体のbytesはここでは持たない）。
                 st.session_state.zip_data = zip_data
                 st.session_state.results = results
-                st.session_state.diff_labels_excel_data = diff_labels_excel
-                st.session_state.unchanged_labels_excel_data = unchanged_labels_excel
+                st.session_state.has_diff_labels = bool(diff_labels_excel)
+                st.session_state.has_unchanged_labels = bool(unchanged_labels_excel)
                 st.session_state.processing_settings = {
                     'tolerance': tolerance,
                     'deleted_color': deleted_color,
@@ -1744,8 +1778,10 @@ def render_step3_diff(complete_pairs):
         st.dataframe(result_data, width='stretch', hide_index=True)
 
         # プレビューセクション
-        preview_available = st.session_state.get('diff_labels_excel_data') is not None or \
-                            st.session_state.get('unchanged_labels_excel_data') is not None or \
+        # diff_labels.xlsx / unchanged_labels.xlsx は zip_data 内から都度読み出す（二重保持しない）
+        has_diff_labels = st.session_state.get('has_diff_labels', False)
+        has_unchanged_labels = st.session_state.get('has_unchanged_labels', False)
+        preview_available = has_diff_labels or has_unchanged_labels or \
                             st.session_state.master_df is not None
 
         if preview_available:
@@ -1754,9 +1790,9 @@ def render_step3_diff(complete_pairs):
             preview_items = []
             if st.session_state.master_df is not None:
                 preview_items.append("図面管理台帳")
-            if st.session_state.get('diff_labels_excel_data'):
+            if has_diff_labels:
                 preview_items.append("diff_labels.xlsx")
-            if st.session_state.get('unchanged_labels_excel_data'):
+            if has_unchanged_labels:
                 preview_items.append("unchanged_labels.xlsx")
             if preview_items:
                 st.caption("表示可能: " + ", ".join(preview_items))
@@ -1765,27 +1801,31 @@ def render_step3_diff(complete_pairs):
                 with st.expander("図面管理台帳プレビュー", expanded=False):
                     render_preview_dataframe(st.session_state.master_df, "master_preview")
 
-            if st.session_state.get('diff_labels_excel_data'):
+            if has_diff_labels:
                 diff_expanded = st.session_state.get('diff_preview_expanded', False)
                 with st.expander("diff_labels.xlsx プレビュー", expanded=diff_expanded):
-                    diff_xl = pd.ExcelFile(BytesIO(st.session_state.diff_labels_excel_data))
-                    sheet_name = st.selectbox(
-                        "シートを選択（diff_labels）",
-                        diff_xl.sheet_names,
-                        key="diff_labels_preview_sheet"
-                    )
-                    render_preview_dataframe(diff_xl.parse(sheet_name), "diff_preview")
-                    st.session_state['diff_preview_expanded'] = True
+                    diff_bytes = read_zip_member(st.session_state.zip_data, DIFF_LABELS_FILENAME)
+                    if diff_bytes:
+                        diff_xl = pd.ExcelFile(BytesIO(diff_bytes))
+                        sheet_name = st.selectbox(
+                            "シートを選択（diff_labels）",
+                            diff_xl.sheet_names,
+                            key="diff_labels_preview_sheet"
+                        )
+                        render_preview_dataframe(diff_xl.parse(sheet_name), "diff_preview")
+                        st.session_state['diff_preview_expanded'] = True
 
-            if st.session_state.get('unchanged_labels_excel_data'):
+            if has_unchanged_labels:
                 with st.expander("unchanged_labels.xlsx プレビュー", expanded=False):
-                    unchanged_xl = pd.ExcelFile(BytesIO(st.session_state.unchanged_labels_excel_data))
-                    sheet_name = st.selectbox(
-                        "シートを選択（unchanged_labels）",
-                        unchanged_xl.sheet_names,
-                        key="unchanged_labels_preview_sheet"
-                    )
-                    render_preview_dataframe(unchanged_xl.parse(sheet_name), "unchanged_preview")
+                    unchanged_bytes = read_zip_member(st.session_state.zip_data, UNCHANGED_LABELS_FILENAME)
+                    if unchanged_bytes:
+                        unchanged_xl = pd.ExcelFile(BytesIO(unchanged_bytes))
+                        sheet_name = st.selectbox(
+                            "シートを選択（unchanged_labels）",
+                            unchanged_xl.sheet_names,
+                            key="unchanged_labels_preview_sheet"
+                        )
+                        render_preview_dataframe(unchanged_xl.parse(sheet_name), "unchanged_preview")
 
         # ダウンロードボタン
         if successful_count > 0:
@@ -1833,7 +1873,7 @@ def render_step3_diff(complete_pairs):
                         'all_in_one_upload_failures', 'all_in_one_upload_summary',
                         'results', 'zip_data', 'processing_settings',
                         'master_df', 'master_file_name', 'added_relationships_count',
-                        'diff_labels_excel_data', 'unchanged_labels_excel_data',
+                        'has_diff_labels', 'has_unchanged_labels',
                         'downloaded']:
                 if key in st.session_state:
                     del st.session_state[key]

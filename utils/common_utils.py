@@ -1,13 +1,44 @@
 import os
 import tempfile
+import time
 import traceback
 import re
 
+# このアプリが作成する一時ファイルの識別用prefix。
+# セッションが正常終了せず孤立した一時ファイルを安全に掃除する際の目印として使う。
+TEMP_FILE_PREFIX = "dxfdm_"
+
 def save_uploadedfile(uploadedfile):
     """アップロードされたファイルを一時ディレクトリに保存する"""
-    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploadedfile.name)[1]) as f:
+    with tempfile.NamedTemporaryFile(delete=False, prefix=TEMP_FILE_PREFIX,
+                                      suffix=os.path.splitext(uploadedfile.name)[1]) as f:
         f.write(uploadedfile.getbuffer())
         return f.name
+
+
+def cleanup_stale_temp_files(max_age_seconds=3 * 60 * 60):
+    """
+    タブを閉じる等でセッションが正常終了せず孤立した本アプリの一時ファイルを掃除する。
+
+    通常の一時ファイルは cleanup_temp_files()（リスタートボタン押下時）で回収されるが、
+    ユーザーがリスタートを押さずにセッションを離脱した場合は回収されないまま残る。
+    新しいセッション開始時に一度だけ呼び、本アプリのprefix付きファイルのうち
+    十分古いもの（既存セッションが使用中である可能性が低いもの）だけを削除する。
+    """
+    try:
+        tmp_dir = tempfile.gettempdir()
+        now = time.time()
+        for name in os.listdir(tmp_dir):
+            if not name.startswith(TEMP_FILE_PREFIX):
+                continue
+            path = os.path.join(tmp_dir, name)
+            try:
+                if os.path.isfile(path) and (now - os.path.getmtime(path)) > max_age_seconds:
+                    os.unlink(path)
+            except Exception:
+                pass  # 他プロセスが使用中などのエラーは無視
+    except Exception:
+        pass
 
 def handle_error(e, show_traceback=True):
     """エラーを適切に処理して表示する"""
