@@ -90,23 +90,25 @@ def test_compute_unchanged_drawings_excludes_unuploaded_identical():
 
 def test_show_missing_drawings_includes_identical_rows():
     """identical（流用元==流用先）の行も、ファイル未アップロードならば
-    「未アップロードの流用元/流用先図番」の対象に含める（2026-06修正。以前は
-    比較対象外として無条件にスキップしていたため、ファイルが無い identical 宣言が
-    どこにも警告表示されなかった）。
+    統合済みの「未アップロードの図番」セクションの対象に含める（2026-06修正。
+    以前は比較対象外として無条件にスキップしていたため、ファイルが無い
+    identical 宣言がどこにも警告表示されなかった）。
     """
     import streamlit as st
     df = pd.DataFrame({'流用元図番': ['NO_FILE'], '流用先図番': ['NO_FILE']})
 
-    captured_labels = []
-    orig_expander = st.expander
-    st.expander = lambda label, *a, **k: (captured_labels.append(label), orig_expander(label, *a, **k))[1]
+    captured_dataframes = []
+    orig_dataframe = st.dataframe
+    st.dataframe = lambda data, *a, **k: captured_dataframes.append(data)
     try:
         app._show_missing_drawings(df, {})
     finally:
-        st.expander = orig_expander
+        st.dataframe = orig_dataframe
 
-    assert any('未アップロードの流用元図番' in t for t in captured_labels)
-    assert any('未アップロードの流用先図番' in t for t in captured_labels)
+    assert len(captured_dataframes) == 1
+    df_shown = captured_dataframes[0]
+    assert 'NO_FILE' in df_shown['流用元図番（未アップロード）'].values
+    assert 'NO_FILE' in df_shown['流用先図番（未アップロード）'].values
 
 
 def test_update_master_brand_new_drawing_parent_is_none():
