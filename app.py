@@ -1,12 +1,10 @@
 import streamlit as st
 import os
 import re
-import tempfile
 import sys
 from pathlib import Path
 import zipfile
 from io import BytesIO
-from collections import defaultdict, Counter
 import pandas as pd
 from datetime import datetime
 import gc
@@ -19,15 +17,16 @@ utils_path = os.path.join(current_dir, 'utils')
 sys.path.insert(0, utils_path)
 
 from utils.extract_labels import extract_labels
-from utils.compare_dxf import compare_dxf_files_and_generate_dxf, count_entities_in_dxf_file, PairFileCache
 from utils.common_utils import save_uploadedfile, handle_error, cleanup_stale_temp_files
-from utils.label_diff import (
-    compute_label_differences,
-    filter_unchanged_by_prefix,
-    build_diff_labels_workbook,
-    build_unchanged_labels_workbook
-)
+from utils import pairing
 from utils.pairing import build_pairs, build_pairs_from_list, primary_status_by_drawing
+from utils.master_ledger import (
+    load_parent_child_master,
+    update_parent_child_master,
+    create_empty_master_df,
+    save_master_to_bytes,
+)
+from utils.diff_export import create_diff_zip, DIFF_LABELS_FILENAME, UNCHANGED_LABELS_FILENAME
 
 # 設定をインポート
 from config import ui_config, diff_config, extraction_config, help_text
@@ -39,8 +38,6 @@ st.set_page_config(
 )
 
 PREFIX_CONFIG_PATH = Path(current_dir) / "prefix_config.txt"
-DIFF_LABELS_FILENAME = "diff_labels.xlsx"
-UNCHANGED_LABELS_FILENAME = "unchanged_labels.xlsx"
 
 # 図面管理台帳の新規作成時に使用する入力フォーマット
 SHIBAN_PATTERN = re.compile(r'^[A-Z]{2}\d{2}-\d{4}-\d$')   # 例: AA11-1111-1
@@ -95,288 +92,6 @@ def cleanup_temp_files():
 def get_prefix_list_from_state():
     text_value = st.session_state.get('prefix_text_input', "")
     return [line.strip() for line in text_value.splitlines() if line.strip()]
-
-
-def load_parent_child_master(uploaded_file):
-    """
-    図面管理台帳ファイルを読み込む
-
-    Args:
-        uploaded_file: アップロードされたExcelファイル
-
-    Returns:
-        DataFrame: 図面管理台帳のデータフレーム
-    """
-    try:
-        df = pd.read_excel(uploaded_file)
-
-        # 必要なカラムが存在するか確認
-        required_columns = ['Child', 'Parent']
-        for col in required_columns:
-            if col not in df.columns:
-                st.error(f"必須カラム '{col}' が見つかりません。")
-                return None
-
-        return df
-
-    except Exception as e:
-        st.error(f"図面管理台帳ファイルの読み込み中にエラーが発生しました: {str(e)}")
-        return None
-
-
-def update_parent_child_master(master_df, new_pairs):
-    """
-    図面管理台帳に新しいペアを追加、もしくは既存ペアを更新する
-
-    Args:
-        master_df: 既存の図面管理台帳DataFrame
-        new_pairs: 新しいペア情報のリスト
-
-    Returns:
-        tuple: (更新されたDataFrame, 追加された件数)
-    """
-    added_count = 0
-    new_records = []
-    updated_df = master_df.copy()
-
-    entity_count_columns = ['Deleted Entities', 'Added Entities', 'Diff Entities',
-                            'Unchanged Entities', 'Total Entities']
-
-    for pair in new_pairs:
-        parent = pair.get('source_drawing')  # 流用元図番がParent
-        child = pair.get('main_drawing')      # 図番がChild
-        title = pair.get('title')
-        subtitle = pair.get('subtitle')
-        relation = pair.get('relation')       # 'RevUp' / '流用' / 完全新規図面など
-        entity_counts = pair.get('entity_counts')  # エンティティ数情報
-
-        if not child:
-            continue
-
-        # 流用元が存在しない（完全新規図面）場合、Parent欄は "none" とする
-        # （流用元の参照なしを明示する。2026-06 追加）
-        is_brand_new = not parent
-        parent_value = parent if parent else 'none'
-
-        # 既存のレコードに同じ親子関係が存在するか確認
-        mask = (updated_df['Parent'] == parent_value) & (updated_df['Child'] == child)
-        exists = mask.any()
-
-        if exists:
-            # 既存レコードを更新（Child/Parent/Noteは保持）
-            current_date = datetime.now()
-
-            # 必要な列が存在しない場合は追加（文字列型として明示）
-            if 'Relation' not in updated_df.columns:
-                updated_df['Relation'] = pd.Series(dtype='object')
-            if 'Title' not in updated_df.columns:
-                updated_df['Title'] = pd.Series(dtype='object')
-            if 'Subtitle' not in updated_df.columns:
-                updated_df['Subtitle'] = pd.Series(dtype='object')
-            if 'Recorded Date' not in updated_df.columns:
-                # 古い'Date'列があれば'Recorded Date'にリネーム
-                if 'Date' in updated_df.columns:
-                    updated_df.rename(columns={'Date': 'Recorded Date'}, inplace=True)
-                else:
-                    updated_df['Recorded Date'] = None
-
-            # エンティティ数カラムを追加（存在しない場合）
-            # object dtype: 通常は整数、完全新規図面の行では "n/a" 文字列も入るため
-            for col in entity_count_columns:
-                if col not in updated_df.columns:
-                    updated_df[col] = pd.Series(dtype='object')
-
-            if 'Note' not in updated_df.columns:
-                updated_df['Note'] = pd.Series(dtype='object')
-
-            if relation:
-                prev_relation_series = updated_df.loc[mask, 'Relation']
-                relation_to_set = relation
-                if prev_relation_series.notna().any():
-                    prev_unique = prev_relation_series.dropna().unique()
-                    if len(prev_unique) > 0 and prev_unique[0] != relation:
-                        relation_to_set = f"{relation}-changed"
-                updated_df.loc[mask, 'Relation'] = relation_to_set
-
-            updated_df.loc[mask, 'Title'] = title
-            updated_df.loc[mask, 'Subtitle'] = subtitle
-            updated_df.loc[mask, 'Recorded Date'] = current_date
-
-            # エンティティ数を更新
-            # 完全新規図面（流用元なし）: 比較を行っていないため Added=Total（その図面
-            # 自体の総エンティティ数）とし、それ以外（Deleted/Diff/Unchanged）は
-            # 比較対象が存在しないため "n/a" を明示する（2026-06 追加）。
-            if is_brand_new:
-                updated_df.loc[mask, 'Deleted Entities'] = 'n/a'
-                updated_df.loc[mask, 'Diff Entities'] = 'n/a'
-                updated_df.loc[mask, 'Unchanged Entities'] = 'n/a'
-                if entity_counts:
-                    updated_df.loc[mask, 'Added Entities'] = entity_counts.get('added_entities')
-                    updated_df.loc[mask, 'Total Entities'] = entity_counts.get('total_entities')
-            elif entity_counts:
-                updated_df.loc[mask, 'Deleted Entities'] = entity_counts.get('deleted_entities')
-                updated_df.loc[mask, 'Added Entities'] = entity_counts.get('added_entities')
-                updated_df.loc[mask, 'Diff Entities'] = entity_counts.get('diff_entities')
-                updated_df.loc[mask, 'Unchanged Entities'] = entity_counts.get('unchanged_entities')
-                updated_df.loc[mask, 'Total Entities'] = entity_counts.get('total_entities')
-        else:
-            # 新しいレコードを追加
-            new_record = {
-                'Child': child,
-                'Parent': parent_value,
-                'Relation': relation,
-                'Title': title,
-                'Subtitle': subtitle,
-                'Recorded Date': datetime.now()
-            }
-
-            # エンティティ数を追加（完全新規図面は上記と同じ規則。2026-06 追加）
-            if is_brand_new:
-                new_record['Deleted Entities'] = 'n/a'
-                new_record['Diff Entities'] = 'n/a'
-                new_record['Unchanged Entities'] = 'n/a'
-                if entity_counts:
-                    new_record['Added Entities'] = entity_counts.get('added_entities')
-                    new_record['Total Entities'] = entity_counts.get('total_entities')
-            elif entity_counts:
-                new_record['Deleted Entities'] = entity_counts.get('deleted_entities')
-                new_record['Added Entities'] = entity_counts.get('added_entities')
-                new_record['Diff Entities'] = entity_counts.get('diff_entities')
-                new_record['Unchanged Entities'] = entity_counts.get('unchanged_entities')
-                new_record['Total Entities'] = entity_counts.get('total_entities')
-
-            new_records.append(new_record)
-            added_count += 1
-
-    if new_records:
-        for record in new_records:
-            for key in record.keys():
-                if key not in updated_df.columns:
-                    updated_df[key] = pd.Series(dtype='object')
-            updated_df.loc[len(updated_df)] = record
-
-    return updated_df, added_count
-
-
-def create_empty_master_df():
-    """空の図面管理台帳DataFrameを作成（図面管理台帳.xlsx のフォーマットに準拠）"""
-    return pd.DataFrame({
-        'Child': pd.Series(dtype='object'),
-        'Parent': pd.Series(dtype='object'),
-        'Relation': pd.Series(dtype='object'),
-        'Title': pd.Series(dtype='object'),
-        'Subtitle': pd.Series(dtype='object'),
-        'Recorded Date': pd.Series(dtype='object'),
-        'Note': pd.Series(dtype='object'),
-        # object dtype: 通常は整数、完全新規図面の行では "n/a" 文字列も入るため
-        'Deleted Entities': pd.Series(dtype='object'),
-        'Added Entities': pd.Series(dtype='object'),
-        'Diff Entities': pd.Series(dtype='object'),
-        'Unchanged Entities': pd.Series(dtype='object'),
-        'Total Entities': pd.Series(dtype='object'),
-    })
-
-
-def save_master_to_bytes(master_df, pairs=None, mode=None, total_drawings_count=None):
-    """
-    図面管理台帳DataFrameをExcelバイトデータに変換
-
-    シート構成:
-      1. Summary  : 統計サマリー（エンティティ合計・図形変更率・図面統計・流用率）
-      2. Diff List: 図面管理台帳データ
-
-    Args:
-        master_df: 図面管理台帳DataFrame
-        pairs: ペア情報リスト（差分抽出ペア数の計算に使用。Noneの場合は 0 で埋める）
-        mode: ペアリング方式（'all_in_one'(Type A) / 'auto'(Type B) / 'pair_list'(Type C)）。
-              Type A は「アップロード図面総数」、Type B/C は「流用先図面総数」を分母に使う。
-        total_drawings_count: 図面統計の分母件数（呼び出し側で mode に応じて算出する）
-
-    Returns:
-        bytes: Excelファイルのバイトデータ
-    """
-    if mode == 'all_in_one':
-        total_drawings_label = 'アップロード図面総数'
-        total_entities_label = 'アップロード図面 図形総数'
-    else:
-        total_drawings_label = '流用先図面総数'
-        total_entities_label = '流用先図面 図形総数'
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        workbook = writer.book
-
-        # --- Summary シート（先に追加してタブ順を先頭にする） ---
-        summary_ws = workbook.add_worksheet('Summary')
-
-        bold = workbook.add_format({'bold': True, 'font_size': 11})
-        label_fmt = workbook.add_format({
-            'bold': True, 'bg_color': '#D9E1F2', 'border': 1, 'align': 'left'
-        })
-        value_fmt = workbook.add_format({'border': 1, 'align': 'right', 'num_format': '#,##0'})
-        pct_fmt = workbook.add_format({'border': 1, 'align': 'right', 'num_format': '0.00%'})
-
-        summary_ws.set_column(0, 0, 22)
-        summary_ws.set_column(1, 1, 14)
-
-        row = 0
-
-        # ── エンティティ統計 ──
-        summary_ws.write(row, 0, 'エンティティ統計', bold)
-        row += 1
-
-        entity_specs = [
-            ('Deleted Entities',   '削除図形 総数'),
-            ('Added Entities',     '追加図形 総数'),
-            ('Diff Entities',      '変更（追加+削除）図形 総数'),
-            ('Unchanged Entities', '変更なし図形 総数'),
-            ('Total Entities',     total_entities_label),
-        ]
-        entity_sums = {}
-        for col, _ in entity_specs:
-            if col in master_df.columns:
-                # 完全新規図面の行は "n/a" 文字列が入るため、数値以外は除外して合計する
-                numeric_col = pd.to_numeric(master_df[col], errors='coerce')
-                entity_sums[col] = int(numeric_col.sum(skipna=True)) if not numeric_col.isna().all() else 0
-            else:
-                entity_sums[col] = 0
-
-        for col, label in entity_specs:
-            summary_ws.write(row, 0, label, label_fmt)
-            summary_ws.write(row, 1, entity_sums[col], value_fmt)
-            row += 1
-
-        total_ent = entity_sums.get('Total Entities', 0)
-        diff_ent = entity_sums.get('Diff Entities', 0)
-        change_rate = (diff_ent / total_ent) if total_ent > 0 else 0.0
-
-        summary_ws.write(row, 0, '図形変更率 [%]', label_fmt)
-        summary_ws.write(row, 1, change_rate, pct_fmt)
-        row += 2  # 空行を挟む
-
-        # ── 図面統計 ──
-        summary_ws.write(row, 0, '図面統計', bold)
-        row += 1
-
-        total_drawings = total_drawings_count if total_drawings_count is not None else 0
-        pair_count = len([p for p in pairs if p['status'] == 'complete']) if pairs is not None else 0
-        reuse_rate = (pair_count / total_drawings) if total_drawings > 0 else 0.0
-
-        summary_ws.write(row, 0, total_drawings_label, label_fmt)
-        summary_ws.write(row, 1, total_drawings, value_fmt)
-        row += 1
-
-        summary_ws.write(row, 0, '差分抽出ペア数', label_fmt)
-        summary_ws.write(row, 1, pair_count, value_fmt)
-        row += 1
-
-        summary_ws.write(row, 0, '流用率 [%]', label_fmt)
-        summary_ws.write(row, 1, reuse_rate, pct_fmt)
-
-        # --- Diff List シート ---
-        master_df.to_excel(writer, sheet_name='Diff List', index=False)
-
-    output.seek(0)
-    return output.getvalue()
 
 
 def extract_source_number_from_dest_file(uploaded_file):
@@ -500,311 +215,14 @@ def create_pair_list(source_files_dict, dest_files_dict, progress_callback=None)
     return build_pairs(source_files_dict, dest_files_dict, progress_callback=progress_callback)
 
 
-def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None, deleted_color=None, added_color=None,
-                    unchanged_color=None, prefixes=None, progress_callback=None,
-                    filter_non_parts=False, validate_ref_designators=False,
-                    step1_mode=None, total_drawings_count=None):
-    """
-    ペアリストに基づいて差分DXFファイルを作成し、ZIPアーカイブを生成
-
-    Args:
-        pairs: ペア情報のリスト
-        master_df: 図面管理台帳DataFrame（Noneでない場合はZIPに含める）
-        master_filename: 図面管理台帳のファイル名（Noneの場合はデフォルト名を使用）
-        tolerance: 座標許容誤差（Noneの場合はconfigのデフォルト値を使用）
-        deleted_color: 削除エンティティの色（Noneの場合はconfigのデフォルト値を使用）
-        added_color: 追加エンティティの色（Noneの場合はconfigのデフォルト値を使用）
-        unchanged_color: 変更なしエンティティの色（Noneの場合はconfigのデフォルト値を使用）
-        step1_mode: ペアリング方式（Summaryシートのラベル・分母の算出に使用）
-        total_drawings_count: Summaryシートの図面統計の分母件数（呼び出し側で算出）
-
-    Returns:
-        tuple: (zip_data, results)
-    """
-    # デフォルト値をconfigから取得
-    if tolerance is None:
-        tolerance = diff_config.DEFAULT_TOLERANCE
-    if deleted_color is None:
-        deleted_color = diff_config.DEFAULT_DELETED_COLOR
-    if added_color is None:
-        added_color = diff_config.DEFAULT_ADDED_COLOR
-    if unchanged_color is None:
-        unchanged_color = diff_config.DEFAULT_UNCHANGED_COLOR
-
-    results = []
-    prefixes = prefixes or []
-    diff_label_sheets = []
-    unchanged_label_sheets = []
-    summary_data = []
-    total_counter = Counter()
-    invalid_dict = defaultdict(lambda: {'count': 0, 'files': set()})
-    pair_extracted_info = {}  # main_drawing → {title, subtitle} (DXF から抽出)
-    label_cache = {}
-    zip_buffer = BytesIO()
-    complete_pairs = [p for p in pairs if p['status'] == 'complete']
-    total_pairs = len(complete_pairs)
-
-    # 同じファイルが複数ペアの基準/比較対象として再利用される場合（RevUp/流用
-    # チェーンで同じ親図面が複数の子の流用元になる等）の再解析を避けるキャッシュ。
-    # offset_b は常に None（このバッチ全体で固定値）なのでキーに含めて一致させる。
-    pair_cache_keys = (
-        [(p['main_file_info']['temp_path'], None) for p in complete_pairs] +
-        [(p['source_file_info']['temp_path'], None) for p in complete_pairs]
-    )
-    pair_cache = PairFileCache(pair_cache_keys)
-
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-
-        for index, pair in enumerate(complete_pairs, start=1):
-            main_drawing = pair['main_drawing']
-            source_drawing = pair['source_drawing']
-            main_file_path = pair['main_file_info']['temp_path']
-            source_file_path = pair['source_file_info']['temp_path']
-
-            # 出力ファイル名を生成
-            output_filename = f"{main_drawing}_vs_{source_drawing}.dxf"
-
-            # 一時出力ファイルを作成
-            temp_output = tempfile.NamedTemporaryFile(delete=False, suffix=".dxf").name
-
-            change_rows = []
-            filtered_unchanged = []
-            change_label_count = 0
-            unchanged_label_count = 0
-
-            extra_info = {'labels_new': [], 'invalid_ref_designators': []}
-            try:
-                change_rows, unchanged_entries, extra_info = compute_label_differences(
-                    main_file_path,
-                    source_file_path,
-                    tolerance=tolerance,
-                    label_cache=label_cache,
-                    filter_non_parts=filter_non_parts,
-                    validate_ref_designators=validate_ref_designators,
-                )
-                filtered_unchanged = filter_unchanged_by_prefix(unchanged_entries, prefixes)
-                change_label_count = len(change_rows)
-                unchanged_label_count = sum(row.get('Count', 0) for row in filtered_unchanged)
-            except Exception as e:
-                st.error(f"ラベル比較中にエラーが発生しました ({main_drawing}): {str(e)}")
-                change_rows = []
-                filtered_unchanged = []
-
-            # Summary 行を収集
-            added_count = sum(1 for r in change_rows if r['Old Label'] is None)
-            deleted_count = sum(1 for r in change_rows if r['New Label'] is None)
-            changed_count = sum(1 for r in change_rows if r['Old Label'] is not None and r['New Label'] is not None)
-            resolved_title = extra_info.get('title') or pair.get('title')
-            resolved_subtitle = extra_info.get('subtitle') or pair.get('subtitle')
-            pair_extracted_info[main_drawing] = {'title': resolved_title, 'subtitle': resolved_subtitle}
-            summary_data.append({
-                '図番': main_drawing,
-                '流用元図番': source_drawing,
-                '追加ラベル数': added_count,
-                '削除ラベル数': deleted_count,
-                '変更ラベル数': changed_count,
-                'タイトル': resolved_title,
-                'サブタイトル': resolved_subtitle,
-            })
-
-            # Total 用ラベル集計
-            if filter_non_parts:
-                for label, _x, _y in extra_info['labels_new']:
-                    total_counter[label] += 1
-
-            # Invalid 集計
-            if validate_ref_designators:
-                for sym in extra_info['invalid_ref_designators']:
-                    invalid_dict[sym]['count'] += 1
-                    invalid_dict[sym]['files'].add(main_drawing)
-
-            diff_label_sheets.append({
-                'sheet_name': main_drawing,
-                'rows': change_rows,
-                'old_label_name': f"Old: {source_drawing}",
-                'new_label_name': f"New: {main_drawing}"
-            })
-            unchanged_label_sheets.append({'sheet_name': main_drawing, 'rows': filtered_unchanged})
-
-            try:
-                if progress_callback:
-                    progress_callback(index - 1, total_pairs, f"{main_drawing} vs {source_drawing} 処理中")
-
-                # DXF比較処理（図番（新）を基準A、流用元図番（旧）を比較対象B）
-                success, entity_counts = compare_dxf_files_and_generate_dxf(
-                    main_file_path,        # 基準ファイルA (新)
-                    source_file_path,      # 比較対象ファイルB (旧)
-                    temp_output,
-                    tolerance=tolerance,
-                    deleted_color=deleted_color,
-                    added_color=added_color,
-                    unchanged_color=unchanged_color,
-                    offset_b=None,
-                    pair_cache=pair_cache
-                )
-
-                if success:
-                    zip_file.write(temp_output, arcname=output_filename)
-                    results.append({
-                        'pair_name': f"{main_drawing} vs {source_drawing}",
-                        'main_drawing': main_drawing,
-                        'source_drawing': source_drawing,
-                        'output_filename': output_filename,
-                        'success': True,
-                        'entity_counts': entity_counts,
-                        'relation': pair.get('relation', 'なし'),
-                        'change_label_count': change_label_count,
-                        'unchanged_label_count': unchanged_label_count
-                    })
-                else:
-                    results.append({
-                        'pair_name': f"{main_drawing} vs {source_drawing}",
-                        'main_drawing': main_drawing,
-                        'source_drawing': source_drawing,
-                        'output_filename': output_filename,
-                        'success': False,
-                        'entity_counts': None,
-                        'relation': pair.get('relation', 'なし'),
-                        'change_label_count': change_label_count,
-                        'unchanged_label_count': unchanged_label_count
-                    })
-
-            except Exception as e:
-                st.error(f"ペア {main_drawing} vs {source_drawing} の図面作成中にエラーが発生しました: {str(e)}")
-                results.append({
-                    'pair_name': f"{main_drawing} vs {source_drawing}",
-                    'main_drawing': main_drawing,
-                    'source_drawing': source_drawing,
-                    'output_filename': output_filename,
-                    'success': False,
-                    'error': str(e),
-                    'relation': pair.get('relation', 'なし'),
-                    'entity_counts': None,
-                    'change_label_count': change_label_count,
-                    'unchanged_label_count': unchanged_label_count
-                })
-            finally:
-                try:
-                    os.unlink(temp_output)
-                except:
-                    pass
-
-            if progress_callback:
-                progress_callback(index, total_pairs, f"{main_drawing} vs {source_drawing} 処理完了")
-
-        # 図面管理台帳を結果で更新（エンティティ数を含む）
-        if master_df is not None:
-            pairs_with_entity_counts = []
-            for result in results:
-                if result['success']:
-                    original_pair = next((p for p in complete_pairs
-                                         if p['main_drawing'] == result['main_drawing']
-                                         and p['source_drawing'] == result['source_drawing']), None)
-
-                    if original_pair:
-                        pair_with_counts = original_pair.copy()
-                        pair_with_counts['entity_counts'] = result['entity_counts']
-                        extracted = pair_extracted_info.get(result['main_drawing'], {})
-                        if extracted.get('title'):
-                            pair_with_counts['title'] = extracted['title']
-                        if extracted.get('subtitle'):
-                            pair_with_counts['subtitle'] = extracted['subtitle']
-                        pairs_with_entity_counts.append(pair_with_counts)
-
-            if pairs_with_entity_counts:
-                master_df, _ = update_parent_child_master(master_df, pairs_with_entity_counts)
-
-            # 完全新規図面（流用元の参照がない図面）のエンティティ数を算出して台帳に反映。
-            # diff抽出（上記の complete_pairs ループ）の対象外のため、ここで単独ファイルの
-            # エンティティ数を数えて Added=Total として登録する（2026-06 追加）。
-            brand_new_pairs = get_brand_new_drawing_pairs(pairs, step1_mode) if step1_mode else []
-            brand_new_with_counts = []
-            for pair in brand_new_pairs:
-                file_info = pair.get('main_file_info')
-                if not file_info or not file_info.get('temp_path'):
-                    continue  # ファイル未アップロードのため算出不可
-                count = count_entities_in_dxf_file(file_info['temp_path'], tolerance=tolerance)
-                if count is None:
-                    continue
-                pair_with_counts = dict(pair, relation='完全新規図面')
-                pair_with_counts['entity_counts'] = {'added_entities': count, 'total_entities': count}
-                # 方式C（pair_list）はファイル名のみで図番を識別し DXF 解析を行わない
-                # （_extract_by_filename）ため、main_file_info に title/subtitle が
-                # 入っていない。complete ペアは差分抽出時に extra_info から取得する
-                # 一方、完全新規図面は差分抽出を行わないため、ここで個別に抽出する
-                # （2026-06 追加）。方式A/Bは元々 title/subtitle 取得済みのためスキップ。
-                if not pair_with_counts.get('title'):
-                    try:
-                        _, title_info = extract_labels(
-                            file_info['temp_path'],
-                            filter_non_parts=False,
-                            sort_order="none",
-                            debug=False,
-                            selected_layers=None,
-                            validate_ref_designators=False,
-                            extract_drawing_numbers_option=False,
-                            extract_title_option=True,
-                            original_filename=file_info.get('filename'),
-                        )
-                        pair_with_counts['title'] = title_info.get('title')
-                        pair_with_counts['subtitle'] = title_info.get('subtitle')
-                    except Exception:
-                        pass
-                brand_new_with_counts.append(pair_with_counts)
-
-            if brand_new_with_counts:
-                master_df, _ = update_parent_child_master(master_df, brand_new_with_counts)
-
-        # Total データ生成
-        total_data = None
-        if filter_non_parts and total_counter:
-            total_data = [{'ラベル': lbl, '個数': cnt} for lbl, cnt in sorted(total_counter.items())]
-
-        # Invalid データ生成
-        invalid_data = None
-        if validate_ref_designators and invalid_dict:
-            invalid_data = [
-                {'機器符号': sym, '個数': v['count'], 'ファイル名': ', '.join(sorted(v['files']))}
-                for sym, v in sorted(invalid_dict.items())
-            ]
-
-        diff_labels_excel = build_diff_labels_workbook(
-            diff_label_sheets,
-            summary_data=summary_data if summary_data else None,
-            total_data=total_data,
-            invalid_data=invalid_data,
-        )
-        unchanged_labels_excel = build_unchanged_labels_workbook(unchanged_label_sheets)
-
-        if diff_labels_excel:
-            zip_file.writestr(DIFF_LABELS_FILENAME, diff_labels_excel)
-        if unchanged_labels_excel:
-            zip_file.writestr(UNCHANGED_LABELS_FILENAME, unchanged_labels_excel)
-
-        if master_df is not None:
-            master_excel_data = save_master_to_bytes(
-                master_df, pairs=pairs, mode=step1_mode, total_drawings_count=total_drawings_count
-            )
-            output_master_filename = master_filename if master_filename else diff_config.MASTER_FILENAME
-            zip_file.writestr(output_master_filename, master_excel_data)
-
-    zip_buffer.seek(0)
-    zip_data = zip_buffer.getvalue()
-
-    # メモリ解放: 大きなデータ構造を削除
-    del diff_label_sheets
-    del unchanged_label_sheets
-    gc.collect()
-
-    return zip_data, results, diff_labels_excel, unchanged_labels_excel, master_df
-
-
 def load_pair_list(uploaded_file):
     """
     ペアリストファイルを読み込む（ExcelまたはCSV）
 
     必須カラム: 流用元図番, 流用先図番
-    （旧カラム名 比較元図番/比較先図番、または Reference/Target も後方互換で受け付ける）
+    （旧カラム名 比較元図番/比較先図番、または Reference/Target も後方互換で受け付ける）。
+    ファイル読み込み（I/O）のみを担当し、カラム名・値の正規化は
+    `utils.pairing.normalize_pair_list_columns()`（streamlit非依存）に委譲する。
 
     Returns:
         DataFrame or None（カラム名は 流用元図番/流用先図番 に統一）
@@ -817,34 +235,11 @@ def load_pair_list(uploaded_file):
         else:
             df = pd.read_excel(uploaded_file)
 
-        # カラム名の正規化（旧名・英語名→新しい日本語名にマッピング）
-        column_aliases = {
-            'Reference': '流用元図番',
-            'Target': '流用先図番',
-            '比較元図番': '流用元図番',
-            '比較先図番': '流用先図番',
-        }
-        df = df.rename(columns=column_aliases)
-
-        required_columns = ['流用元図番', '流用先図番']
-        missing = [c for c in required_columns if c not in df.columns]
-        if missing:
-            st.error(
-                f"必須カラムが見つかりません: {missing}\n"
-                f"実際のカラム: {list(df.columns)}\n"
-                f"「流用元図番」「流用先図番」（旧名「比較元図番」「比較先図番」、"
-                f"または「Reference」「Target」）のカラム名が必要です。"
-            )
+        df, error_message = pairing.normalize_pair_list_columns(df)
+        if error_message:
+            st.error(error_message)
             return None
-
-        df = df[required_columns].copy()
-        # 文字列化し、空セル(NaN→'nan')や空白は空文字に正規化
-        for col in required_columns:
-            df[col] = df[col].astype(str).str.strip()
-            df[col] = df[col].where(df[col].str.lower() != 'nan', '')
-        # 両方が空白の行のみ除外（片側だけ空白の行は「片側のみペア」として残す）
-        df = df[(df['流用元図番'] != '') | (df['流用先図番'] != '')]
-        return df.reset_index(drop=True)
+        return df
 
     except Exception as e:
         st.error(f"ペアリストの読み込み中にエラーが発生しました: {str(e)}")
@@ -1038,86 +433,44 @@ def update_master_if_needed(pairs, mode=None):
 
 
 def compute_total_drawings_count(mode):
-    """Summaryシート「図面統計」の分母件数を、ペアリング方式に応じて算出する。
+    """Summaryシート「図面統計」の分母件数を算出する（utils.pairing の薄い呼び出し）。
 
-    - Type A（all_in_one）: アップロードした全DXFファイル件数（アップロード図面総数）
-    - Type B（auto）      : 流用先（新）DXFファイル件数（流用先図面総数）
-    - Type C（pair_list） : ペアリスト中の流用先図番のうち、実際にDXFファイルが
-                            アップロード済みのもののユニーク件数（流用先図面総数）
+    実体は streamlit 非依存の `utils.pairing.compute_total_drawings_count()`。
+    本関数は session_state から必要な値を取り出して渡すだけの Driver 層アダプタ。
     """
-    if mode == 'all_in_one':
-        return len(st.session_state.all_in_one_files_dict)
-    elif mode == 'auto':
-        return len(st.session_state.dest_files_dict)
-    elif mode == 'pair_list':
-        pair_list_df = st.session_state.pair_list_df
-        if pair_list_df is None:
-            return 0
-        targets = {str(v).strip() for v in pair_list_df['流用先図番'] if str(v).strip()}
-        uploaded = set(st.session_state.all_files_dict.keys())
-        return len(targets & uploaded)
-    return 0
+    return pairing.compute_total_drawings_count(
+        mode,
+        all_in_one_count=len(st.session_state.all_in_one_files_dict),
+        dest_count=len(st.session_state.dest_files_dict),
+        pair_list_df=st.session_state.pair_list_df,
+        uploaded_drawing_numbers=set(st.session_state.all_files_dict.keys()),
+    )
 
 
 def compute_unchanged_drawings(all_pairs, mode):
-    """「変更していない図面（流用元と流用先とで共通）」の対象図番集合を返す。
+    """「変更していない図面」対象図番集合を算出する（utils.pairing の薄い呼び出し）。
 
-    render_pair_list() の Step3 表示と、図面管理台帳への完全新規図面登録
-    （get_brand_new_drawing_pairs）の双方から呼ばれる共通ロジック。
-    Type A（all_in_one）では対象なし。
+    実体は streamlit 非依存の `utils.pairing.compute_unchanged_drawings()`。
+    本関数は session_state から必要な値を取り出して渡すだけの Driver 層アダプタ。
     """
-    primary_status = primary_status_by_drawing(all_pairs)
-    if mode == 'auto':
-        no_source_drawings = {
-            p['main_drawing'] for p in all_pairs
-            if p['status'] == 'no_source_defined'
-            and primary_status.get(p['main_drawing']) == 'no_source_defined'
-        }
-        common_drawings = set(st.session_state.source_files_dict.keys()) \
-            & set(st.session_state.dest_files_dict.keys())
-        return common_drawings & no_source_drawings
-    elif mode == 'pair_list':
-        # 流用先のDXFファイルが実在する図番のみを対象とする（2026-06修正）。
-        # ペアリスト上は「流用元==流用先」と宣言されていても、肝心のファイルが
-        # 未アップロードな場合、「流用先図面総数(a)」（ファイル実在のみで算出）との
-        # 整合（差分抽出が可能なペア+完全新規図面+変更していない図面=a）が崩れる
-        # ため、main_file_info（実ファイル）がある図番のみに限定する。ファイルが
-        # 無い図番は「未アップロードの流用元/流用先図番」セクションで別途警告表示
-        # される（_show_missing_drawings は identical 行も対象に含むよう修正済み）。
-        return {
-            p['main_drawing'] for p in all_pairs
-            if p['status'] == 'identical'
-            and primary_status.get(p['main_drawing']) == 'identical'
-            and p.get('main_file_info')
-        }
-    return set()
+    return pairing.compute_unchanged_drawings(
+        all_pairs, mode,
+        source_drawing_numbers=set(st.session_state.source_files_dict.keys()),
+        dest_drawing_numbers=set(st.session_state.dest_files_dict.keys()),
+    )
 
 
 def get_brand_new_drawing_pairs(all_pairs, mode):
-    """完全新規図面（流用元の参照がない図面）のペアを返す。
+    """完全新規図面のペアを算出する（utils.pairing の薄い呼び出し）。
 
-    main_drawing 単位で優先度フィルタ済み（他ステータスで既に分類されている図面は
-    含まない）かつ「変更していない図面」に該当する図番は除外する。さらに、
-    main_file_info（流用先のDXFファイル）が無い図番は除外する（2026-06 追加）。
-    方式C（pair_list）ではペアリストの行が実際のアップロード状況と無関係に
-    存在し得るため、流用元図番が空白でも流用先のファイル自体が未アップロードの
-    場合がある（例: 引当前後リスト_ME25-9606-0 の DE3527-556-01B）。この場合、
-    図面ファイルが存在しない以上「完全新規図面」として扱う（Step3表示・台帳登録の
-    いずれにも含める）べきではない——別途「未アップロードの流用先図番」セクション
-    （_show_missing_drawings 等）で警告表示される。
-
-    Step3表示（render_pair_list）と図面管理台帳への登録（update_master_if_needed /
-    create_diff_zip）の両方で同じ集合を使うための共通ロジック。
+    実体は streamlit 非依存の `utils.pairing.get_brand_new_drawing_pairs()`。
+    本関数は session_state から必要な値を取り出して渡すだけの Driver 層アダプタ。
     """
-    primary_status = primary_status_by_drawing(all_pairs)
-    no_source_pairs = [
-        p for p in all_pairs
-        if p['status'] == 'no_source_defined'
-        and primary_status.get(p['main_drawing']) == 'no_source_defined'
-        and p.get('main_file_info')
-    ]
-    unchanged_drawings = compute_unchanged_drawings(all_pairs, mode)
-    return [p for p in no_source_pairs if p['main_drawing'] not in unchanged_drawings]
+    return pairing.get_brand_new_drawing_pairs(
+        all_pairs, mode,
+        source_drawing_numbers=set(st.session_state.source_files_dict.keys()),
+        dest_drawing_numbers=set(st.session_state.dest_files_dict.keys()),
+    )
 
 
 def render_pair_list():
@@ -1508,8 +861,10 @@ def render_step0_master():
 
         if master_file is not None:
             if st.session_state.master_df is None or st.session_state.get('master_file_name') != master_file.name:
-                master_df = load_parent_child_master(master_file)
-                if master_df is not None:
+                master_df, error_message = load_parent_child_master(master_file)
+                if error_message:
+                    st.error(error_message)
+                elif master_df is not None:
                     st.session_state.master_df = master_df
                     st.session_state.master_file_name = master_file.name
                     st.session_state.added_relationships_count = 0
@@ -1990,10 +1345,13 @@ def render_step3_diff(complete_pairs):
                     unchanged_color=unchanged_color,
                     prefixes=prefix_list,
                     progress_callback=diff_progress,
+                    on_error=st.error,
                     filter_non_parts=filter_non_parts,
                     validate_ref_designators=validate_ref_designators,
                     step1_mode=step1_mode,
                     total_drawings_count=compute_total_drawings_count(step1_mode),
+                    source_drawing_numbers=set(st.session_state.source_files_dict.keys()),
+                    dest_drawing_numbers=set(st.session_state.dest_files_dict.keys()),
                 )
 
                 # セッション状態に保存

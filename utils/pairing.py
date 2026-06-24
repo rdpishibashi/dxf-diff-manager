@@ -328,3 +328,136 @@ def drawings_with_status(pairs, status):
     """primary_status_by_drawing() の結果から、指定ステータスが最優先の main_drawing 集合を返す。"""
     primary = primary_status_by_drawing(pairs)
     return {md for md, s in primary.items() if s == status}
+
+
+def compute_unchanged_drawings(all_pairs, mode, source_drawing_numbers=None, dest_drawing_numbers=None):
+    """「変更していない図面（流用元と流用先とで共通）」の対象図番集合を返す。
+
+    Step3表示（render_pair_list）と図面管理台帳への完全新規図面登録
+    （get_brand_new_drawing_pairs）の双方から呼ばれる共通ロジック。
+    Type A（all_in_one）では対象なし。
+
+    Args:
+        all_pairs: ペア情報のリスト
+        mode: ペアリング方式（'all_in_one'/'auto'/'pair_list'）
+        source_drawing_numbers: 流用元（旧）プールの図番集合（mode='auto'でのみ使用）
+        dest_drawing_numbers: 流用先（新）プールの図番集合（mode='auto'でのみ使用）
+    """
+    primary_status = primary_status_by_drawing(all_pairs)
+    if mode == 'auto':
+        no_source_drawings = {
+            p['main_drawing'] for p in all_pairs
+            if p['status'] == STATUS_NO_SOURCE_DEFINED
+            and primary_status.get(p['main_drawing']) == STATUS_NO_SOURCE_DEFINED
+        }
+        common_drawings = (source_drawing_numbers or set()) & (dest_drawing_numbers or set())
+        return common_drawings & no_source_drawings
+    elif mode == 'pair_list':
+        # 流用先のDXFファイルが実在する図番のみを対象とする（2026-06修正）。
+        # ペアリスト上は「流用元==流用先」と宣言されていても、肝心のファイルが
+        # 未アップロードな場合、「流用先図面総数(a)」（ファイル実在のみで算出）との
+        # 整合（差分抽出が可能なペア+完全新規図面+変更していない図面=a）が崩れる
+        # ため、main_file_info（実ファイル）がある図番のみに限定する。ファイルが
+        # 無い図番は「未アップロードの図番」セクションで別途警告表示される
+        # （_show_missing_drawings は identical 行も対象に含むよう修正済み）。
+        return {
+            p['main_drawing'] for p in all_pairs
+            if p['status'] == STATUS_IDENTICAL
+            and primary_status.get(p['main_drawing']) == STATUS_IDENTICAL
+            and p.get('main_file_info')
+        }
+    return set()
+
+
+def get_brand_new_drawing_pairs(all_pairs, mode, source_drawing_numbers=None, dest_drawing_numbers=None):
+    """完全新規図面（流用元の参照がない図面）のペアを返す。
+
+    main_drawing 単位で優先度フィルタ済み（他ステータスで既に分類されている図面は
+    含まない）かつ「変更していない図面」に該当する図番は除外する。さらに、
+    main_file_info（流用先のDXFファイル）が無い図番は除外する（2026-06 追加）。
+    方式C（pair_list）ではペアリストの行が実際のアップロード状況と無関係に
+    存在し得るため、流用元図番が空白でも流用先のファイル自体が未アップロードの
+    場合がある（例: 引当前後リスト_ME25-9606-0 の DE3527-556-01B）。この場合、
+    図面ファイルが存在しない以上「完全新規図面」として扱う（Step3表示・台帳登録の
+    いずれにも含める）べきではない——別途「未アップロードの図番」セクション
+    （_show_missing_drawings 等）で警告表示される。
+
+    Step3表示（render_pair_list）と図面管理台帳への登録（update_master_if_needed /
+    create_diff_zip）の両方で同じ集合を使うための共通ロジック。
+
+    Args:
+        all_pairs: ペア情報のリスト
+        mode: ペアリング方式（'all_in_one'/'auto'/'pair_list'）
+        source_drawing_numbers: compute_unchanged_drawings() に渡す（mode='auto'でのみ使用）
+        dest_drawing_numbers: compute_unchanged_drawings() に渡す（mode='auto'でのみ使用）
+    """
+    primary_status = primary_status_by_drawing(all_pairs)
+    no_source_pairs = [
+        p for p in all_pairs
+        if p['status'] == STATUS_NO_SOURCE_DEFINED
+        and primary_status.get(p['main_drawing']) == STATUS_NO_SOURCE_DEFINED
+        and p.get('main_file_info')
+    ]
+    unchanged_drawings = compute_unchanged_drawings(all_pairs, mode, source_drawing_numbers, dest_drawing_numbers)
+    return [p for p in no_source_pairs if p['main_drawing'] not in unchanged_drawings]
+
+
+def compute_total_drawings_count(mode, all_in_one_count=0, dest_count=0,
+                                  pair_list_df=None, uploaded_drawing_numbers=None):
+    """Summaryシート「図面統計」の分母件数を、ペアリング方式に応じて算出する。
+
+    - Type A（all_in_one）: アップロードした全DXFファイル件数（アップロード図面総数）
+    - Type B（auto）      : 流用先（新）DXFファイル件数（流用先図面総数）
+    - Type C（pair_list） : ペアリスト中の流用先図番のうち、実際にDXFファイルが
+                            アップロード済みのもののユニーク件数（流用先図面総数）
+    """
+    if mode == 'all_in_one':
+        return all_in_one_count
+    elif mode == 'auto':
+        return dest_count
+    elif mode == 'pair_list':
+        if pair_list_df is None:
+            return 0
+        targets = {str(v).strip() for v in pair_list_df['流用先図番'] if str(v).strip()}
+        uploaded = uploaded_drawing_numbers or set()
+        return len(targets & uploaded)
+    return 0
+
+
+def normalize_pair_list_columns(df):
+    """
+    ペアリストDataFrameのカラム名・値を正規化する（読み込み元のExcel/CSV I/Oは
+    呼び出し元の責務。本関数は純粋なDataFrame変換のみを行う）。
+
+    必須カラム: 流用元図番, 流用先図番
+    （旧カラム名 比較元図番/比較先図番、または Reference/Target も後方互換で受け付ける）
+
+    Returns:
+        tuple: (DataFrame または None, エラーメッセージ または None)
+    """
+    column_aliases = {
+        'Reference': '流用元図番',
+        'Target': '流用先図番',
+        '比較元図番': '流用元図番',
+        '比較先図番': '流用先図番',
+    }
+    df = df.rename(columns=column_aliases)
+
+    required_columns = ['流用元図番', '流用先図番']
+    missing = [c for c in required_columns if c not in df.columns]
+    if missing:
+        return None, (
+            f"必須カラムが見つかりません: {missing}\n"
+            f"実際のカラム: {list(df.columns)}\n"
+            f"「流用元図番」「流用先図番」（旧名「比較元図番」「比較先図番」、"
+            f"または「Reference」「Target」）のカラム名が必要です。"
+        )
+
+    df = df[required_columns].copy()
+    # 文字列化し、空セル(NaN→'nan')や空白は空文字に正規化
+    for col in required_columns:
+        df[col] = df[col].astype(str).str.strip()
+        df[col] = df[col].where(df[col].str.lower() != 'nan', '')
+    # 両方が空白の行のみ除外（片側だけ空白の行は「片側のみペア」として残す）
+    df = df[(df['流用元図番'] != '') | (df['流用先図番'] != '')]
+    return df.reset_index(drop=True), None
