@@ -728,6 +728,28 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                     continue
                 pair_with_counts = dict(pair, relation='完全新規図面')
                 pair_with_counts['entity_counts'] = {'added_entities': count, 'total_entities': count}
+                # 方式C（pair_list）はファイル名のみで図番を識別し DXF 解析を行わない
+                # （_extract_by_filename）ため、main_file_info に title/subtitle が
+                # 入っていない。complete ペアは差分抽出時に extra_info から取得する
+                # 一方、完全新規図面は差分抽出を行わないため、ここで個別に抽出する
+                # （2026-06 追加）。方式A/Bは元々 title/subtitle 取得済みのためスキップ。
+                if not pair_with_counts.get('title'):
+                    try:
+                        _, title_info = extract_labels(
+                            file_info['temp_path'],
+                            filter_non_parts=False,
+                            sort_order="none",
+                            debug=False,
+                            selected_layers=None,
+                            validate_ref_designators=False,
+                            extract_drawing_numbers_option=False,
+                            extract_title_option=True,
+                            original_filename=file_info.get('filename'),
+                        )
+                        pair_with_counts['title'] = title_info.get('title')
+                        pair_with_counts['subtitle'] = title_info.get('subtitle')
+                    except Exception:
+                        pass
                 brand_new_with_counts.append(pair_with_counts)
 
             if brand_new_with_counts:
@@ -1067,8 +1089,16 @@ def get_brand_new_drawing_pairs(all_pairs, mode):
     """完全新規図面（流用元の参照がない図面）のペアを返す。
 
     main_drawing 単位で優先度フィルタ済み（他ステータスで既に分類されている図面は
-    含まない）かつ「変更していない図面」に該当する図番は除外する。Step3表示
-    （render_pair_list）と図面管理台帳への登録（update_master_if_needed /
+    含まない）かつ「変更していない図面」に該当する図番は除外する。さらに、
+    main_file_info（流用先のDXFファイル）が無い図番は除外する（2026-06 追加）。
+    方式C（pair_list）ではペアリストの行が実際のアップロード状況と無関係に
+    存在し得るため、流用元図番が空白でも流用先のファイル自体が未アップロードの
+    場合がある（例: 引当前後リスト_ME25-9606-0 の DE3527-556-01B）。この場合、
+    図面ファイルが存在しない以上「完全新規図面」として扱う（Step3表示・台帳登録の
+    いずれにも含める）べきではない——別途「未アップロードの流用先図番」セクション
+    （_show_missing_drawings 等）で警告表示される。
+
+    Step3表示（render_pair_list）と図面管理台帳への登録（update_master_if_needed /
     create_diff_zip）の両方で同じ集合を使うための共通ロジック。
     """
     primary_status = primary_status_by_drawing(all_pairs)
@@ -1076,6 +1106,7 @@ def get_brand_new_drawing_pairs(all_pairs, mode):
         p for p in all_pairs
         if p['status'] == 'no_source_defined'
         and primary_status.get(p['main_drawing']) == 'no_source_defined'
+        and p.get('main_file_info')
     ]
     unchanged_drawings = compute_unchanged_drawings(all_pairs, mode)
     return [p for p in no_source_pairs if p['main_drawing'] not in unchanged_drawings]
@@ -1113,8 +1144,6 @@ def render_pair_list():
         [p for p in all_pairs if p['status'] == 'missing_target'], 'missing_target')
     missing_both_pairs = _rows_with_primary(
         [p for p in all_pairs if p['status'] == 'missing_both'], 'missing_both')
-    no_source_pairs = _rows_with_primary(
-        [p for p in all_pairs if p['status'] == 'no_source_defined'], 'no_source_defined')
     # 片側のみのペアは流用先が空白（main_drawing なし）の行を含むため、
     # 優先度フィルタの対象外（main_drawing がある行のみ照合する）の行も素通しする。
     one_sided_drawings = _drawings_with('one_sided')
@@ -1124,13 +1153,11 @@ def render_pair_list():
     ]
 
     # 「変更していない図面（流用元と流用先とで共通）」対象の図番集合
-    # （compute_unchanged_drawings は get_brand_new_drawing_pairs と共通のロジック。
-    # 詳細はその関数のdocstring・TECHNICAL.md参照）
     unchanged_drawings = compute_unchanged_drawings(all_pairs, mode)
 
-    # no_source_pairs のうち、流用元にも流用先にも同一図番で存在するものは
-    # 「完全新規図面」ではなく「変更していない図面」として扱う
-    no_source_pairs = [p for p in no_source_pairs if p['main_drawing'] not in unchanged_drawings]
+    # 「完全新規図面」: 排他化済み・ファイルアップロード済みの no_source_defined のみ
+    # （get_brand_new_drawing_pairs参照。図面管理台帳への登録と同じ集合を使う）
+    no_source_pairs = get_brand_new_drawing_pairs(all_pairs, mode)
 
     # 差分抽出が可能なペア
     # 「：N件」の件数は図面（main_drawing）のユニーク数（他セクションとの合計が
@@ -1201,7 +1228,7 @@ def render_pair_list():
         with st.expander(f"⚠️ 流用元・流用先ともに未アップロード：{len({p['main_drawing'] for p in missing_both_pairs})}件", expanded=True):
             st.dataframe(missing_both_data, width='stretch', hide_index=True)
 
-    # 片側のみのペア（ペアリストで流用元または流用先を空白にしたケース）
+    # 流用先がない流用元図面（ペアリストで流用元は記載しているが流用先が空白の行）
     if one_sided_pairs:
         one_sided_data = []
         for pair in one_sided_pairs:
@@ -1210,8 +1237,8 @@ def render_pair_list():
                 '流用元（旧）': pair['source_drawing'] or '（なし）',
             })
 
-        with st.expander(f"➖ 片側のみのペア：{len(one_sided_pairs)}件", expanded=True):
-            st.caption("ペアリストで流用元または流用先が空白の行です。相手図番がないため差分抽出は行いません。")
+        with st.expander(f"➖ 流用先がない流用元図面：{len(one_sided_pairs)}件", expanded=True):
+            st.caption("ペアリストで流用元は記載しているが、流用先が空白となっている行です。差分抽出できません。")
             st.dataframe(one_sided_data, width='stretch', hide_index=True)
 
     # 完全新規図面（流用元図番なし）
@@ -1221,7 +1248,7 @@ def render_pair_list():
             no_source_data.append({
                 '図番': pair['main_drawing'],
                 '関係': '完全新規図面',
-                'ステータス': '流用元図番なし'
+                'ステータス': '流用元図番の指定なし'
             })
 
         with st.expander(f"完全新規図面（流用元図番なし）：{len(no_source_pairs)}件", expanded=False):

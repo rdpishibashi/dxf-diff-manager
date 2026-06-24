@@ -272,8 +272,13 @@ def build_pairs_from_list(pair_list_df, all_files_dict):
             'source_file_info': ref_file_info,
             'status': status,
             'relation': RELATION_PAIR_LIST,
-            'title': None,
-            'subtitle': None,
+            # 流用先（main_drawing）のファイルから抽出済みのタイトルを使う。
+            # complete ペアは差分抽出時に extra_info から再取得して上書きするため
+            # 影響しないが、完全新規図面（no_source_defined）は差分抽出を行わない
+            # ため、ここで設定しないと台帳の Title/Subtitle が常に空欄になる
+            # （2026-06 修正）。
+            'title': target_file_info.get('title') if target_file_info else None,
+            'subtitle': target_file_info.get('subtitle') if target_file_info else None,
         })
 
     return pairs
