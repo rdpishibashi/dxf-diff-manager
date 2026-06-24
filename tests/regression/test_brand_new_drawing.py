@@ -70,6 +70,45 @@ def test_title_subtitle_populated_for_brand_new_drawing():
     assert pairs[0]['subtitle'] == 'S1'
 
 
+def test_compute_unchanged_drawings_excludes_unuploaded_identical():
+    """方式C: identical でもファイル未アップロードの図番は「変更していない図面」から除外する。
+
+    これにより 差分抽出が可能なペア(unique)+完全新規図面+変更していない図面 が
+    流用先図面総数(a。ファイル実在のみで算出)と一致する（2026-06修正。以前は
+    ファイル有無を問わず識別子の一致だけで「変更していない図面」に含めていたため、
+    a との合計が一致しない不整合が実データ(sample-dxf/pairC)で見つかった）。
+    """
+    files = {'WITH_FILE': {'temp_path': '/tmp/WITH_FILE.dxf'}}  # NO_FILE は未アップロード
+    df = pd.DataFrame({
+        '流用元図番': ['WITH_FILE', 'NO_FILE'],
+        '流用先図番': ['WITH_FILE', 'NO_FILE'],
+    })
+    pairs = build_pairs_from_list(df, files)
+    result = app.compute_unchanged_drawings(pairs, 'pair_list')
+    assert result == {'WITH_FILE'}
+
+
+def test_show_missing_drawings_includes_identical_rows():
+    """identical（流用元==流用先）の行も、ファイル未アップロードならば
+    「未アップロードの流用元/流用先図番」の対象に含める（2026-06修正。以前は
+    比較対象外として無条件にスキップしていたため、ファイルが無い identical 宣言が
+    どこにも警告表示されなかった）。
+    """
+    import streamlit as st
+    df = pd.DataFrame({'流用元図番': ['NO_FILE'], '流用先図番': ['NO_FILE']})
+
+    captured_labels = []
+    orig_expander = st.expander
+    st.expander = lambda label, *a, **k: (captured_labels.append(label), orig_expander(label, *a, **k))[1]
+    try:
+        app._show_missing_drawings(df, {})
+    finally:
+        st.expander = orig_expander
+
+    assert any('未アップロードの流用元図番' in t for t in captured_labels)
+    assert any('未アップロードの流用先図番' in t for t in captured_labels)
+
+
 def test_update_master_brand_new_drawing_parent_is_none():
     """完全新規図面を台帳に登録すると Parent='none'、エンティティ列は規定の形式になる。"""
     master_df = app.create_empty_master_df()

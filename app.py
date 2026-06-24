@@ -1077,10 +1077,18 @@ def compute_unchanged_drawings(all_pairs, mode):
             & set(st.session_state.dest_files_dict.keys())
         return common_drawings & no_source_drawings
     elif mode == 'pair_list':
+        # 流用先のDXFファイルが実在する図番のみを対象とする（2026-06修正）。
+        # ペアリスト上は「流用元==流用先」と宣言されていても、肝心のファイルが
+        # 未アップロードな場合、「流用先図面総数(a)」（ファイル実在のみで算出）との
+        # 整合（差分抽出が可能なペア+完全新規図面+変更していない図面=a）が崩れる
+        # ため、main_file_info（実ファイル）がある図番のみに限定する。ファイルが
+        # 無い図番は「未アップロードの流用元/流用先図番」セクションで別途警告表示
+        # される（_show_missing_drawings は identical 行も対象に含むよう修正済み）。
         return {
             p['main_drawing'] for p in all_pairs
             if p['status'] == 'identical'
             and primary_status.get(p['main_drawing']) == 'identical'
+            and p.get('main_file_info')
         }
     return set()
 
@@ -1177,56 +1185,54 @@ def render_pair_list():
 
         st.dataframe(pair_data, width='stretch', hide_index=True)
 
-    # 流用元のDXFファイルが未アップロードのペア（流用先の図面のみを対象）
-    # 同じ流用先に RevUp の差分抽出可能ペアがある場合は、その流用元図番を併記する
-    if missing_pairs:
-        revup_source_by_target = {
-            p['main_drawing']: p['source_drawing']
-            for p in complete_pairs
-            if p.get('relation') == 'RevUp'
-        }
-        missing_data = []
-        for pair in missing_pairs:
-            revup_source = revup_source_by_target.get(pair['main_drawing'])
-            if revup_source:
-                status = f'⚠️ 流用元の図面ファイルなし・RevUpあり（{revup_source}）'
-            else:
-                status = '⚠️ 流用元の図面ファイルなし'
-            missing_data.append({
+    if mode == 'pair_list':
+        # Type C: 流用元/流用先のいずれか（または両方）のDXFファイルがない図番を
+        # 1セクションに統合表示する（2026-06変更。Step2-2の未アップロード表示と
+        # 統一感を持たせるため、missing_source/missing_target/missing_both の
+        # 3セクションを「図面ファイルがない図番」1つにまとめた）。
+        # 同じ流用先に RevUp の差分抽出可能ペアがある場合の注記は、Type C では
+        # relation が常に 'ペアリスト'（RevUpという関係自体が存在しない）ため不要。
+        missing_file_pairs = missing_pairs + missing_target_pairs + missing_both_pairs
+        if missing_file_pairs:
+            status_text = {
+                'missing_source': '⚠️ 流用元 図面ファイルなし',
+                'missing_target': '⚠️ 流用先 図面ファイルなし',
+                'missing_both': '⚠️ 流用元・先 図面ファイルなし',
+            }
+            missing_file_data = [{
                 '流用先（新）': pair['main_drawing'],
                 '流用元（旧）': pair['source_drawing'],
-                '関係': pair.get('relation', 'なし'),
-                'ステータス': status
-            })
+                'ステータス': status_text[pair['status']],
+            } for pair in missing_file_pairs]
 
-        with st.expander(f"⚠️ 流用元図番の図面がない図面：{len({p['main_drawing'] for p in missing_pairs})}件", expanded=False):
-            st.dataframe(missing_data, width='stretch', hide_index=True)
+            with st.expander(f"⚠️ 図面ファイルがない図番：{len({p['main_drawing'] for p in missing_file_pairs})}件", expanded=True):
+                st.dataframe(missing_file_data, width='stretch', hide_index=True)
+    else:
+        # Type A/B: 流用元のDXFファイルが未アップロードのペア（流用先の図面のみが対象。
+        # missing_target/missing_both は方式C専用のステータスのため常に空）。
+        # 同じ流用先に RevUp の差分抽出可能ペアがある場合は、その流用元図番を併記する。
+        if missing_pairs:
+            revup_source_by_target = {
+                p['main_drawing']: p['source_drawing']
+                for p in complete_pairs
+                if p.get('relation') == 'RevUp'
+            }
+            missing_data = []
+            for pair in missing_pairs:
+                revup_source = revup_source_by_target.get(pair['main_drawing'])
+                if revup_source:
+                    status = f'⚠️ 流用元の図面ファイルなし・RevUpあり（{revup_source}）'
+                else:
+                    status = '⚠️ 流用元の図面ファイルなし'
+                missing_data.append({
+                    '流用先（新）': pair['main_drawing'],
+                    '流用元（旧）': pair['source_drawing'],
+                    '関係': pair.get('relation', 'なし'),
+                    'ステータス': status
+                })
 
-    # 流用先のDXFファイルが未アップロードのペア（ペアリストモード用）
-    if missing_target_pairs:
-        missing_target_data = []
-        for pair in missing_target_pairs:
-            missing_target_data.append({
-                '流用先（新）': pair['main_drawing'],
-                '流用元（旧）': pair['source_drawing'],
-                'ステータス': '⚠️ 流用先のDXFなし'
-            })
-
-        with st.expander(f"⚠️ 流用先のDXFファイルが未アップロード：{len({p['main_drawing'] for p in missing_target_pairs})}件", expanded=True):
-            st.dataframe(missing_target_data, width='stretch', hide_index=True)
-
-    # 両方未アップロードのペア（ペアリストモード用）
-    if missing_both_pairs:
-        missing_both_data = []
-        for pair in missing_both_pairs:
-            missing_both_data.append({
-                '流用先（新）': pair['main_drawing'],
-                '流用元（旧）': pair['source_drawing'],
-                'ステータス': '⚠️ 流用元・流用先ともにDXFなし'
-            })
-
-        with st.expander(f"⚠️ 流用元・流用先ともに未アップロード：{len({p['main_drawing'] for p in missing_both_pairs})}件", expanded=True):
-            st.dataframe(missing_both_data, width='stretch', hide_index=True)
+            with st.expander(f"⚠️ 流用元図番の図面がない図面：{len({p['main_drawing'] for p in missing_pairs})}件", expanded=False):
+                st.dataframe(missing_data, width='stretch', hide_index=True)
 
     # 流用先がない流用元図面（ペアリストで流用元は記載しているが流用先が空白の行）
     if one_sided_pairs:
@@ -1707,9 +1713,10 @@ def _show_missing_drawings(pair_list_df, all_files_dict):
     for _, row in pair_list_df.iterrows():
         ref = _norm(row['流用元図番'])
         target = _norm(row['流用先図番'])
-        # 流用元と流用先が同一図番の行は比較対象外のため未アップロード判定から除外
-        if ref and target and ref == target:
-            continue
+        # 流用元と流用先が同一図番（identical）の行も、列に記載されている図番として
+        # 未アップロード判定の対象に含める（2026-06修正。以前は比較対象外として
+        # スキップしていたため、ファイルが無い「変更していない図面」宣言があっても
+        # ここには現れなかった）。
         if ref:
             ref_drawings.add(ref)
         if target:
