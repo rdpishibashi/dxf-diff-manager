@@ -27,7 +27,7 @@ from utils.label_diff import (
     build_diff_labels_workbook,
     build_unchanged_labels_workbook
 )
-from utils.pairing import build_pairs, build_pairs_from_list
+from utils.pairing import build_pairs, build_pairs_from_list, primary_status_by_drawing
 
 # 設定をインポート
 from config import ui_config, diff_config, extraction_config, help_text
@@ -995,30 +995,57 @@ def render_pair_list():
 
     mode = st.session_state.step1_mode  # 'all_in_one'(A) / 'auto'(B) / 'pair_list'(C)
 
-    complete_pairs = [p for p in st.session_state.pairs if p['status'] == 'complete']
-    missing_pairs = [p for p in st.session_state.pairs if p['status'] == 'missing_source']
-    missing_target_pairs = [p for p in st.session_state.pairs if p['status'] == 'missing_target']
-    missing_both_pairs = [p for p in st.session_state.pairs if p['status'] == 'missing_both']
-    one_sided_pairs = [p for p in st.session_state.pairs if p['status'] == 'one_sided']
-    no_source_pairs = [p for p in st.session_state.pairs if p['status'] == 'no_source_defined']
-    identical_pairs = [p for p in st.session_state.pairs if p['status'] == 'identical']
+    all_pairs = st.session_state.pairs
+    primary_status = primary_status_by_drawing(all_pairs)
+
+    def _drawings_with(status):
+        return {md for md, s in primary_status.items() if s == status}
+
+    def _rows_with_primary(pairs_subset, status):
+        # 同じ図番がより優先度の高い別ステータス（例: complete）でも分類済みの場合、
+        # その図番に関する行はこのステータスの表からは除外する（二重計上防止）。
+        allowed = _drawings_with(status)
+        return [p for p in pairs_subset if p.get('main_drawing') in allowed]
+
+    complete_pairs = [p for p in all_pairs if p['status'] == 'complete']
+    missing_pairs = _rows_with_primary(
+        [p for p in all_pairs if p['status'] == 'missing_source'], 'missing_source')
+    missing_target_pairs = _rows_with_primary(
+        [p for p in all_pairs if p['status'] == 'missing_target'], 'missing_target')
+    missing_both_pairs = _rows_with_primary(
+        [p for p in all_pairs if p['status'] == 'missing_both'], 'missing_both')
+    no_source_pairs = _rows_with_primary(
+        [p for p in all_pairs if p['status'] == 'no_source_defined'], 'no_source_defined')
+    identical_pairs = _rows_with_primary(
+        [p for p in all_pairs if p['status'] == 'identical'], 'identical')
+    # 片側のみのペアは流用先が空白（main_drawing なし）の行を含むため、
+    # 優先度フィルタの対象外（main_drawing がある行のみ照合する）の行も素通しする。
+    one_sided_drawings = _drawings_with('one_sided')
+    one_sided_pairs = [
+        p for p in all_pairs
+        if p['status'] == 'one_sided' and (not p.get('main_drawing') or p['main_drawing'] in one_sided_drawings)
+    ]
 
     # 「変更していない図面（流用元と流用先とで共通）」対象の図番集合
     # Type A（流用元/流用先の区別がない）では表示しない
     #
-    # Type B（auto）は単純な集合の積を取ると、別の流用元図番に対して
-    # complete/missing_source 判定済みの図面まで「変更していない」に混入し、
-    # 差分抽出が可能なペア(b) + 流用元図番の図面がない図面(c) + 変更していない
-    # 図面(d) の合計が流用先総数(a)を超えてしまう（同じ図面が複数セクションに
-    # 二重計上される）。よって、他に分類されない（no_source_defined）図面の
-    # うちで流用元にも同一図番が存在するものだけを「変更していない」とする
-    # （b・c・d が流用先図面を排他的に分割する）。
+    # 単純な集合の積をそのまま使うと、別の流用元図番に対して complete/missing_source
+    # 判定済みの図面や、ペアリストの重複行で complete/missing_source 判定済みの図面まで
+    # 「変更していない」に混入し、差分抽出が可能なペア(b) + 流用元図番の図面がない図面(c)
+    # + 変更していない図面(d) の合計が流用先総数(a)を超えてしまう（同じ図面が複数セクションに
+    # 二重計上される、2026-06 確認済みバグ）。`primary_status_by_drawing` による優先度フィルタ
+    # 済みの no_source_pairs / identical_pairs（complete・missing_source 等で既に分類された
+    # 図面を含まない）を基準にすることで、b・c・d が排他的になるようにする。
     if mode == 'auto':
         common_drawings = set(st.session_state.source_files_dict.keys()) \
             & set(st.session_state.dest_files_dict.keys())
         unchanged_drawings = common_drawings & {p['main_drawing'] for p in no_source_pairs}
     elif mode == 'pair_list':
-        unchanged_drawings = {p['main_drawing'] for p in identical_pairs}
+        # identical 行は流用元図番・流用先図番の文字列が一致するだけで判定されるため、
+        # 実際にDXFファイルがアップロードされていない図番も含み得る。流用先図面総数(a)
+        # の定義（実ファイルがある図番のみ）と揃えるため、アップロード済みの図番に限定する。
+        unchanged_drawings = {p['main_drawing'] for p in identical_pairs} \
+            & set(st.session_state.all_files_dict.keys())
     else:
         unchanged_drawings = set()
 
@@ -1027,8 +1054,12 @@ def render_pair_list():
     no_source_pairs = [p for p in no_source_pairs if p['main_drawing'] not in unchanged_drawings]
 
     # 差分抽出が可能なペア
+    # 「：N件」の件数は図面（main_drawing）のユニーク数（他セクションとの合計が
+    # 流用先総数と一致するようにするため）。同じ図面が複数の流用元と比較される
+    # 場合（RevUp と流用の双方で complete になる等）、表には全ペアを表示するため
+    # 表の行数が件数より多くなることがある。
     if complete_pairs:
-        st.success(f"差分抽出が可能なペア：{len(complete_pairs)}件")
+        st.success(f"差分抽出が可能なペア：{len({p['main_drawing'] for p in complete_pairs})}件")
 
         pair_data = []
         for pair in complete_pairs:
@@ -1062,7 +1093,7 @@ def render_pair_list():
                 'ステータス': status
             })
 
-        with st.expander(f"⚠️ 流用元図番の図面がない図面：{len(missing_pairs)}件", expanded=False):
+        with st.expander(f"⚠️ 流用元図番の図面がない図面：{len({p['main_drawing'] for p in missing_pairs})}件", expanded=False):
             st.dataframe(missing_data, width='stretch', hide_index=True)
 
     # 流用先のDXFファイルが未アップロードのペア（ペアリストモード用）
@@ -1075,7 +1106,7 @@ def render_pair_list():
                 'ステータス': '⚠️ 流用先のDXFなし'
             })
 
-        with st.expander(f"⚠️ 流用先のDXFファイルが未アップロード：{len(missing_target_pairs)}件", expanded=True):
+        with st.expander(f"⚠️ 流用先のDXFファイルが未アップロード：{len({p['main_drawing'] for p in missing_target_pairs})}件", expanded=True):
             st.dataframe(missing_target_data, width='stretch', hide_index=True)
 
     # 両方未アップロードのペア（ペアリストモード用）
@@ -1088,7 +1119,7 @@ def render_pair_list():
                 'ステータス': '⚠️ 流用元・流用先ともにDXFなし'
             })
 
-        with st.expander(f"⚠️ 流用元・流用先ともに未アップロード：{len(missing_both_pairs)}件", expanded=True):
+        with st.expander(f"⚠️ 流用元・流用先ともに未アップロード：{len({p['main_drawing'] for p in missing_both_pairs})}件", expanded=True):
             st.dataframe(missing_both_data, width='stretch', hide_index=True)
 
     # 片側のみのペア（ペアリストで流用元または流用先を空白にしたケース）

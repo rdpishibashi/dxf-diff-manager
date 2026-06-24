@@ -83,6 +83,8 @@ DXF-diff-manager/
 | `find_revup_pairs(source, target)` | 同一ベース図番・リビジョン差の RevUp ペアを生成（source×target） |
 | `build_pairs(source, target, progress_callback=None)` | **流用判定と RevUp 判定を独立2パスで実行**。方式A は `(pool, pool)`、方式B は `(source, dest)` を渡す |
 | `build_pairs_from_list(df, files)` | 明示ペアリスト（方式C）からペア生成。RevUp 自動補完なし |
+| `primary_status_by_drawing(pairs)` | main_drawing ごとに `STATUS_DISPLAY_PRIORITY` 上で最優先のステータスを1つ決定（UI表示の二重計上防止、2026-06 追加） |
+| `drawings_with_status(pairs, status)` | `primary_status_by_drawing()` の結果から、指定ステータスが最優先の main_drawing 集合を返す |
 
 関係(relation)・ステータス(status)は本モジュールの定数（`RELATION_*` / `STATUS_*`）に一元定義。
 
@@ -814,10 +816,28 @@ def render_pair_list():
 - **`missing_source`（流用元図番の図面がない図面）の表では、同じ流用先に RevUp の `complete` ペアがある場合**、ステータス列を `⚠️ 流用元のDXFなし・RevUpあり（<RevUp流用元図番>）` と表示し、RevUp による差分抽出が可能であることを示す。RevUp が無ければ `⚠️ 流用元のDXFなし`。判定は `complete` かつ `relation='RevUp'` のペアを `流用先 → 流用元` で引く辞書で行う。
 - `missing_source` の `st.expander` は `expanded=False`。`missing_target` / `missing_both`（pair_list モード用）は `expanded=True`。
 - **完全新規図面（`no_source_defined`、2026-06 改修）**: `関係` 列は固定で「完全新規図面」、`ステータス` 列は固定で「流用元図番なし」（⚠️マークなし）。`unchanged_drawings`（後述）に含まれる図番はこのセクションから除外される。
-- **変更していない図面（流用元と流用先とで共通）（2026-06 追加・同月内に排他化修正）**: `mode = st.session_state.step1_mode` に応じて対象図番集合 `unchanged_drawings` を算出する。
-  - Type A（`all_in_one`）: 流用元・流用先の区別がないため、このセクション自体を表示しない（`unchanged_drawings = set()`）
-  - Type B（`auto`）: `common_drawings = source_files_dict.keys() & dest_files_dict.keys()` を求めた上で、**さらに `no_source_defined`（孤立パス）状態の `main_drawing` 集合との積を取る**（`common_drawings & {p['main_drawing'] for p in no_source_pairs}`）。`common_drawings` をそのまま使うと、別の流用元図番に対して `complete`/`missing_source` 判定済みの図面まで「変更していない」に二重計上され、`差分抽出が可能なペア` + `流用元図番の図面がない図面` + `変更していない図面` の合計が流用先総数を超える不整合が生じていた（2026-06 バグ修正。実データ ME24-1001-0 で確認: 流用先232件中、修正前は b+c+d=360件、修正後は b(73)+c(154)+d(5)+完全新規(0)=232件で一致）。
-  - Type C（`pair_list`）: `status='identical'` のペアの `main_drawing` 集合（ペアリストの行は ref/target の組ごとに1ステータスのみ持つため、元から complete/missing_source と排他的であり Type B のような追加の絞り込みは不要）。
+- **変更していない図面（流用元と流用先とで共通）（2026-06 追加）**: `mode = st.session_state.step1_mode` に応じて対象図番集合 `unchanged_drawings` を算出する（Type A では表示しない）。
+
+#### main_drawing 単位の排他化（`utils.pairing.primary_status_by_drawing()`、2026-06 確認済みバグの修正）
+
+各セクションの「：N件」表記とユーザーから「`差分抽出が可能なペア` + `流用元図番の図面がない図面` + `変更していない図面` の合計が流用先総数と一致するはず」という指摘を受けて検証した結果、**同一の流用先図番（main_drawing）が複数ステータスのペアに登場し、複数セクションに二重計上される実バグ**が2種類見つかった（いずれも実データで確認済み）。
+
+1. **方式 A/B（`build_pairs`）**: RevUp パスと流用パスが、同一の流用先に対して**異なる流用元図番**でそれぞれ別のペアを生成する場合（例: RevUpで `complete`、その図面自身が DXF 内に埋め込む別の流用元参照が未アップロードで `missing_source`）。`sample-dxf/` の基本サンプル（16ファイル）で実際に2件発生することを確認（`EE6666-365-61B`・`EE6331-370-51B` がそれぞれ RevUp と流用の両方で `complete` ペアに登場）。
+2. **方式 C（`build_pairs_from_list`）**: ペアリストに同一の流用先図番が複数行記載されている場合（流用元図番が異なる、または一方が `流用元==流用先` の `identical` 行）。
+
+**対策**: `utils/pairing.py` の `STATUS_DISPLAY_PRIORITY`（`complete` > `missing_source` > `missing_target` > `missing_both` > `one_sided` > `identical` > `no_source_defined`）と `primary_status_by_drawing(pairs)` で、main_drawing ごとに「最も優先度の高いステータス」を1つだけ決定する。`render_pair_list()` はこれを使い、各ステータス別の表示行（missing_source/missing_target/missing_both/identical/no_source_defined）を、その図面の優先ステータスと一致する行のみに絞り込む（`complete` と判定された図面は他のどのセクションにも現れない）。
+
+- `差分抽出が可能なペア`（complete）の表は実際に生成される全ペアをそのまま表示する（同一図面が複数の流用元と比較される場合、表の行数はタイトルの件数より多くなることがある＝意図的な仕様）。タイトルの「：N件」は **main_drawing のユニーク数**（表の行数とは限らない）。
+- `missing_source` / `missing_target` / `missing_both` / `no_source_defined` のタイトルの「：N件」も同様に main_drawing のユニーク数。
+- `one_sided`（片側のみのペア）は流用先が空白（main_drawing なし）の行を含むため、`primary_status_by_drawing()` の対象外（行は常にそのまま表示・件数も行数のまま）。
+
+**Type 別の `unchanged_drawings`（変更していない図面）の算出**:
+
+- Type A（`all_in_one`）: 流用元・流用先の区別がないため、このセクション自体を表示しない（`unchanged_drawings = set()`）
+- Type B（`auto`）: `common_drawings = source_files_dict.keys() & dest_files_dict.keys()` と、上記の排他化済み `no_source_pairs`（`no_source_defined` が優先ステータスの図面のみ）の `main_drawing` 集合との積を取る。
+- Type C（`pair_list`）: 排他化済み `identical_pairs`（`identical` が優先ステータスの図面のみ）の `main_drawing` 集合。ただし `identical` 判定は流用元図番・流用先図番の文字列が一致するだけで決まり、実際にDXFファイルがアップロードされていない図番も含み得るため、流用先図面総数(a)の定義（実ファイルがある図番のみ）と揃えるよう `all_files_dict.keys()` との積でさらに絞り込む。
+
+**検証方法**: 実データ（`sample-dxf/ME24-1001-0/`、流用先232件）で `差分抽出が可能なペア(73, ユニーク)` + `流用元図番の図面がない図面(154)` + `変更していない図面(5)` + `完全新規図面(0)` = 232 と一致することを確認。回帰テスト: `tests/unit/test_pairing.py` の `test_primary_status_prefers_complete_over_*`。
 
 ---
 
@@ -1911,7 +1931,7 @@ BASE_DIR = Path("/Users/ryozo/Dropbox/Client/ULVAC/ElectricDesignManagement/Tool
 
 ---
 
-*最終更新: 2026-06-24（モジュールのフォーマットを `1111`(数字4桁) から `XXXX`(英大文字または数字4桁) に修正。Type B の「変更していない図面」算出を `no_source_defined` 状態の図面に限定し、`差分抽出が可能なペア`+`流用元図番の図面がない図面`+`変更していない図面`(+完全新規図面) の合計が流用先総数に一致するよう修正（実データ ME24-1001-0 で b+c+d=360→232 と確認））*
+*最終更新: 2026-06-24（`utils.pairing.primary_status_by_drawing()` を追加し、同一の流用先図番が複数ステータスのペアに登場する場合（RevUp+流用の併存、ペアリストの重複行）の二重計上を排除。Step3の全セクション集計が main_drawing 単位で排他的になり、`差分抽出が可能なペア`+`流用元図番の図面がない図面`+`変更していない図面`(+完全新規図面) の合計が流用先総数と必ず一致するようにした（実データの sample-dxf/ME24-1001-0 でも確認）。モジュールのフォーマットを `1111`(数字4桁) から `XXXX`(英大文字または数字4桁) に修正）*
 
 *過去の更新: 2026-06-24（用語統一: 「比較元/比較先」→「流用元/流用先」（ペアリストの旧カラム名は後方互換）。Step 1 を「既存アップロード/新規作成（指番・モジュール・サイドから台帳ファイル名を自動生成）/作成せず」の3択に再設計。Step 3 のペアリスト表示を全セクション「：N件」表記に統一し、「完全新規図面」「変更していない図面（流用元と流用先とで共通）」セクションを追加。Summaryシートの図面統計・総図形数ラベルをペアリング方式（Type A/B/C）別に変更）*
 
