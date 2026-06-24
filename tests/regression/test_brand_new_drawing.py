@@ -1,0 +1,104 @@
+"""
+完全新規図面（流用元の参照がない図面）に関する回帰テスト。
+
+背景:
+    1. 方式C（pair_list）で、流用先図番のみが記載され流用元図番が空白の行
+       （例: sample-dxf/pairC の DE3527-556-01B）が、誤って「片側のみのペア」
+       （one_sided）に分類され、「完全新規図面（流用元図番なし）」セクションに
+       表示されない不具合が報告された。流用先が空白の行（one_sided）と、
+       流用元が空白だが流用先はある行（no_source_defined）を区別するよう修正した。
+    2. 図面管理台帳に完全新規図面が一切登録されない仕様だったが、登録対象に含める
+       よう変更。Parent欄は "none"、Deleted/Diff/Unchanged Entitiesは "n/a"、
+       Added Entities = Total Entities（その図面単独の総エンティティ数）とする。
+
+実行:
+    cd DXF-diff-manager
+    python -m tests.regression.test_brand_new_drawing
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+import pandas as pd
+
+import app
+from utils.pairing import build_pairs_from_list, STATUS_NO_SOURCE_DEFINED, STATUS_ONE_SIDED
+
+
+def test_target_only_row_is_no_source_defined_not_one_sided():
+    """流用先のみ記載（流用元空白）の行は one_sided ではなく no_source_defined。"""
+    df = pd.DataFrame({
+        '流用元図番': ['', 'A'],
+        '流用先図番': ['DE3527-556-01B', ''],
+    })
+    pairs = build_pairs_from_list(df, {})
+    assert pairs[0]['status'] == STATUS_NO_SOURCE_DEFINED  # 流用先のみ→完全新規図面
+    assert pairs[1]['status'] == STATUS_ONE_SIDED          # 流用元のみ→片側のみのペア
+
+
+def test_get_brand_new_drawing_pairs_pair_list_excludes_identical():
+    """方式C: identical（変更していない図面）に分類された図番は完全新規図面に含めない。"""
+    df = pd.DataFrame({
+        '流用元図番': ['', 'X', ''],
+        '流用先図番': ['NEW1', 'X', 'NEW1'],
+    })
+    pairs = build_pairs_from_list(df, {})
+    result = app.get_brand_new_drawing_pairs(pairs, 'pair_list')
+    assert {p['main_drawing'] for p in result} == {'NEW1'}
+
+
+def test_update_master_brand_new_drawing_parent_is_none():
+    """完全新規図面を台帳に登録すると Parent='none'、エンティティ列は規定の形式になる。"""
+    master_df = app.create_empty_master_df()
+    pair = {
+        'main_drawing': 'NEW1',
+        'source_drawing': None,
+        'relation': '完全新規図面',
+        'title': 'T', 'subtitle': 'S',
+        'entity_counts': {'added_entities': 42, 'total_entities': 42},
+    }
+    updated, added_count = app.update_parent_child_master(master_df, [pair])
+    assert added_count == 1
+    row = updated[updated['Child'] == 'NEW1'].iloc[0]
+    assert row['Parent'] == 'none'
+    assert row['Deleted Entities'] == 'n/a'
+    assert row['Diff Entities'] == 'n/a'
+    assert row['Unchanged Entities'] == 'n/a'
+    assert row['Added Entities'] == 42
+    assert row['Total Entities'] == 42
+    assert row['Added Entities'] == row['Total Entities']
+
+
+def test_update_master_brand_new_drawing_without_entity_counts_yet():
+    """エンティティ数算出前（pair-list作成直後）の先行登録では n/a 列のみ確定する。"""
+    master_df = app.create_empty_master_df()
+    pair = {
+        'main_drawing': 'NEW2',
+        'source_drawing': None,
+        'relation': '完全新規図面',
+        'title': None, 'subtitle': None,
+        'entity_counts': None,
+    }
+    updated, added_count = app.update_parent_child_master(master_df, [pair])
+    assert added_count == 1
+    row = updated[updated['Child'] == 'NEW2'].iloc[0]
+    assert row['Parent'] == 'none'
+    assert row['Deleted Entities'] == 'n/a'
+    assert pd.isna(row['Added Entities'])
+
+
+def _run_all():
+    tests = [v for k, v in sorted(globals().items()) if k.startswith('test_') and callable(v)]
+    failures = []
+    for t in tests:
+        try:
+            t(); print(f"PASS: {t.__name__}")
+        except AssertionError as e:
+            failures.append(t.__name__); print(f"FAIL: {t.__name__}\n      {e}")
+    print(f"\n{len(tests) - len(failures)}/{len(tests)} passed")
+    return 1 if failures else 0
+
+
+if __name__ == '__main__':
+    sys.exit(_run_all())

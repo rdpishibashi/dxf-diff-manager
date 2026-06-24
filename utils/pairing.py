@@ -249,9 +249,13 @@ def build_pairs_from_list(pair_list_df, all_files_dict):
         if ref_drawing and target_drawing and ref_drawing == target_drawing:
             # 流用元と流用先が同一図番のため比較対象外
             status = STATUS_IDENTICAL
-        elif not ref_drawing or not target_drawing:
-            # 相手図番がそもそも存在しない（片側を空白にしたケース）
+        elif not target_drawing:
+            # 流用先図番が空白（比較対象の新図面が存在しない行）
             status = STATUS_ONE_SIDED
+        elif not ref_drawing:
+            # 流用先図番はあるが流用元図番が空白 → 完全新規図面（流用元の参照なし）。
+            # 方式A/B（孤立パス）の no_source_defined と同じ意味合いで扱う。
+            status = STATUS_NO_SOURCE_DEFINED
         elif ref_file_info and target_file_info:
             status = STATUS_COMPLETE
         elif not ref_file_info and target_file_info:
