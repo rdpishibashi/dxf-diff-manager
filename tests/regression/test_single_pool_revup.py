@@ -59,7 +59,7 @@ def test_revup_detected_when_source_missing():
 
 
 def test_same_target_can_appear_multiple_times():
-    """同じ比較先が流用ペアと RevUp ペアの双方に登場できる。"""
+    """同じ流用先が流用ペアと RevUp ペアの双方に登場できる。"""
     pool = {
         'EE6333-365-61C': _f('EE6333-365-61C', source='XX9999-000-01A'),  # 別系統の流用
         'EE6333-365-61B': _f('EE6333-365-61B', source=None),
@@ -92,8 +92,8 @@ def test_revup_source_not_flagged_no_source_defined():
     }
     pairs = app.create_pairs_from_single_pool(pool)
     orphans = {p['main_drawing'] for p in pairs if p['status'] == 'no_source_defined'}
-    assert 'EE6333-365-61B' not in orphans, f"RevUp 比較元 61B が孤立扱い: {pairs}"
-    assert 'EE6333-365-61C' not in orphans, f"RevUp 比較先 61C が孤立扱い: {pairs}"
+    assert 'EE6333-365-61B' not in orphans, f"RevUp 流用元 61B が孤立扱い: {pairs}"
+    assert 'EE6333-365-61C' not in orphans, f"RevUp 流用先 61C が孤立扱い: {pairs}"
     assert _keys(pairs, relation='RevUp') == {('EE6333-365-61C', 'EE6333-365-61B')}
 
 

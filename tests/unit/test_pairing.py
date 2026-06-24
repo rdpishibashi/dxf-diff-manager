@@ -155,8 +155,8 @@ def test_build_pairs_progress_callback_invoked():
 def test_build_pairs_from_list_statuses():
     files = {'A': _f('A'), 'C': _f('C')}
     df = pd.DataFrame({
-        '比較元図番': ['A', 'A', 'X', 'A', '',  'A'],
-        '比較先図番': ['C', 'A', 'C', 'Z', 'C', ''],
+        '流用元図番': ['A', 'A', 'X', 'A', '',  'A'],
+        '流用先図番': ['C', 'A', 'C', 'Z', 'C', ''],
     })
     pairs = build_pairs_from_list(df, files)
     statuses = [p['status'] for p in pairs]
@@ -172,7 +172,7 @@ def test_build_pairs_from_list_statuses():
 
 
 def test_build_pairs_from_list_missing_both():
-    df = pd.DataFrame({'比較元図番': ['X'], '比較先図番': ['Y']})
+    df = pd.DataFrame({'流用元図番': ['X'], '流用先図番': ['Y']})
     pairs = build_pairs_from_list(df, {})
     assert pairs[0]['status'] == STATUS_MISSING_BOTH
 
