@@ -413,7 +413,7 @@ from config import ui_config, diff_config, extraction_config, help_text
 | `has_unchanged_labels` | bool | `unchanged_labels.xlsx` が生成されたか（同上） |
 | `processing_settings` | dict | 差分抽出時の設定（tolerance・色設定等）。結果表示時の注記に使用 |
 | `downloaded` | bool | ZIPダウンロードボタンを押したか（二重ダウンロード防止用） |
-| `diff_preview_expanded` | bool | `diff_labels.xlsx` プレビューexpanderを一度開いたら開いたままにするための状態 |
+| `diff_preview_expanded` | bool | `diff_labels.xlsx` プレビューexpanderの開閉状態。シート選択(selectbox)の `on_change` でのみ True にする（2026-06 修正。以前は expander の中身が描画される度（collapsed表示中でも毎回実行される）に無条件で True を立てていたため、初回表示から常に展開済みになる不具合があった）。「新しい差分抽出を開始」ボタンでリセットされる |
 
 **`diff_labels_excel_data` / `unchanged_labels_excel_data` を session_state に保持しない理由**: これらのExcelバイト列は `zip_data` の中にも同一内容で書き込まれている（`create_diff_zip()` 内で `zip_file.writestr()` 済み）。以前は両方を別々に session_state に保持していたため、出力データが実質二重に保持されメモリを圧迫していた（Streamlit Community Cloud のリソース制限超過の一因）。現在はプレビュー表示時に `read_zip_member(zip_data, filename)` で `zip_data` から都度読み出す方式に変更し、`has_diff_labels` / `has_unchanged_labels` の bool フラグのみ保持する。
 
@@ -813,7 +813,7 @@ def render_pair_list():
 - `identical`（同一図番）は分類テーブルとしては表示しない（main_drawing は「変更していない図面」セクションの集合に取り込まれる。Type C 参照）
 - 全セクションのタイトル末尾は「：N件」形式で件数を表示する（2026-06 統一）
 - 「差分抽出が可能なペア」「片側のみのペア」の表では、値が常に一定となる「ステータス」列は出力しない（前者は `流用先（新）`/`流用元（旧）`/`関係`、後者は `流用先（新）`/`流用元（旧）` のみ）
-- **`missing_source`（流用元図番の図面がない図面）の表では、同じ流用先に RevUp の `complete` ペアがある場合**、ステータス列を `⚠️ 流用元のDXFなし・RevUpあり（<RevUp流用元図番>）` と表示し、RevUp による差分抽出が可能であることを示す。RevUp が無ければ `⚠️ 流用元のDXFなし`。判定は `complete` かつ `relation='RevUp'` のペアを `流用先 → 流用元` で引く辞書で行う。
+- **`missing_source`（流用元図番の図面がない図面）の表では、同じ流用先に RevUp の `complete` ペアがある場合**、ステータス列を `⚠️ 流用元の図面ファイルなし・RevUpあり（<RevUp流用元図番>）` と表示し、RevUp による差分抽出が可能であることを示す。RevUp が無ければ `⚠️ 流用元の図面ファイルなし`（2026-06: 表記を「流用元のDXFなし」から変更）。判定は `complete` かつ `relation='RevUp'` のペアを `流用先 → 流用元` で引く辞書で行う。
 - `missing_source` の `st.expander` は `expanded=False`。`missing_target` / `missing_both`（pair_list モード用）は `expanded=True`。
 - **完全新規図面（`no_source_defined`、2026-06 改修）**: `関係` 列は固定で「完全新規図面」、`ステータス` 列は固定で「流用元図番なし」（⚠️マークなし）。`unchanged_drawings`（後述）に含まれる図番はこのセクションから除外される。
 - **変更していない図面（流用元と流用先とで共通）（2026-06 追加）**: `mode = st.session_state.step1_mode` に応じて対象図番集合 `unchanged_drawings` を算出する（Type A では表示しない）。
@@ -835,7 +835,7 @@ def render_pair_list():
 
 - Type A（`all_in_one`）: 流用元・流用先の区別がないため、このセクション自体を表示しない（`unchanged_drawings = set()`）
 - Type B（`auto`）: `common_drawings = source_files_dict.keys() & dest_files_dict.keys()` と、上記の排他化済み `no_source_pairs`（`no_source_defined` が優先ステータスの図面のみ）の `main_drawing` 集合との積を取る。
-- Type C（`pair_list`）: 排他化済み `identical_pairs`（`identical` が優先ステータスの図面のみ）の `main_drawing` 集合。ただし `identical` 判定は流用元図番・流用先図番の文字列が一致するだけで決まり、実際にDXFファイルがアップロードされていない図番も含み得るため、流用先図面総数(a)の定義（実ファイルがある図番のみ）と揃えるよう `all_files_dict.keys()` との積でさらに絞り込む。
+- Type C（`pair_list`）: 排他化済み `identical_pairs`（`identical` が優先ステータスの図面のみ）の `main_drawing` 集合をそのまま使う（**ファイルアップロードの有無は問わない**、2026-06 修正）。本セクションは元々「ペアリストの流用元図番・流用先図番が一致する行をそのまま表示する」という仕様であり、DXFファイル未アップロードの図番でも、ペアリストに「変更していない」と明示されていればここに表示すべき（実データの引当前後リスト_ME25-9606-0 で `DE3527-562-01B`/`DE3527-568-03A` 等、ファイル未アップロードでも identical 行に記載されている図番が表示されない不具合として報告され修正）。Summaryシートの流用先図面総数(a)は別途「実ファイルがある図番のみ」で計算するため（`compute_total_drawings_count`）、Type C ではこの違いにより `b+c+d(+e)` が `a` を超える場合があり得る（ペアリストの identical 行のうち、ファイル未アップロードの図番がある場合）。これは設計上許容する。
 
 **検証方法**: 実データ（`sample-dxf/ME24-1001-0/`、流用先232件）で `差分抽出が可能なペア(73, ユニーク)` + `流用元図番の図面がない図面(154)` + `変更していない図面(5)` + `完全新規図面(0)` = 232 と一致することを確認。回帰テスト: `tests/unit/test_pairing.py` の `test_primary_status_prefers_complete_over_*`。
 
@@ -1931,7 +1931,7 @@ BASE_DIR = Path("/Users/ryozo/Dropbox/Client/ULVAC/ElectricDesignManagement/Tool
 
 ---
 
-*最終更新: 2026-06-24（`utils.pairing.primary_status_by_drawing()` を追加し、同一の流用先図番が複数ステータスのペアに登場する場合（RevUp+流用の併存、ペアリストの重複行）の二重計上を排除。Step3の全セクション集計が main_drawing 単位で排他的になり、`差分抽出が可能なペア`+`流用元図番の図面がない図面`+`変更していない図面`(+完全新規図面) の合計が流用先総数と必ず一致するようにした（実データの sample-dxf/ME24-1001-0 でも確認）。モジュールのフォーマットを `1111`(数字4桁) から `XXXX`(英大文字または数字4桁) に修正）*
+*最終更新: 2026-06-24（(1) `missing_source` のステータス表記を「流用元のDXFなし」→「流用元の図面ファイルなし」に変更。(2) `diff_labels.xlsx` プレビューexpanderが全Typeで初回表示から展開済みになる不具合を修正（`diff_preview_expanded` を selectbox の `on_change` でのみ True にするよう変更）。(3) Type C「変更していない図面」がペアリストの identical 行をファイルアップロード有無で誤って絞り込んでいた不具合を修正（ファイル未アップロードでもペアリスト上の宣言をそのまま反映するよう変更）。`utils.pairing.primary_status_by_drawing()` を追加し、同一の流用先図番が複数ステータスのペアに登場する場合（RevUp+流用の併存、ペアリストの重複行）の二重計上を排除。Step3の全セクション集計が main_drawing 単位で排他的になり、`差分抽出が可能なペア`+`流用元図番の図面がない図面`+`変更していない図面`(+完全新規図面) の合計が流用先総数と必ず一致するようにした（実データの sample-dxf/ME24-1001-0 でも確認）。モジュールのフォーマットを `1111`(数字4桁) から `XXXX`(英大文字または数字4桁) に修正）*
 
 *過去の更新: 2026-06-24（用語統一: 「比較元/比較先」→「流用元/流用先」（ペアリストの旧カラム名は後方互換）。Step 1 を「既存アップロード/新規作成（指番・モジュール・サイドから台帳ファイル名を自動生成）/作成せず」の3択に再設計。Step 3 のペアリスト表示を全セクション「：N件」表記に統一し、「完全新規図面」「変更していない図面（流用元と流用先とで共通）」セクションを追加。Summaryシートの図面統計・総図形数ラベルをペアリング方式（Type A/B/C）別に変更）*
 
