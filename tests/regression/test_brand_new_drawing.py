@@ -22,8 +22,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 import pandas as pd
 
-import app
-from utils.pairing import build_pairs_from_list, STATUS_NO_SOURCE_DEFINED, STATUS_ONE_SIDED
+from utils.pairing import (
+    build_pairs_from_list,
+    compute_unchanged_drawings,
+    get_brand_new_drawing_pairs,
+    STATUS_NO_SOURCE_DEFINED,
+    STATUS_ONE_SIDED,
+)
+from utils.master_ledger import create_empty_master_df, update_parent_child_master
 
 
 def test_target_only_row_is_no_source_defined_not_one_sided():
@@ -45,7 +51,7 @@ def test_get_brand_new_drawing_pairs_pair_list_excludes_identical():
         '流用先図番': ['NEW1', 'X', 'NEW1'],
     })
     pairs = build_pairs_from_list(df, files)
-    result = app.get_brand_new_drawing_pairs(pairs, 'pair_list')
+    result = get_brand_new_drawing_pairs(pairs, 'pair_list')
     assert {p['main_drawing'] for p in result} == {'NEW1'}
 
 
@@ -57,7 +63,7 @@ def test_get_brand_new_drawing_pairs_excludes_unuploaded_target():
     df = pd.DataFrame({'流用元図番': [''], '流用先図番': ['DE3527-556-01B']})
     pairs = build_pairs_from_list(df, {})  # ファイル未アップロード
     assert pairs[0]['status'] == STATUS_NO_SOURCE_DEFINED
-    result = app.get_brand_new_drawing_pairs(pairs, 'pair_list')
+    result = get_brand_new_drawing_pairs(pairs, 'pair_list')
     assert result == []
 
 
@@ -84,7 +90,7 @@ def test_compute_unchanged_drawings_excludes_unuploaded_identical():
         '流用先図番': ['WITH_FILE', 'NO_FILE'],
     })
     pairs = build_pairs_from_list(df, files)
-    result = app.compute_unchanged_drawings(pairs, 'pair_list')
+    result = compute_unchanged_drawings(pairs, 'pair_list')
     assert result == {'WITH_FILE'}
 
 
@@ -95,6 +101,7 @@ def test_show_missing_drawings_includes_identical_rows():
     identical 宣言がどこにも警告表示されなかった）。
     """
     import streamlit as st
+    import app  # UI層（_show_missing_drawings）の検証のためここだけ app をインポート
     df = pd.DataFrame({'流用元図番': ['NO_FILE'], '流用先図番': ['NO_FILE']})
 
     captured_dataframes = []
@@ -113,7 +120,7 @@ def test_show_missing_drawings_includes_identical_rows():
 
 def test_update_master_brand_new_drawing_parent_is_none():
     """完全新規図面を台帳に登録すると Parent='none'、エンティティ列は規定の形式になる。"""
-    master_df = app.create_empty_master_df()
+    master_df = create_empty_master_df()
     pair = {
         'main_drawing': 'NEW1',
         'source_drawing': None,
@@ -121,7 +128,7 @@ def test_update_master_brand_new_drawing_parent_is_none():
         'title': 'T', 'subtitle': 'S',
         'entity_counts': {'added_entities': 42, 'total_entities': 42},
     }
-    updated, added_count = app.update_parent_child_master(master_df, [pair])
+    updated, added_count = update_parent_child_master(master_df, [pair])
     assert added_count == 1
     row = updated[updated['Child'] == 'NEW1'].iloc[0]
     assert row['Parent'] == 'none'
@@ -135,7 +142,7 @@ def test_update_master_brand_new_drawing_parent_is_none():
 
 def test_update_master_brand_new_drawing_without_entity_counts_yet():
     """エンティティ数算出前（pair-list作成直後）の先行登録では n/a 列のみ確定する。"""
-    master_df = app.create_empty_master_df()
+    master_df = create_empty_master_df()
     pair = {
         'main_drawing': 'NEW2',
         'source_drawing': None,
@@ -143,7 +150,7 @@ def test_update_master_brand_new_drawing_without_entity_counts_yet():
         'title': None, 'subtitle': None,
         'entity_counts': None,
     }
-    updated, added_count = app.update_parent_child_master(master_df, [pair])
+    updated, added_count = update_parent_child_master(master_df, [pair])
     assert added_count == 1
     row = updated[updated['Child'] == 'NEW2'].iloc[0]
     assert row['Parent'] == 'none'
