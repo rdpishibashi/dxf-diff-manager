@@ -163,12 +163,12 @@ def test_build_pairs_from_list_statuses():
     pairs = build_pairs_from_list(df, files)
     statuses = [p['status'] for p in pairs]
     assert statuses == [
-        STATUS_COMPLETE,        # A->C 両方有
-        STATUS_IDENTICAL,       # A->A 同一
-        STATUS_MISSING_SOURCE,  # X(無)->C(有)
-        STATUS_MISSING_TARGET,  # A(有)->Z(無)
-        STATUS_ONE_SIDED,       # 空白->C
-        STATUS_ONE_SIDED,       # A->空白
+        STATUS_COMPLETE,          # A->C 両方有
+        STATUS_IDENTICAL,         # A->A 同一
+        STATUS_MISSING_SOURCE,    # X(無)->C(有)
+        STATUS_MISSING_TARGET,    # A(有)->Z(無)
+        STATUS_NO_SOURCE_DEFINED, # 空白->C（流用先はあるが流用元の記載なし＝完全新規図面）
+        STATUS_ONE_SIDED,         # A->空白（流用先が空白で比較対象がない）
     ]
     assert all(p['relation'] == RELATION_PAIR_LIST for p in pairs)
 

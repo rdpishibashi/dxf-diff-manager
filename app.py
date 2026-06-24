@@ -19,7 +19,7 @@ utils_path = os.path.join(current_dir, 'utils')
 sys.path.insert(0, utils_path)
 
 from utils.extract_labels import extract_labels
-from utils.compare_dxf import compare_dxf_files_and_generate_dxf, PairFileCache
+from utils.compare_dxf import compare_dxf_files_and_generate_dxf, count_entities_in_dxf_file, PairFileCache
 from utils.common_utils import save_uploadedfile, handle_error, cleanup_stale_temp_files
 from utils.label_diff import (
     compute_label_differences,
@@ -147,14 +147,19 @@ def update_parent_child_master(master_df, new_pairs):
         child = pair.get('main_drawing')      # 図番がChild
         title = pair.get('title')
         subtitle = pair.get('subtitle')
-        relation = pair.get('relation')       # 'RevUp' または '流用'
+        relation = pair.get('relation')       # 'RevUp' / '流用' / 完全新規図面など
         entity_counts = pair.get('entity_counts')  # エンティティ数情報
 
-        if not parent or not child:
+        if not child:
             continue
 
+        # 流用元が存在しない（完全新規図面）場合、Parent欄は "none" とする
+        # （流用元の参照なしを明示する。2026-06 追加）
+        is_brand_new = not parent
+        parent_value = parent if parent else 'none'
+
         # 既存のレコードに同じ親子関係が存在するか確認
-        mask = (updated_df['Parent'] == parent) & (updated_df['Child'] == child)
+        mask = (updated_df['Parent'] == parent_value) & (updated_df['Child'] == child)
         exists = mask.any()
 
         if exists:
@@ -176,9 +181,10 @@ def update_parent_child_master(master_df, new_pairs):
                     updated_df['Recorded Date'] = None
 
             # エンティティ数カラムを追加（存在しない場合）
+            # object dtype: 通常は整数、完全新規図面の行では "n/a" 文字列も入るため
             for col in entity_count_columns:
                 if col not in updated_df.columns:
-                    updated_df[col] = pd.Series(dtype='Int64')  # 整数型（NULLを許容）
+                    updated_df[col] = pd.Series(dtype='object')
 
             if 'Note' not in updated_df.columns:
                 updated_df['Note'] = pd.Series(dtype='object')
@@ -196,8 +202,18 @@ def update_parent_child_master(master_df, new_pairs):
             updated_df.loc[mask, 'Subtitle'] = subtitle
             updated_df.loc[mask, 'Recorded Date'] = current_date
 
-            # エンティティ数を更新（存在する場合）
-            if entity_counts:
+            # エンティティ数を更新
+            # 完全新規図面（流用元なし）: 比較を行っていないため Added=Total（その図面
+            # 自体の総エンティティ数）とし、それ以外（Deleted/Diff/Unchanged）は
+            # 比較対象が存在しないため "n/a" を明示する（2026-06 追加）。
+            if is_brand_new:
+                updated_df.loc[mask, 'Deleted Entities'] = 'n/a'
+                updated_df.loc[mask, 'Diff Entities'] = 'n/a'
+                updated_df.loc[mask, 'Unchanged Entities'] = 'n/a'
+                if entity_counts:
+                    updated_df.loc[mask, 'Added Entities'] = entity_counts.get('added_entities')
+                    updated_df.loc[mask, 'Total Entities'] = entity_counts.get('total_entities')
+            elif entity_counts:
                 updated_df.loc[mask, 'Deleted Entities'] = entity_counts.get('deleted_entities')
                 updated_df.loc[mask, 'Added Entities'] = entity_counts.get('added_entities')
                 updated_df.loc[mask, 'Diff Entities'] = entity_counts.get('diff_entities')
@@ -207,15 +223,22 @@ def update_parent_child_master(master_df, new_pairs):
             # 新しいレコードを追加
             new_record = {
                 'Child': child,
-                'Parent': parent,
+                'Parent': parent_value,
                 'Relation': relation,
                 'Title': title,
                 'Subtitle': subtitle,
                 'Recorded Date': datetime.now()
             }
 
-            # エンティティ数を追加（存在する場合）
-            if entity_counts:
+            # エンティティ数を追加（完全新規図面は上記と同じ規則。2026-06 追加）
+            if is_brand_new:
+                new_record['Deleted Entities'] = 'n/a'
+                new_record['Diff Entities'] = 'n/a'
+                new_record['Unchanged Entities'] = 'n/a'
+                if entity_counts:
+                    new_record['Added Entities'] = entity_counts.get('added_entities')
+                    new_record['Total Entities'] = entity_counts.get('total_entities')
+            elif entity_counts:
                 new_record['Deleted Entities'] = entity_counts.get('deleted_entities')
                 new_record['Added Entities'] = entity_counts.get('added_entities')
                 new_record['Diff Entities'] = entity_counts.get('diff_entities')
@@ -229,10 +252,7 @@ def update_parent_child_master(master_df, new_pairs):
         for record in new_records:
             for key in record.keys():
                 if key not in updated_df.columns:
-                    if key in entity_count_columns:
-                        updated_df[key] = pd.Series(dtype='Int64')
-                    else:
-                        updated_df[key] = pd.Series(dtype='object')
+                    updated_df[key] = pd.Series(dtype='object')
             updated_df.loc[len(updated_df)] = record
 
     return updated_df, added_count
@@ -248,11 +268,12 @@ def create_empty_master_df():
         'Subtitle': pd.Series(dtype='object'),
         'Recorded Date': pd.Series(dtype='object'),
         'Note': pd.Series(dtype='object'),
-        'Deleted Entities': pd.Series(dtype='Int64'),
-        'Added Entities': pd.Series(dtype='Int64'),
-        'Diff Entities': pd.Series(dtype='Int64'),
-        'Unchanged Entities': pd.Series(dtype='Int64'),
-        'Total Entities': pd.Series(dtype='Int64'),
+        # object dtype: 通常は整数、完全新規図面の行では "n/a" 文字列も入るため
+        'Deleted Entities': pd.Series(dtype='object'),
+        'Added Entities': pd.Series(dtype='object'),
+        'Diff Entities': pd.Series(dtype='object'),
+        'Unchanged Entities': pd.Series(dtype='object'),
+        'Total Entities': pd.Series(dtype='object'),
     })
 
 
@@ -312,8 +333,10 @@ def save_master_to_bytes(master_df, pairs=None, mode=None, total_drawings_count=
         ]
         entity_sums = {}
         for col, _ in entity_specs:
-            if col in master_df.columns and not master_df[col].isna().all():
-                entity_sums[col] = int(master_df[col].sum(skipna=True))
+            if col in master_df.columns:
+                # 完全新規図面の行は "n/a" 文字列が入るため、数値以外は除外して合計する
+                numeric_col = pd.to_numeric(master_df[col], errors='coerce')
+                entity_sums[col] = int(numeric_col.sum(skipna=True)) if not numeric_col.isna().all() else 0
             else:
                 entity_sums[col] = 0
 
@@ -691,6 +714,25 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
             if pairs_with_entity_counts:
                 master_df, _ = update_parent_child_master(master_df, pairs_with_entity_counts)
 
+            # 完全新規図面（流用元の参照がない図面）のエンティティ数を算出して台帳に反映。
+            # diff抽出（上記の complete_pairs ループ）の対象外のため、ここで単独ファイルの
+            # エンティティ数を数えて Added=Total として登録する（2026-06 追加）。
+            brand_new_pairs = get_brand_new_drawing_pairs(pairs, step1_mode) if step1_mode else []
+            brand_new_with_counts = []
+            for pair in brand_new_pairs:
+                file_info = pair.get('main_file_info')
+                if not file_info or not file_info.get('temp_path'):
+                    continue  # ファイル未アップロードのため算出不可
+                count = count_entities_in_dxf_file(file_info['temp_path'], tolerance=tolerance)
+                if count is None:
+                    continue
+                pair_with_counts = dict(pair, relation='完全新規図面')
+                pair_with_counts['entity_counts'] = {'added_entities': count, 'total_entities': count}
+                brand_new_with_counts.append(pair_with_counts)
+
+            if brand_new_with_counts:
+                master_df, _ = update_parent_child_master(master_df, brand_new_with_counts)
+
         # Total データ生成
         total_data = None
         if filter_non_parts and total_counter:
@@ -936,11 +978,19 @@ def create_pairs_from_single_pool(files_dict):
     return build_pairs(files_dict, files_dict)
 
 
-def update_master_if_needed(pairs):
+def update_master_if_needed(pairs, mode=None):
     """図面管理台帳を更新（必要な場合のみ）
+
+    差分抽出が可能なペア（complete）に加え、完全新規図面（流用元の参照がない
+    図面、get_brand_new_drawing_pairs参照）も登録する。完全新規図面はこの時点
+    ではエンティティ数が未確定（diff抽出を行わないため）なので、Parent="none"・
+    Relation等のみを先行登録し、エンティティ数は create_diff_zip() 側で
+    count_entities_in_dxf_file() により算出して追記する（2026-06 追加）。
 
     Args:
         pairs: ペア情報のリスト
+        mode: ペアリング方式（'all_in_one'/'auto'/'pair_list'）。完全新規図面の
+              判定（get_brand_new_drawing_pairs）に使用
 
     Returns:
         int: 追加された件数
@@ -949,12 +999,17 @@ def update_master_if_needed(pairs):
         return 0
 
     complete_pairs = [p for p in pairs if p['status'] == 'complete']
-    if not complete_pairs:
+    brand_new_pairs = get_brand_new_drawing_pairs(pairs, mode) if mode else []
+    # Relation 欄に明示的な値を入れる（pairing.py 側の relation=None のまま登録すると
+    # 台帳上で空欄になり、完全新規図面であることが分からなくなるため）
+    brand_new_pairs = [dict(p, relation='完全新規図面') for p in brand_new_pairs]
+    target_pairs = complete_pairs + brand_new_pairs
+    if not target_pairs:
         return 0
 
     updated_master, added_count = update_parent_child_master(
         st.session_state.master_df,
-        complete_pairs
+        target_pairs
     )
     st.session_state.master_df = updated_master
     return added_count
@@ -980,6 +1035,50 @@ def compute_total_drawings_count(mode):
         uploaded = set(st.session_state.all_files_dict.keys())
         return len(targets & uploaded)
     return 0
+
+
+def compute_unchanged_drawings(all_pairs, mode):
+    """「変更していない図面（流用元と流用先とで共通）」の対象図番集合を返す。
+
+    render_pair_list() の Step3 表示と、図面管理台帳への完全新規図面登録
+    （get_brand_new_drawing_pairs）の双方から呼ばれる共通ロジック。
+    Type A（all_in_one）では対象なし。
+    """
+    primary_status = primary_status_by_drawing(all_pairs)
+    if mode == 'auto':
+        no_source_drawings = {
+            p['main_drawing'] for p in all_pairs
+            if p['status'] == 'no_source_defined'
+            and primary_status.get(p['main_drawing']) == 'no_source_defined'
+        }
+        common_drawings = set(st.session_state.source_files_dict.keys()) \
+            & set(st.session_state.dest_files_dict.keys())
+        return common_drawings & no_source_drawings
+    elif mode == 'pair_list':
+        return {
+            p['main_drawing'] for p in all_pairs
+            if p['status'] == 'identical'
+            and primary_status.get(p['main_drawing']) == 'identical'
+        }
+    return set()
+
+
+def get_brand_new_drawing_pairs(all_pairs, mode):
+    """完全新規図面（流用元の参照がない図面）のペアを返す。
+
+    main_drawing 単位で優先度フィルタ済み（他ステータスで既に分類されている図面は
+    含まない）かつ「変更していない図面」に該当する図番は除外する。Step3表示
+    （render_pair_list）と図面管理台帳への登録（update_master_if_needed /
+    create_diff_zip）の両方で同じ集合を使うための共通ロジック。
+    """
+    primary_status = primary_status_by_drawing(all_pairs)
+    no_source_pairs = [
+        p for p in all_pairs
+        if p['status'] == 'no_source_defined'
+        and primary_status.get(p['main_drawing']) == 'no_source_defined'
+    ]
+    unchanged_drawings = compute_unchanged_drawings(all_pairs, mode)
+    return [p for p in no_source_pairs if p['main_drawing'] not in unchanged_drawings]
 
 
 def render_pair_list():
@@ -1016,8 +1115,6 @@ def render_pair_list():
         [p for p in all_pairs if p['status'] == 'missing_both'], 'missing_both')
     no_source_pairs = _rows_with_primary(
         [p for p in all_pairs if p['status'] == 'no_source_defined'], 'no_source_defined')
-    identical_pairs = _rows_with_primary(
-        [p for p in all_pairs if p['status'] == 'identical'], 'identical')
     # 片側のみのペアは流用先が空白（main_drawing なし）の行を含むため、
     # 優先度フィルタの対象外（main_drawing がある行のみ照合する）の行も素通しする。
     one_sided_drawings = _drawings_with('one_sided')
@@ -1027,28 +1124,9 @@ def render_pair_list():
     ]
 
     # 「変更していない図面（流用元と流用先とで共通）」対象の図番集合
-    # Type A（流用元/流用先の区別がない）では表示しない
-    #
-    # 単純な集合の積をそのまま使うと、別の流用元図番に対して complete/missing_source
-    # 判定済みの図面や、ペアリストの重複行で complete/missing_source 判定済みの図面まで
-    # 「変更していない」に混入し、差分抽出が可能なペア(b) + 流用元図番の図面がない図面(c)
-    # + 変更していない図面(d) の合計が流用先総数(a)を超えてしまう（同じ図面が複数セクションに
-    # 二重計上される、2026-06 確認済みバグ）。`primary_status_by_drawing` による優先度フィルタ
-    # 済みの no_source_pairs / identical_pairs（complete・missing_source 等で既に分類された
-    # 図面を含まない）を基準にすることで、b・c・d が排他的になるようにする。
-    if mode == 'auto':
-        common_drawings = set(st.session_state.source_files_dict.keys()) \
-            & set(st.session_state.dest_files_dict.keys())
-        unchanged_drawings = common_drawings & {p['main_drawing'] for p in no_source_pairs}
-    elif mode == 'pair_list':
-        # 「変更していない図面」は、ペアリストの流用元図番・流用先図番が一致する
-        # 行（identical）をそのまま対象とする。DXFファイルが未アップロードでも
-        # ペアリスト上の宣言（＝ユーザーが「変更していない」と明示した図番）を
-        # そのまま反映する（2026-06 修正。一度はアップロード済みの図番に限定して
-        # いたが、ペアリストに記載されているのに表示されない不具合になっていた）。
-        unchanged_drawings = {p['main_drawing'] for p in identical_pairs}
-    else:
-        unchanged_drawings = set()
+    # （compute_unchanged_drawings は get_brand_new_drawing_pairs と共通のロジック。
+    # 詳細はその関数のdocstring・TECHNICAL.md参照）
+    unchanged_drawings = compute_unchanged_drawings(all_pairs, mode)
 
     # no_source_pairs のうち、流用元にも流用先にも同一図番で存在するものは
     # 「完全新規図面」ではなく「変更していない図面」として扱う
@@ -1762,7 +1840,7 @@ def render_step2_pairing(source_count, dest_count):
                 progress_placeholder.empty()
 
         st.session_state.pairs_dirty = False
-        added_count = update_master_if_needed(st.session_state.pairs)
+        added_count = update_master_if_needed(st.session_state.pairs, mode=mode)
         st.session_state.added_relationships_count += added_count
         gc.collect()
         st.rerun()

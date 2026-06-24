@@ -1142,3 +1142,38 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
         # エラー時もメモリ解放
         gc.collect()
         return False, None
+
+
+def count_entities_in_dxf_file(file_path: str, tolerance: float = 0.01) -> Optional[int]:
+    """
+    単一のDXFファイルのエンティティ数を数える（比較対象なし）。
+
+    流用元の参照を持たない完全新規図面を図面管理台帳に登録する際、その図面単独の
+    総エンティティ数を求めるために使う。compare_dxf_files_and_generate_dxf() と
+    同じ抽出経路（EntityExpander → SignatureGenerator → DiffAnalyzer）を使い、
+    シグネチャ単位の重複排除も同様に適用する（複数ファイル比較時の total_entities
+    の定義と揃える）。
+
+    Returns:
+        Optional[int]: エンティティ数。読み込み失敗時は None。
+    """
+    try:
+        tolerance_config = ToleranceConfig(tolerance)
+        transformer = CoordinateTransformer(tolerance_config, debug=False)
+        expander = EntityExpander(transformer, debug=False, global_offset=None)
+        signature_generator = SignatureGenerator(transformer, debug=False)
+        diff_analyzer = DiffAnalyzer(signature_generator, debug=False)
+
+        doc = ezdxf.readfile(file_path)
+        entities, _, _ = diff_analyzer.extract_entities_from_doc(doc, "A", expander)
+        del doc
+
+        count = len(entities)
+        del entities
+        gc.collect()
+        return count
+
+    except Exception as e:
+        logger.error(f"DXF entity count error: {e}")
+        gc.collect()
+        return None
