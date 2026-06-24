@@ -44,7 +44,7 @@ UNCHANGED_LABELS_FILENAME = "unchanged_labels.xlsx"
 
 # 図面管理台帳の新規作成時に使用する入力フォーマット
 SHIBAN_PATTERN = re.compile(r'^[A-Z]{2}\d{2}-\d{4}-\d$')   # 例: AA11-1111-1
-MODULE_PATTERN = re.compile(r'^\d{4}$')                    # 例: 1111
+MODULE_PATTERN = re.compile(r'^[A-Z0-9]{4}$')              # 例: XXXX（英大文字・数字）
 SIDE_PATTERN = re.compile(r'^[A-Z0-9]{3}$')                # 例: XXX（英大文字・数字）
 
 
@@ -1005,9 +1005,18 @@ def render_pair_list():
 
     # 「変更していない図面（流用元と流用先とで共通）」対象の図番集合
     # Type A（流用元/流用先の区別がない）では表示しない
+    #
+    # Type B（auto）は単純な集合の積を取ると、別の流用元図番に対して
+    # complete/missing_source 判定済みの図面まで「変更していない」に混入し、
+    # 差分抽出が可能なペア(b) + 流用元図番の図面がない図面(c) + 変更していない
+    # 図面(d) の合計が流用先総数(a)を超えてしまう（同じ図面が複数セクションに
+    # 二重計上される）。よって、他に分類されない（no_source_defined）図面の
+    # うちで流用元にも同一図番が存在するものだけを「変更していない」とする
+    # （b・c・d が流用先図面を排他的に分割する）。
     if mode == 'auto':
-        unchanged_drawings = set(st.session_state.source_files_dict.keys()) \
+        common_drawings = set(st.session_state.source_files_dict.keys()) \
             & set(st.session_state.dest_files_dict.keys())
+        unchanged_drawings = common_drawings & {p['main_drawing'] for p in no_source_pairs}
     elif mode == 'pair_list':
         unchanged_drawings = {p['main_drawing'] for p in identical_pairs}
     else:
@@ -1298,7 +1307,7 @@ def render_step0_master():
         with col2:
             module = st.text_input(
                 "モジュールを入力", key='new_master_module_input',
-                placeholder="1111（未入力可）", label_visibility='collapsed',
+                placeholder="XXXX（未入力可）", label_visibility='collapsed',
             )
 
         col1, col2 = st.columns([1, 3])
@@ -1320,7 +1329,7 @@ def render_step0_master():
         elif not SHIBAN_PATTERN.match(shiban):
             errors.append("指番のフォーマットが不正です。例: AA11-1111-1（英大文字2桁-数字4桁-数字1桁）")
         if module and not MODULE_PATTERN.match(module):
-            errors.append("モジュールのフォーマットが不正です。例: 1111（数字4桁）")
+            errors.append("モジュールのフォーマットが不正です。例: XXXX（英大文字または数字4桁）")
         if side and not SIDE_PATTERN.match(side):
             errors.append("サイドのフォーマットが不正です。例: XXX（英大文字または数字3桁）")
 
