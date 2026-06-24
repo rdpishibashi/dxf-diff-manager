@@ -20,6 +20,8 @@ from utils.pairing import (
     build_pairs_from_list,
     find_revup_pairs,
     extract_base_drawing_number,
+    primary_status_by_drawing,
+    drawings_with_status,
     RELATION_REVUP,
     RELATION_DEPENDENCY,
     RELATION_PAIR_LIST,
@@ -175,6 +177,48 @@ def test_build_pairs_from_list_missing_both():
     df = pd.DataFrame({'流用元図番': ['X'], '流用先図番': ['Y']})
     pairs = build_pairs_from_list(df, {})
     assert pairs[0]['status'] == STATUS_MISSING_BOTH
+
+
+# --- primary_status_by_drawing / drawings_with_status (UI 表示の二重計上防止) ---
+#
+# 2026-06: 同じ流用先図番（main_drawing）が複数ステータスのペアに登場するケースで、
+# Step3 の各セクション集計（差分抽出が可能なペア / 流用元図番の図面がない図面 /
+# 変更していない図面 等）の合計が流用先総数と一致しなくなる実バグが見つかった。
+# 実データ（sample-dxf）でも RevUp パスと流用パスの両方が同一の流用先図番に対し
+# 異なるステータスのペアを生成するケースが確認されている。
+
+def test_primary_status_prefers_complete_over_missing_source_revup_case():
+    """方式A/B: 同一の流用先が RevUp(complete) と 流用(missing_source) の両方に登場するケース。"""
+    source = {'X002A': _f('X002A')}
+    target = {'X002B': _f('X002B', source='Y999')}  # Y999 は未アップロード
+    pairs = build_pairs(source, target)
+    primary = primary_status_by_drawing(pairs)
+    assert primary == {'X002B': STATUS_COMPLETE}
+
+
+def test_primary_status_prefers_complete_over_missing_source_duplicate_target_row():
+    """方式C: ペアリストに同一の流用先図番が複数行（流用元が異なる）あるケース。"""
+    df = pd.DataFrame({'流用元図番': ['A1', 'A2'], '流用先図番': ['B1', 'B1']})
+    files = {'A1': {'x': 1}, 'B1': {'x': 1}}  # A2 は未アップロード
+    pairs = build_pairs_from_list(df, files)
+    primary = primary_status_by_drawing(pairs)
+    assert primary == {'B1': STATUS_COMPLETE}
+
+
+def test_primary_status_prefers_complete_over_identical_duplicate_target_row():
+    """方式C: 同一の流用先図番が identical 行と complete 行の両方に登場するケース。"""
+    df = pd.DataFrame({'流用元図番': ['B1', 'A9'], '流用先図番': ['B1', 'B1']})
+    files = {'B1': {'x': 1}, 'A9': {'x': 1}}
+    pairs = build_pairs_from_list(df, files)
+    primary = primary_status_by_drawing(pairs)
+    assert primary == {'B1': STATUS_COMPLETE}
+
+
+def test_drawings_with_status_excludes_blank_main_drawing():
+    df = pd.DataFrame({'流用元図番': ['A1'], '流用先図番': ['']})
+    pairs = build_pairs_from_list(df, {'A1': {'x': 1}})
+    assert pairs[0]['status'] == STATUS_ONE_SIDED
+    assert drawings_with_status(pairs, STATUS_ONE_SIDED) == set()
 
 
 def _run_all():

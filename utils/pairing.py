@@ -273,3 +273,49 @@ def build_pairs_from_list(pair_list_df, all_files_dict):
         })
 
     return pairs
+
+
+# 同一の流用先図番（main_drawing）が複数ステータスのペアに登場した場合、
+# どのステータスを「その図面の代表的な状態」として優先するかの順位（先頭ほど優先）。
+#
+# 同じ main_drawing が複数のペアを持ち得るケース（2026-06 確認済み）:
+#   - 方式 A/B（build_pairs）: RevUp パスと流用パスが、同一の比較先に対して
+#     異なる流用元図番でそれぞれ別のペアを生成する場合（例: RevUpで complete、
+#     その図面自身が埋め込む別の流用元参照が未アップロードで missing_source）。
+#   - 方式 C（build_pairs_from_list）: ペアリストに同一の流用先図番が複数行
+#     記載されている場合（流用元図番や行内容が行ごとに異なる）。
+# これを考慮せず単純にステータス別の件数を表示すると、同じ図面が複数セクションに
+# 二重計上され、セクション件数の合計が流用先総数と一致しなくなる（2026-06 に
+# 実データで確認したバグ）。complete を最優先することで、「別の流用元に対しては
+# 解決済みの図面」が missing_source 等にも二重計上されることを防ぐ。
+STATUS_DISPLAY_PRIORITY = [
+    STATUS_COMPLETE, STATUS_MISSING_SOURCE, STATUS_MISSING_TARGET, STATUS_MISSING_BOTH,
+    STATUS_ONE_SIDED, STATUS_IDENTICAL, STATUS_NO_SOURCE_DEFINED,
+]
+_STATUS_DISPLAY_RANK = {s: i for i, s in enumerate(STATUS_DISPLAY_PRIORITY)}
+
+
+def primary_status_by_drawing(pairs):
+    """main_drawing ごとに、STATUS_DISPLAY_PRIORITY 上で最も優先度の高いステータスを1つ決める。
+
+    UI 表示（セクション分類・件数集計）を main_drawing 単位で排他的にするための
+    前処理。main_drawing が空（片側のみのペアで流用先が空白の行等）は対象外。
+
+    Returns:
+        dict: {main_drawing: status}
+    """
+    primary = {}
+    for p in pairs:
+        md = p.get('main_drawing')
+        if not md:
+            continue
+        cur = primary.get(md)
+        if cur is None or _STATUS_DISPLAY_RANK[p['status']] < _STATUS_DISPLAY_RANK[cur]:
+            primary[md] = p['status']
+    return primary
+
+
+def drawings_with_status(pairs, status):
+    """primary_status_by_drawing() の結果から、指定ステータスが最優先の main_drawing 集合を返す。"""
+    primary = primary_status_by_drawing(pairs)
+    return {md for md, s in primary.items() if s == status}
