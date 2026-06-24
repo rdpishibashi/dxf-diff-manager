@@ -1041,11 +1041,12 @@ def render_pair_list():
             & set(st.session_state.dest_files_dict.keys())
         unchanged_drawings = common_drawings & {p['main_drawing'] for p in no_source_pairs}
     elif mode == 'pair_list':
-        # identical 行は流用元図番・流用先図番の文字列が一致するだけで判定されるため、
-        # 実際にDXFファイルがアップロードされていない図番も含み得る。流用先図面総数(a)
-        # の定義（実ファイルがある図番のみ）と揃えるため、アップロード済みの図番に限定する。
-        unchanged_drawings = {p['main_drawing'] for p in identical_pairs} \
-            & set(st.session_state.all_files_dict.keys())
+        # 「変更していない図面」は、ペアリストの流用元図番・流用先図番が一致する
+        # 行（identical）をそのまま対象とする。DXFファイルが未アップロードでも
+        # ペアリスト上の宣言（＝ユーザーが「変更していない」と明示した図番）を
+        # そのまま反映する（2026-06 修正。一度はアップロード済みの図番に限定して
+        # いたが、ペアリストに記載されているのに表示されない不具合になっていた）。
+        unchanged_drawings = {p['main_drawing'] for p in identical_pairs}
     else:
         unchanged_drawings = set()
 
@@ -1083,9 +1084,9 @@ def render_pair_list():
         for pair in missing_pairs:
             revup_source = revup_source_by_target.get(pair['main_drawing'])
             if revup_source:
-                status = f'⚠️ 流用元のDXFなし・RevUpあり（{revup_source}）'
+                status = f'⚠️ 流用元の図面ファイルなし・RevUpあり（{revup_source}）'
             else:
-                status = '⚠️ 流用元のDXFなし'
+                status = '⚠️ 流用元の図面ファイルなし'
             missing_data.append({
                 '流用先（新）': pair['main_drawing'],
                 '流用元（旧）': pair['source_drawing'],
@@ -1986,6 +1987,14 @@ def render_step3_diff(complete_pairs):
                     render_preview_dataframe(st.session_state.master_df, "master_preview")
 
             if has_diff_labels:
+                # 「一度開いたら開いたままにする」は、シート選択(selectbox)の変更という
+                # 明示的なユーザー操作があった場合のみ反映する（on_change）。
+                # st.expander の中身は collapsed 表示中でも毎回実行されるため、ここで
+                # 無条件に True を立てると初回表示から常に展開済みになってしまう
+                # （2026-06 確認済みバグ。全Typeで発生）。
+                def _mark_diff_preview_expanded():
+                    st.session_state['diff_preview_expanded'] = True
+
                 diff_expanded = st.session_state.get('diff_preview_expanded', False)
                 with st.expander("diff_labels.xlsx プレビュー", expanded=diff_expanded):
                     diff_bytes = read_zip_member(st.session_state.zip_data, DIFF_LABELS_FILENAME)
@@ -1994,10 +2003,10 @@ def render_step3_diff(complete_pairs):
                         sheet_name = st.selectbox(
                             "シートを選択（diff_labels）",
                             diff_xl.sheet_names,
-                            key="diff_labels_preview_sheet"
+                            key="diff_labels_preview_sheet",
+                            on_change=_mark_diff_preview_expanded,
                         )
                         render_preview_dataframe(diff_xl.parse(sheet_name), "diff_preview")
-                        st.session_state['diff_preview_expanded'] = True
 
             if has_unchanged_labels:
                 with st.expander("unchanged_labels.xlsx プレビュー", expanded=False):
@@ -2058,6 +2067,7 @@ def render_step3_diff(complete_pairs):
                         'results', 'zip_data', 'processing_settings',
                         'master_df', 'master_file_name', 'added_relationships_count',
                         'has_diff_labels', 'has_unchanged_labels',
+                        'diff_preview_expanded',
                         'downloaded']:
                 if key in st.session_state:
                     del st.session_state[key]
