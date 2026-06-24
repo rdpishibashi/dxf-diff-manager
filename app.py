@@ -1192,20 +1192,27 @@ def render_pair_list():
         # 3セクションを「図面ファイルがない図番」1つにまとめた）。
         # 同じ流用先に RevUp の差分抽出可能ペアがある場合の注記は、Type C では
         # relation が常に 'ペアリスト'（RevUpという関係自体が存在しない）ため不要。
-        missing_file_pairs = missing_pairs + missing_target_pairs + missing_both_pairs
+        # one_sided（流用先が空白）も、流用先のDXFファイルが無い点では実質的に
+        # missing_target と同じ状況のため、本セクションに統合する（2026-06変更。
+        # 旧「流用先がない流用元図面」セクションは廃止）。
+        status_text = {
+            'missing_source': '⚠️ 流用元 図面ファイルなし',
+            'missing_target': '⚠️ 流用先 図面ファイルなし',
+            'missing_both': '⚠️ 流用元・先 図面ファイルなし',
+            'one_sided': '⚠️ 流用先 図面ファイルなし',
+        }
+        missing_file_pairs = missing_pairs + missing_target_pairs + missing_both_pairs + one_sided_pairs
         if missing_file_pairs:
-            status_text = {
-                'missing_source': '⚠️ 流用元 図面ファイルなし',
-                'missing_target': '⚠️ 流用先 図面ファイルなし',
-                'missing_both': '⚠️ 流用元・先 図面ファイルなし',
-            }
             missing_file_data = [{
-                '流用先（新）': pair['main_drawing'],
-                '流用元（旧）': pair['source_drawing'],
+                '流用先（新）': pair['main_drawing'] or '（なし）',
+                '流用元（旧）': pair['source_drawing'] or '（なし）',
                 'ステータス': status_text[pair['status']],
             } for pair in missing_file_pairs]
 
-            with st.expander(f"⚠️ 図面ファイルがない図番：{len({p['main_drawing'] for p in missing_file_pairs})}件", expanded=True):
+            # 件数は行数（ペアリストの行＝宣言された関係の数）で数える。one_sided は
+            # main_drawing が空（複数行が同じ空値に collapse する）ため、main_drawing
+            # のユニーク数では正しく数えられない。
+            with st.expander(f"⚠️ 図面ファイルがない図番：{len(missing_file_pairs)}件", expanded=True):
                 st.dataframe(missing_file_data, width='stretch', hide_index=True)
     else:
         # Type A/B: 流用元のDXFファイルが未アップロードのペア（流用先の図面のみが対象。
@@ -1234,18 +1241,8 @@ def render_pair_list():
             with st.expander(f"⚠️ 流用元図番の図面がない図面：{len({p['main_drawing'] for p in missing_pairs})}件", expanded=False):
                 st.dataframe(missing_data, width='stretch', hide_index=True)
 
-    # 流用先がない流用元図面（ペアリストで流用元は記載しているが流用先が空白の行）
-    if one_sided_pairs:
-        one_sided_data = []
-        for pair in one_sided_pairs:
-            one_sided_data.append({
-                '流用先（新）': pair['main_drawing'] or '（なし）',
-                '流用元（旧）': pair['source_drawing'] or '（なし）',
-            })
-
-        with st.expander(f"➖ 流用先がない流用元図面：{len(one_sided_pairs)}件", expanded=True):
-            st.caption("ペアリストで流用元は記載しているが、流用先が空白となっている行です。差分抽出できません。")
-            st.dataframe(one_sided_data, width='stretch', hide_index=True)
+    # one_sided（流用先が空白の行）は mode == 'pair_list' の「図面ファイルがない図番」
+    # に統合済み（上記参照）。Type A/Bでは one_sided は発生しない。
 
     # 完全新規図面（流用元図番なし）
     if no_source_pairs:
@@ -1731,19 +1728,23 @@ def _show_missing_drawings(pair_list_df, all_files_dict):
         st.success("ペアリストの全図番がアップロード済みです。")
         return
 
-    if missing_ref:
-        with st.expander(f"⚠️ 未アップロードの流用元図番：{len(missing_ref)}件", expanded=True):
-            st.dataframe(
-                pd.DataFrame({'流用元図番（未アップロード）': missing_ref}),
-                hide_index=True, width='stretch'
-            )
+    # 流用元・流用先の両方の未アップロード図番を1セクションにまとめて表示する
+    # （2026-06変更。タイトルには件数の異なる2つのリストの件数を1つの数値として
+    # 表示できないため、表の最終行に「合計件数」として各列の件数を表示する）。
+    max_len = max(len(missing_ref), len(missing_target))
+    missing_data = {
+        '流用元図番（未アップロード）': missing_ref + [''] * (max_len - len(missing_ref)),
+        '流用先図番（未アップロード）': missing_target + [''] * (max_len - len(missing_target)),
+    }
+    missing_df = pd.DataFrame(missing_data)
+    total_row = pd.DataFrame({
+        '流用元図番（未アップロード）': [f'合計件数：{len(missing_ref)}件'],
+        '流用先図番（未アップロード）': [f'合計件数：{len(missing_target)}件'],
+    })
+    missing_df = pd.concat([missing_df, total_row], ignore_index=True)
 
-    if missing_target:
-        with st.expander(f"⚠️ 未アップロードの流用先図番：{len(missing_target)}件", expanded=True):
-            st.dataframe(
-                pd.DataFrame({'流用先図番（未アップロード）': missing_target}),
-                hide_index=True, width='stretch'
-            )
+    with st.expander("⚠️ 未アップロードの図番", expanded=True):
+        st.dataframe(missing_df, hide_index=True, width='stretch')
 
 
 def _render_step1_all_in_one_mode():
