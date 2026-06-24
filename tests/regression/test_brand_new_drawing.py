@@ -39,13 +39,35 @@ def test_target_only_row_is_no_source_defined_not_one_sided():
 
 def test_get_brand_new_drawing_pairs_pair_list_excludes_identical():
     """方式C: identical（変更していない図面）に分類された図番は完全新規図面に含めない。"""
+    files = {'NEW1': {'temp_path': '/tmp/NEW1.dxf'}, 'X': {'temp_path': '/tmp/X.dxf'}}
     df = pd.DataFrame({
         '流用元図番': ['', 'X', ''],
         '流用先図番': ['NEW1', 'X', 'NEW1'],
     })
-    pairs = build_pairs_from_list(df, {})
+    pairs = build_pairs_from_list(df, files)
     result = app.get_brand_new_drawing_pairs(pairs, 'pair_list')
     assert {p['main_drawing'] for p in result} == {'NEW1'}
+
+
+def test_get_brand_new_drawing_pairs_excludes_unuploaded_target():
+    """方式C: 流用先のファイルが未アップロードの図番は完全新規図面に含めない
+    （例: DE3527-556-01B。流用元図番が空白でも、肝心のファイル自体が無ければ
+    「完全新規図面」として台帳登録・Step3表示の対象にはしない）。
+    """
+    df = pd.DataFrame({'流用元図番': [''], '流用先図番': ['DE3527-556-01B']})
+    pairs = build_pairs_from_list(df, {})  # ファイル未アップロード
+    assert pairs[0]['status'] == STATUS_NO_SOURCE_DEFINED
+    result = app.get_brand_new_drawing_pairs(pairs, 'pair_list')
+    assert result == []
+
+
+def test_title_subtitle_populated_for_brand_new_drawing():
+    """方式C: 完全新規図面のペアにも、流用先ファイルから抽出済みのTitle/Subtitleが入る。"""
+    files = {'NEW1': {'temp_path': '/tmp/NEW1.dxf', 'title': 'T1', 'subtitle': 'S1'}}
+    df = pd.DataFrame({'流用元図番': [''], '流用先図番': ['NEW1']})
+    pairs = build_pairs_from_list(df, files)
+    assert pairs[0]['title'] == 'T1'
+    assert pairs[0]['subtitle'] == 'S1'
 
 
 def test_update_master_brand_new_drawing_parent_is_none():
