@@ -9,13 +9,13 @@
 streamlit には依存しないため、`tests/` から直接ユニットテストできる。
 
 ペア dict のスキーマ（全モード共通）:
-    main_drawing     : 比較先（新）図番 or None
-    source_drawing   : 比較元（旧）図番 or None
-    main_file_info   : 比較先ファイル情報 dict or None
-    source_file_info : 比較元ファイル情報 dict or None
+    main_drawing     : 流用先（新）図番 or None
+    source_drawing   : 流用元（旧）図番 or None
+    main_file_info   : 流用先ファイル情報 dict or None
+    source_file_info : 流用元ファイル情報 dict or None
     status           : STATUS_* のいずれか
     relation         : RELATION_* のいずれか or None
-    title / subtitle : 比較先の図面名（無ければ None）
+    title / subtitle : 流用先の図面名（無ければ None）
 """
 from collections import defaultdict
 
@@ -26,11 +26,11 @@ RELATION_PAIR_LIST = 'ペアリスト'   # 明示ペアリスト（方式 C）
 
 # --- ステータス(status) ---
 STATUS_COMPLETE = 'complete'                  # 両ファイル有・差分比較対象
-STATUS_MISSING_SOURCE = 'missing_source'      # 比較元(旧)未アップロード
-STATUS_MISSING_TARGET = 'missing_target'      # 比較先(新)未アップロード（C のみ）
+STATUS_MISSING_SOURCE = 'missing_source'      # 流用元(旧)未アップロード
+STATUS_MISSING_TARGET = 'missing_target'      # 流用先(新)未アップロード（C のみ）
 STATUS_MISSING_BOTH = 'missing_both'          # 両方未アップロード（C のみ）
 STATUS_ONE_SIDED = 'one_sided'                # 片側図番が空白（C のみ）
-STATUS_IDENTICAL = 'identical'                # 比較元==比較先（比較対象外・C のみ）
+STATUS_IDENTICAL = 'identical'                # 流用元==流用先（比較対象外・C のみ）
 STATUS_NO_SOURCE_DEFINED = 'no_source_defined'  # 流用元図番未記入
 
 
@@ -65,18 +65,18 @@ def extract_base_drawing_number(drawing_number):
 def find_revup_pairs(source_files, target_files):
     """
     RevUpペア（Revision識別子のみ異なる同一図面のペア）を作成する。
-    比較元は source_files、比較先は target_files から取り、比較先のリビジョンが
-    比較元より新しいものをペアにする。
+    流用元は source_files、流用先は target_files から取り、流用先のリビジョンが
+    流用元より新しいものをペアにする。
 
     方式 A では source_files と target_files に同一のプールを渡す。
     方式 B では流用元グループ・流用先グループをそれぞれ渡す。
 
     Args:
-        source_files: 比較元（旧）の図番をキーとしたファイル情報の辞書
-        target_files: 比較先（新）の図番をキーとしたファイル情報の辞書
+        source_files: 流用元（旧）の図番をキーとしたファイル情報の辞書
+        target_files: 流用先（新）の図番をキーとしたファイル情報の辞書
 
     Returns:
-        tuple: (RevUpペアのリスト, 使用された比較元図番のセット, 使用された比較先図番のセット)
+        tuple: (RevUpペアのリスト, 使用された流用元図番のセット, 使用された流用先図番のセット)
     """
     source_base_map = defaultdict(list)
     for drawing_number in source_files.keys():
@@ -100,7 +100,7 @@ def find_revup_pairs(source_files, target_files):
         source_drawings = sorted(source_base_map[base], key=lambda x: x[1])
         target_drawings = sorted(target_base_map[base], key=lambda x: x[1])
 
-        # 比較元（旧リビジョン）と比較先（新リビジョン）をマッチング
+        # 流用元（旧リビジョン）と流用先（新リビジョン）をマッチング
         for old_drawing, old_rev in source_drawings:
             for new_drawing, new_rev in target_drawings:
                 if new_rev > old_rev and new_drawing not in used_target and old_drawing not in used_source:
@@ -119,7 +119,7 @@ def find_revup_pairs(source_files, target_files):
                     })
                     used_source.add(old_drawing)
                     used_target.add(new_drawing)
-                    break  # この比較元は使用済み
+                    break  # この流用元は使用済み
 
     return revup_pairs, used_source, used_target
 
@@ -134,26 +134,26 @@ def build_pairs(source_files, target_files, progress_callback=None):
     判定方式:
       1. RevUpパス : find_revup_pairs() で同一ベース図番・リビジョン差のペアを
                      status=complete, relation=RevUp で生成。
-      2. 流用パス  : 比較先ファイルの source_drawing_number を source_files から検索。
-                     RevUp で生成済みの同一(比較先,比較元)ペアは重複させない。
-                     未生成なら、対応する比較元ファイルがあれば complete、
+      2. 流用パス  : 流用先ファイルの source_drawing_number を source_files から検索。
+                     RevUp で生成済みの同一(流用先,流用元)ペアは重複させない。
+                     未生成なら、対応する流用元ファイルがあれば complete、
                      なければ missing_source（relation=流用）。
       3. 孤立パス  : いずれの役割でもペアに登場せず、流用元図番も未記入（または
-                     自分自身）の比較先を no_source_defined として追記。
+                     自分自身）の流用先を no_source_defined として追記。
 
-    RevUp で対応済みの比較先でも別の流用元図番を持つ場合は独立した流用ペアを
-    追加するため、同一の比較先図番が双方に登場し得る。
+    RevUp で対応済みの流用先でも別の流用元図番を持つ場合は独立した流用ペアを
+    追加するため、同一の流用先図番が双方に登場し得る。
 
     Args:
-        source_files: 比較元（旧）の図番をキーとしたファイル情報の辞書
-        target_files: 比較先（新）の図番をキーとしたファイル情報の辞書
+        source_files: 流用元（旧）の図番をキーとしたファイル情報の辞書
+        target_files: 流用先（新）の図番をキーとしたファイル情報の辞書
         progress_callback: (progress, message, count, total) を受け取る進捗関数（任意）
 
     Returns:
         list: ペア情報のリスト
     """
     pairs = []
-    pair_keys = set()        # 重複ペア排除用 (比較先, 比較元)
+    pair_keys = set()        # 重複ペア排除用 (流用先, 流用元)
     paired_drawings = set()  # いずれかの役割でペアに登場した図番（孤立判定用）
 
     def report_progress(progress, message, count=None, total=None):
@@ -227,12 +227,12 @@ def build_pairs_from_list(pair_list_df, all_files_dict):
     """
     明示ペアリスト（方式 C）からペアを作成する。
 
-    pair_list_df の各行（比較元図番・比較先図番）について all_files_dict を参照し、
+    pair_list_df の各行（流用元図番・流用先図番）について all_files_dict を参照し、
     図番の有無・ファイルの有無でステータスを決定する。RevUp の自動補完は行わず、
     リストの内容をそのまま尊重する。
 
     Args:
-        pair_list_df: 比較元図番・比較先図番カラムを持つ DataFrame
+        pair_list_df: 流用元図番・流用先図番カラムを持つ DataFrame
         all_files_dict: 図番をキーとしたファイル情報の辞書
 
     Returns:
@@ -240,14 +240,14 @@ def build_pairs_from_list(pair_list_df, all_files_dict):
     """
     pairs = []
     for _, row in pair_list_df.iterrows():
-        ref_drawing = str(row['比較元図番']).strip()
-        target_drawing = str(row['比較先図番']).strip()
+        ref_drawing = str(row['流用元図番']).strip()
+        target_drawing = str(row['流用先図番']).strip()
 
         ref_file_info = all_files_dict.get(ref_drawing) if ref_drawing else None
         target_file_info = all_files_dict.get(target_drawing) if target_drawing else None
 
         if ref_drawing and target_drawing and ref_drawing == target_drawing:
-            # 比較元と比較先が同一図番のため比較対象外
+            # 流用元と流用先が同一図番のため比較対象外
             status = STATUS_IDENTICAL
         elif not ref_drawing or not target_drawing:
             # 相手図番がそもそも存在しない（片側を空白にしたケース）

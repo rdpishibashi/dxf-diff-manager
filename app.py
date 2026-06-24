@@ -1,5 +1,6 @@
 import streamlit as st
 import os
+import re
 import tempfile
 import sys
 from pathlib import Path
@@ -40,6 +41,11 @@ st.set_page_config(
 PREFIX_CONFIG_PATH = Path(current_dir) / "prefix_config.txt"
 DIFF_LABELS_FILENAME = "diff_labels.xlsx"
 UNCHANGED_LABELS_FILENAME = "unchanged_labels.xlsx"
+
+# 図面管理台帳の新規作成時に使用する入力フォーマット
+SHIBAN_PATTERN = re.compile(r'^[A-Z]{2}\d{2}-\d{4}-\d$')   # 例: AA11-1111-1
+MODULE_PATTERN = re.compile(r'^\d{4}$')                    # 例: 1111
+SIDE_PATTERN = re.compile(r'^[A-Z0-9]{3}$')                # 例: XXX（英大文字・数字）
 
 
 def read_zip_member(zip_data, member_name):
@@ -250,7 +256,7 @@ def create_empty_master_df():
     })
 
 
-def save_master_to_bytes(master_df, pairs=None):
+def save_master_to_bytes(master_df, pairs=None, mode=None, total_drawings_count=None):
     """
     図面管理台帳DataFrameをExcelバイトデータに変換
 
@@ -260,11 +266,20 @@ def save_master_to_bytes(master_df, pairs=None):
 
     Args:
         master_df: 図面管理台帳DataFrame
-        pairs: ペア情報リスト（図面統計の計算に使用。Noneの場合は 0 で埋める）
+        pairs: ペア情報リスト（差分抽出ペア数の計算に使用。Noneの場合は 0 で埋める）
+        mode: ペアリング方式（'all_in_one'(Type A) / 'auto'(Type B) / 'pair_list'(Type C)）。
+              Type A は「アップロード図面総数」、Type B/C は「流用先図面総数」を分母に使う。
+        total_drawings_count: 図面統計の分母件数（呼び出し側で mode に応じて算出する）
 
     Returns:
         bytes: Excelファイルのバイトデータ
     """
+    if mode == 'all_in_one':
+        total_drawings_label = 'アップロード図面総数'
+        total_entities_label = 'アップロード図面 図形総数'
+    else:
+        total_drawings_label = '流用先図面総数'
+        total_entities_label = '流用先図面 図形総数'
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         workbook = writer.book
@@ -289,11 +304,11 @@ def save_master_to_bytes(master_df, pairs=None):
         row += 1
 
         entity_specs = [
-            ('Deleted Entities',   '削除図形数 合計'),
-            ('Added Entities',     '追加図形数 合計'),
-            ('Diff Entities',      '差分図形数 合計'),
-            ('Unchanged Entities', '変更なし図形数 合計'),
-            ('Total Entities',     '総図形数 合計'),
+            ('Deleted Entities',   '削除図形 総数'),
+            ('Added Entities',     '追加図形 総数'),
+            ('Diff Entities',      '変更（追加+削除）図形 総数'),
+            ('Unchanged Entities', '変更なし図形 総数'),
+            ('Total Entities',     total_entities_label),
         ]
         entity_sums = {}
         for col, _ in entity_specs:
@@ -319,15 +334,11 @@ def save_master_to_bytes(master_df, pairs=None):
         summary_ws.write(row, 0, '図面統計', bold)
         row += 1
 
-        if pairs is not None:
-            total_drawings = len(set(p['main_drawing'] for p in pairs))
-            pair_count = len([p for p in pairs if p['status'] == 'complete'])
-        else:
-            total_drawings = 0
-            pair_count = 0
+        total_drawings = total_drawings_count if total_drawings_count is not None else 0
+        pair_count = len([p for p in pairs if p['status'] == 'complete']) if pairs is not None else 0
         reuse_rate = (pair_count / total_drawings) if total_drawings > 0 else 0.0
 
-        summary_ws.write(row, 0, '入力図面総数', label_fmt)
+        summary_ws.write(row, 0, total_drawings_label, label_fmt)
         summary_ws.write(row, 1, total_drawings, value_fmt)
         row += 1
 
@@ -461,14 +472,15 @@ def create_pair_list(source_files_dict, dest_files_dict, progress_callback=None)
     """auto モード用ペアリング（薄いシム）。
 
     実体は流用判定と RevUp 判定を独立実行する `utils.pairing.build_pairs`。
-    比較元は流用元グループ、比較先は流用先グループに限定される。
+    流用元グループ・流用先グループに限定してペアを生成する。
     """
     return build_pairs(source_files_dict, dest_files_dict, progress_callback=progress_callback)
 
 
 def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None, deleted_color=None, added_color=None,
                     unchanged_color=None, prefixes=None, progress_callback=None,
-                    filter_non_parts=False, validate_ref_designators=False):
+                    filter_non_parts=False, validate_ref_designators=False,
+                    step1_mode=None, total_drawings_count=None):
     """
     ペアリストに基づいて差分DXFファイルを作成し、ZIPアーカイブを生成
 
@@ -480,6 +492,8 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
         deleted_color: 削除エンティティの色（Noneの場合はconfigのデフォルト値を使用）
         added_color: 追加エンティティの色（Noneの場合はconfigのデフォルト値を使用）
         unchanged_color: 変更なしエンティティの色（Noneの場合はconfigのデフォルト値を使用）
+        step1_mode: ペアリング方式（Summaryシートのラベル・分母の算出に使用）
+        total_drawings_count: Summaryシートの図面統計の分母件数（呼び出し側で算出）
 
     Returns:
         tuple: (zip_data, results)
@@ -508,7 +522,7 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
     total_pairs = len(complete_pairs)
 
     # 同じファイルが複数ペアの基準/比較対象として再利用される場合（RevUp/流用
-    # チェーンで同じ親図面が複数の子の比較元になる等）の再解析を避けるキャッシュ。
+    # チェーンで同じ親図面が複数の子の流用元になる等）の再解析を避けるキャッシュ。
     # offset_b は常に None（このバッチ全体で固定値）なのでキーに含めて一致させる。
     pair_cache_keys = (
         [(p['main_file_info']['temp_path'], None) for p in complete_pairs] +
@@ -704,7 +718,9 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
             zip_file.writestr(UNCHANGED_LABELS_FILENAME, unchanged_labels_excel)
 
         if master_df is not None:
-            master_excel_data = save_master_to_bytes(master_df, pairs=pairs)
+            master_excel_data = save_master_to_bytes(
+                master_df, pairs=pairs, mode=step1_mode, total_drawings_count=total_drawings_count
+            )
             output_master_filename = master_filename if master_filename else diff_config.MASTER_FILENAME
             zip_file.writestr(output_master_filename, master_excel_data)
 
@@ -723,10 +739,11 @@ def load_pair_list(uploaded_file):
     """
     ペアリストファイルを読み込む（ExcelまたはCSV）
 
-    必須カラム: 比較元図番, 比較先図番（または Reference, Target）
+    必須カラム: 流用元図番, 流用先図番
+    （旧カラム名 比較元図番/比較先図番、または Reference/Target も後方互換で受け付ける）
 
     Returns:
-        DataFrame or None（カラム名は 比較元図番/比較先図番 に統一）
+        DataFrame or None（カラム名は 流用元図番/流用先図番 に統一）
     """
     try:
         if uploaded_file.name.lower().endswith('.csv'):
@@ -736,20 +753,23 @@ def load_pair_list(uploaded_file):
         else:
             df = pd.read_excel(uploaded_file)
 
-        # カラム名の正規化（英語名→日本語名にマッピング）
+        # カラム名の正規化（旧名・英語名→新しい日本語名にマッピング）
         column_aliases = {
-            'Reference': '比較元図番',
-            'Target': '比較先図番',
+            'Reference': '流用元図番',
+            'Target': '流用先図番',
+            '比較元図番': '流用元図番',
+            '比較先図番': '流用先図番',
         }
         df = df.rename(columns=column_aliases)
 
-        required_columns = ['比較元図番', '比較先図番']
+        required_columns = ['流用元図番', '流用先図番']
         missing = [c for c in required_columns if c not in df.columns]
         if missing:
             st.error(
                 f"必須カラムが見つかりません: {missing}\n"
                 f"実際のカラム: {list(df.columns)}\n"
-                f"「比較元図番」「比較先図番」または「Reference」「Target」のカラム名が必要です。"
+                f"「流用元図番」「流用先図番」（旧名「比較元図番」「比較先図番」、"
+                f"または「Reference」「Target」）のカラム名が必要です。"
             )
             return None
 
@@ -759,7 +779,7 @@ def load_pair_list(uploaded_file):
             df[col] = df[col].astype(str).str.strip()
             df[col] = df[col].where(df[col].str.lower() != 'nan', '')
         # 両方が空白の行のみ除外（片側だけ空白の行は「片側のみペア」として残す）
-        df = df[(df['比較元図番'] != '') | (df['比較先図番'] != '')]
+        df = df[(df['流用元図番'] != '') | (df['流用先図番'] != '')]
         return df.reset_index(drop=True)
 
     except Exception as e:
@@ -814,8 +834,14 @@ def initialize_session_state():
     if 'step0_mode' not in st.session_state:
         st.session_state.step0_mode = 'new'
 
-    if 'new_master_filename_input' not in st.session_state:
-        st.session_state.new_master_filename_input = '図面管理台帳'
+    if 'new_master_shiban_input' not in st.session_state:
+        st.session_state.new_master_shiban_input = ''
+
+    if 'new_master_module_input' not in st.session_state:
+        st.session_state.new_master_module_input = ''
+
+    if 'new_master_side_input' not in st.session_state:
+        st.session_state.new_master_side_input = ''
 
     if 'source_files_dict' not in st.session_state:
         st.session_state.source_files_dict = {}
@@ -934,6 +960,28 @@ def update_master_if_needed(pairs):
     return added_count
 
 
+def compute_total_drawings_count(mode):
+    """Summaryシート「図面統計」の分母件数を、ペアリング方式に応じて算出する。
+
+    - Type A（all_in_one）: アップロードした全DXFファイル件数（アップロード図面総数）
+    - Type B（auto）      : 流用先（新）DXFファイル件数（流用先図面総数）
+    - Type C（pair_list） : ペアリスト中の流用先図番のうち、実際にDXFファイルが
+                            アップロード済みのもののユニーク件数（流用先図面総数）
+    """
+    if mode == 'all_in_one':
+        return len(st.session_state.all_in_one_files_dict)
+    elif mode == 'auto':
+        return len(st.session_state.dest_files_dict)
+    elif mode == 'pair_list':
+        pair_list_df = st.session_state.pair_list_df
+        if pair_list_df is None:
+            return 0
+        targets = {str(v).strip() for v in pair_list_df['流用先図番'] if str(v).strip()}
+        uploaded = set(st.session_state.all_files_dict.keys())
+        return len(targets & uploaded)
+    return 0
+
+
 def render_pair_list():
     """ペアリストを表示
 
@@ -945,29 +993,46 @@ def render_pair_list():
 
     st.subheader("図面ペア・リスト")
 
+    mode = st.session_state.step1_mode  # 'all_in_one'(A) / 'auto'(B) / 'pair_list'(C)
+
     complete_pairs = [p for p in st.session_state.pairs if p['status'] == 'complete']
     missing_pairs = [p for p in st.session_state.pairs if p['status'] == 'missing_source']
     missing_target_pairs = [p for p in st.session_state.pairs if p['status'] == 'missing_target']
     missing_both_pairs = [p for p in st.session_state.pairs if p['status'] == 'missing_both']
     one_sided_pairs = [p for p in st.session_state.pairs if p['status'] == 'one_sided']
     no_source_pairs = [p for p in st.session_state.pairs if p['status'] == 'no_source_defined']
+    identical_pairs = [p for p in st.session_state.pairs if p['status'] == 'identical']
 
-    # 差分抽出可能なペア
+    # 「変更していない図面（流用元と流用先とで共通）」対象の図番集合
+    # Type A（流用元/流用先の区別がない）では表示しない
+    if mode == 'auto':
+        unchanged_drawings = set(st.session_state.source_files_dict.keys()) \
+            & set(st.session_state.dest_files_dict.keys())
+    elif mode == 'pair_list':
+        unchanged_drawings = {p['main_drawing'] for p in identical_pairs}
+    else:
+        unchanged_drawings = set()
+
+    # no_source_pairs のうち、流用元にも流用先にも同一図番で存在するものは
+    # 「完全新規図面」ではなく「変更していない図面」として扱う
+    no_source_pairs = [p for p in no_source_pairs if p['main_drawing'] not in unchanged_drawings]
+
+    # 差分抽出が可能なペア
     if complete_pairs:
-        st.success(f"差分抽出が可能なペア: {len(complete_pairs)}組")
+        st.success(f"差分抽出が可能なペア：{len(complete_pairs)}件")
 
         pair_data = []
         for pair in complete_pairs:
             pair_data.append({
-                '比較先（新）': pair['main_drawing'],
-                '比較元（旧）': pair['source_drawing'],
+                '流用先（新）': pair['main_drawing'],
+                '流用元（旧）': pair['source_drawing'],
                 '関係': pair.get('relation', 'なし'),
             })
 
         st.dataframe(pair_data, width='stretch', hide_index=True)
 
-    # 比較元のDXFファイルが未アップロードのペア
-    # 同じ比較先に RevUp の差分抽出可能ペアがある場合は、その比較元図番を併記する
+    # 流用元のDXFファイルが未アップロードのペア（流用先の図面のみを対象）
+    # 同じ流用先に RevUp の差分抽出可能ペアがある場合は、その流用元図番を併記する
     if missing_pairs:
         revup_source_by_target = {
             p['main_drawing']: p['source_drawing']
@@ -978,30 +1043,30 @@ def render_pair_list():
         for pair in missing_pairs:
             revup_source = revup_source_by_target.get(pair['main_drawing'])
             if revup_source:
-                status = f'⚠️ 比較元のDXFなし・RevUpあり（{revup_source}）'
+                status = f'⚠️ 流用元のDXFなし・RevUpあり（{revup_source}）'
             else:
-                status = '⚠️ 比較元のDXFなし'
+                status = '⚠️ 流用元のDXFなし'
             missing_data.append({
-                '比較先（新）': pair['main_drawing'],
-                '比較元（旧）': pair['source_drawing'],
+                '流用先（新）': pair['main_drawing'],
+                '流用元（旧）': pair['source_drawing'],
                 '関係': pair.get('relation', 'なし'),
                 'ステータス': status
             })
 
-        with st.expander(f"⚠️ 比較元のDXFファイルが未アップロード（{len(missing_pairs)}件）", expanded=False):
+        with st.expander(f"⚠️ 流用元図番の図面がない図面：{len(missing_pairs)}件", expanded=False):
             st.dataframe(missing_data, width='stretch', hide_index=True)
 
-    # 比較先のDXFファイルが未アップロードのペア（ペアリストモード用）
+    # 流用先のDXFファイルが未アップロードのペア（ペアリストモード用）
     if missing_target_pairs:
         missing_target_data = []
         for pair in missing_target_pairs:
             missing_target_data.append({
-                '比較先（新）': pair['main_drawing'],
-                '比較元（旧）': pair['source_drawing'],
-                'ステータス': '⚠️ 比較先のDXFなし'
+                '流用先（新）': pair['main_drawing'],
+                '流用元（旧）': pair['source_drawing'],
+                'ステータス': '⚠️ 流用先のDXFなし'
             })
 
-        with st.expander(f"⚠️ 比較先のDXFファイルが未アップロード（{len(missing_target_pairs)}件）", expanded=True):
+        with st.expander(f"⚠️ 流用先のDXFファイルが未アップロード：{len(missing_target_pairs)}件", expanded=True):
             st.dataframe(missing_target_data, width='stretch', hide_index=True)
 
     # 両方未アップロードのペア（ペアリストモード用）
@@ -1009,39 +1074,51 @@ def render_pair_list():
         missing_both_data = []
         for pair in missing_both_pairs:
             missing_both_data.append({
-                '比較先（新）': pair['main_drawing'],
-                '比較元（旧）': pair['source_drawing'],
-                'ステータス': '⚠️ 比較元・比較先ともにDXFなし'
+                '流用先（新）': pair['main_drawing'],
+                '流用元（旧）': pair['source_drawing'],
+                'ステータス': '⚠️ 流用元・流用先ともにDXFなし'
             })
 
-        with st.expander(f"⚠️ 比較元・比較先ともに未アップロード（{len(missing_both_pairs)}件）", expanded=True):
+        with st.expander(f"⚠️ 流用元・流用先ともに未アップロード：{len(missing_both_pairs)}件", expanded=True):
             st.dataframe(missing_both_data, width='stretch', hide_index=True)
 
-    # 片側のみのペア（ペアリストで比較元または比較先を空白にしたケース）
+    # 片側のみのペア（ペアリストで流用元または流用先を空白にしたケース）
     if one_sided_pairs:
         one_sided_data = []
         for pair in one_sided_pairs:
             one_sided_data.append({
-                '比較先（新）': pair['main_drawing'] or '（なし）',
-                '比較元（旧）': pair['source_drawing'] or '（なし）',
+                '流用先（新）': pair['main_drawing'] or '（なし）',
+                '流用元（旧）': pair['source_drawing'] or '（なし）',
             })
 
-        with st.expander(f"➖ 片側のみのペア（{len(one_sided_pairs)}件）", expanded=True):
-            st.caption("ペアリストで比較元または比較先が空白の行です。相手図番がないため差分抽出は行いません。")
+        with st.expander(f"➖ 片側のみのペア：{len(one_sided_pairs)}件", expanded=True):
+            st.caption("ペアリストで流用元または流用先が空白の行です。相手図番がないため差分抽出は行いません。")
             st.dataframe(one_sided_data, width='stretch', hide_index=True)
 
-    # 流用元図番が指定されていないペア（自動ペアリングモード用）
+    # 完全新規図面（流用元図番なし）
     if no_source_pairs:
         no_source_data = []
         for pair in no_source_pairs:
             no_source_data.append({
                 '図番': pair['main_drawing'],
-                '関係': pair.get('relation') or 'なし',
-                'ステータス': '⚠️ 流用元図番の未記入'
+                '関係': '完全新規図面',
+                'ステータス': '流用元図番なし'
             })
 
-        with st.expander("流用元図番の記載がない図面（比較対象外）", expanded=False):
+        with st.expander(f"完全新規図面（流用元図番なし）：{len(no_source_pairs)}件", expanded=False):
             st.dataframe(no_source_data, width='stretch', hide_index=True)
+
+    # 変更していない図面（流用元と流用先とで共通）。Type A では表示しない
+    if mode in ('auto', 'pair_list'):
+        unchanged_data = sorted(unchanged_drawings)
+        with st.expander(f"変更していない図面（流用元と流用先とで共通）：{len(unchanged_data)}件", expanded=False):
+            if unchanged_data:
+                st.dataframe(
+                    pd.DataFrame({'図番': unchanged_data}),
+                    width='stretch', hide_index=True
+                )
+            else:
+                st.caption("該当する図面はありません。")
 
     # 図面管理台帳更新状況の表示
     if st.session_state.master_df is not None and st.session_state.added_relationships_count > 0:
@@ -1189,10 +1266,11 @@ def render_step0_master():
 
     step0_mode = st.radio(
         "台帳の利用方法",
-        options=['new', 'upload'],
+        options=['upload', 'new', 'none'],
         format_func=lambda x: {
-            'new': '新規作成',
-            'upload': '既存ファイルをアップロードする',
+            'upload': '既存の図面管理台帳のアップロード',
+            'new': '図面管理台帳の新規作成',
+            'none': '図面管理台帳を作成せず',
         }[x],
         key='step0_mode',
         horizontal=True,
@@ -1205,27 +1283,73 @@ def render_step0_master():
         st.session_state.added_relationships_count = 0
 
     if step0_mode == 'new':
-        col1, col2 = st.columns([4, 1])
+        col1, col2 = st.columns([1, 3])
         with col1:
-            filename_base = st.text_input(
-                "台帳ファイル名（.xlsx は自動付与されます）",
-                key='new_master_filename_input',
-            )
-        filename_base = (filename_base or '').strip() or '図面管理台帳'
+            st.write("指番を入力")
         with col2:
-            st.write("")
-            st.caption(f"→ **{filename_base}.xlsx**")
+            shiban = st.text_input(
+                "指番を入力", key='new_master_shiban_input',
+                placeholder="AA11-1111-1", label_visibility='collapsed',
+            )
 
-        master_filename = f"{filename_base}.xlsx"
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            st.write("モジュールを入力")
+        with col2:
+            module = st.text_input(
+                "モジュールを入力", key='new_master_module_input',
+                placeholder="1111（未入力可）", label_visibility='collapsed',
+            )
 
-        if st.session_state.master_df is None:
-            st.session_state.master_df = create_empty_master_df()
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            st.write("サイド")
+        with col2:
+            side = st.text_input(
+                "サイド", key='new_master_side_input',
+                placeholder="XXX（未入力可）", label_visibility='collapsed',
+            )
+
+        shiban = (shiban or '').strip()
+        module = (module or '').strip()
+        side = (side or '').strip()
+
+        errors = []
+        if not shiban:
+            st.info("指番を入力してください（例: AA11-1111-1）。")
+        elif not SHIBAN_PATTERN.match(shiban):
+            errors.append("指番のフォーマットが不正です。例: AA11-1111-1（英大文字2桁-数字4桁-数字1桁）")
+        if module and not MODULE_PATTERN.match(module):
+            errors.append("モジュールのフォーマットが不正です。例: 1111（数字4桁）")
+        if side and not SIDE_PATTERN.match(side):
+            errors.append("サイドのフォーマットが不正です。例: XXX（英大文字または数字3桁）")
+
+        for err in errors:
+            st.error(err)
+
+        if errors or not shiban:
+            st.session_state.master_df = None
+            st.session_state.master_file_name = None
             st.session_state.added_relationships_count = 0
-        st.session_state.master_file_name = master_filename
+        else:
+            module_part = module if module else 'na'
+            side_part = side if side else 'na'
+            master_filename = f"{shiban}_{module_part}_{side_part}.xlsx"
 
-        st.info(f"新規台帳「{master_filename}」を作成します。差分抽出後、台帳が自動更新されてダウンロードZIPに含まれます。")
+            col1, col2 = st.columns([1, 3])
+            with col1:
+                st.write("図面管理台帳")
+            with col2:
+                st.write(f"**{master_filename}**")
 
-    else:
+            if st.session_state.master_df is None:
+                st.session_state.master_df = create_empty_master_df()
+                st.session_state.added_relationships_count = 0
+            st.session_state.master_file_name = master_filename
+
+            st.info(f"新規台帳「{master_filename}」を作成します。差分抽出後、台帳が自動更新されてダウンロードZIPに含まれます。")
+
+    elif step0_mode == 'upload':
         master_file = st.file_uploader(
             "図面管理台帳Excelファイルをアップロードしてください",
             type=ui_config.MASTER_FILE_TYPES,
@@ -1248,6 +1372,12 @@ def render_step0_master():
                 st.session_state.master_df = None
                 st.session_state.master_file_name = None
                 st.session_state.added_relationships_count = 0
+
+    else:  # 'none'
+        st.session_state.master_df = None
+        st.session_state.master_file_name = None
+        st.session_state.added_relationships_count = 0
+        st.info("図面管理台帳は作成・更新しません。差分抽出結果（差分DXF・ラベルリスト）のみをZIPで出力します。")
 
 
 def render_step1_upload():
@@ -1279,7 +1409,7 @@ def _render_step1_auto_mode():
         type=ui_config.DXF_FILE_TYPES,
         accept_multiple_files=True,
         key=f"source_upload_{st.session_state.source_upload_key}",
-        help="比較元となる旧図面をアップロードしてください"
+        help="流用元となる旧図面をアップロードしてください"
     )
 
     render_upload_status('source_upload_summary', 'source_upload_failures', '流用元')
@@ -1352,8 +1482,9 @@ def _render_step1_pair_list_mode():
     # Step 2-1: ペアリストのアップロード
     st.subheader("Step 2-1: ペアリストのアップロード")
     st.caption(
-        "比較元図番（旧）と比較先図番（新）のペアを記載したExcelまたはCSVファイルをアップロードしてください。\n"
-        "必須カラム：**比較元図番** と **比較先図番**（または **Reference** と **Target**）"
+        "流用元図番（旧）と流用先図番（新）のペアを記載したExcelまたはCSVファイルをアップロードしてください。\n"
+        "必須カラム：**流用元図番** と **流用先図番**（旧名 **比較元図番**/**比較先図番**、"
+        "または **Reference** と **Target** も使用可）"
     )
 
     pair_list_file = st.file_uploader(
@@ -1383,8 +1514,8 @@ def _render_step1_pair_list_mode():
             st.dataframe(df, hide_index=True, width='stretch')
 
     # Step 2-2: DXFファイルのアップロード
-    st.subheader("Step 2-2: DXFファイルのアップロード（比較元・比較先まとめて）")
-    st.caption("ファイル名（拡張子なし）が図番として使用されます。比較元と比較先のファイルをまとめてアップロードしてください。")
+    st.subheader("Step 2-2: DXFファイルのアップロード（流用元・流用先まとめて）")
+    st.caption("ファイル名（拡張子なし）が図番として使用されます。流用元と流用先のファイルをまとめてアップロードしてください。")
 
     all_uploaded_files = st.file_uploader(
         "DXFファイル（複数可）",
@@ -1428,9 +1559,9 @@ def _show_missing_drawings(pair_list_df, all_files_dict):
     ref_drawings = set()
     target_drawings = set()
     for _, row in pair_list_df.iterrows():
-        ref = _norm(row['比較元図番'])
-        target = _norm(row['比較先図番'])
-        # 比較元と比較先が同一図番の行は比較対象外のため未アップロード判定から除外
+        ref = _norm(row['流用元図番'])
+        target = _norm(row['流用先図番'])
+        # 流用元と流用先が同一図番の行は比較対象外のため未アップロード判定から除外
         if ref and target and ref == target:
             continue
         if ref:
@@ -1448,16 +1579,16 @@ def _show_missing_drawings(pair_list_df, all_files_dict):
         return
 
     if missing_ref:
-        with st.expander(f"⚠️ 未アップロードの比較元図番（{len(missing_ref)}件）", expanded=True):
+        with st.expander(f"⚠️ 未アップロードの流用元図番：{len(missing_ref)}件", expanded=True):
             st.dataframe(
-                pd.DataFrame({'比較元図番（未アップロード）': missing_ref}),
+                pd.DataFrame({'流用元図番（未アップロード）': missing_ref}),
                 hide_index=True, width='stretch'
             )
 
     if missing_target:
-        with st.expander(f"⚠️ 未アップロードの比較先図番（{len(missing_target)}件）", expanded=True):
+        with st.expander(f"⚠️ 未アップロードの流用先図番：{len(missing_target)}件", expanded=True):
             st.dataframe(
-                pd.DataFrame({'比較先図番（未アップロード）': missing_target}),
+                pd.DataFrame({'流用先図番（未アップロード）': missing_target}),
                 hide_index=True, width='stretch'
             )
 
@@ -1659,7 +1790,7 @@ def render_step3_diff(complete_pairs):
             unchanged_default_index = next(i for i, (val, _) in enumerate(diff_config.COLOR_OPTIONS) if val == diff_config.DEFAULT_UNCHANGED_COLOR)
 
             deleted_color = st.selectbox(
-                "削除図形の色（比較元図面のみ）",
+                "削除図形の色（流用元図面のみ）",
                 options=diff_config.COLOR_OPTIONS,
                 index=deleted_default_index,
                 format_func=lambda x: x[1]
@@ -1694,6 +1825,7 @@ def render_step3_diff(complete_pairs):
                 progress_bar.progress(min(progress, 1.0), text=f"{message}（{current}/{total}組）")
 
             try:
+                step1_mode = st.session_state.step1_mode
                 zip_data, results, diff_labels_excel, unchanged_labels_excel, updated_master = create_diff_zip(
                     st.session_state.pairs,
                     master_df=st.session_state.master_df,
@@ -1706,6 +1838,8 @@ def render_step3_diff(complete_pairs):
                     progress_callback=diff_progress,
                     filter_non_parts=filter_non_parts,
                     validate_ref_designators=validate_ref_designators,
+                    step1_mode=step1_mode,
+                    total_drawings_count=compute_total_drawings_count(step1_mode),
                 )
 
                 # セッション状態に保存
