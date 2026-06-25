@@ -3,9 +3,9 @@
 流用ペア・RevUp ペアの併行検出に関する回帰テスト。
 
 背景:
-    従来 auto モードは RevUp ペアを最優先で消費し、消費された比較先は流用判定の
+    従来 auto モードは RevUp ペアを最優先で消費し、消費された流用先は流用判定の
     対象外だった。方式 A と挙動を揃え、流用判定と RevUp 判定を独立して実行し、
-    両方のペアを出力する（同一比較先が双方に登場し得る）よう変更した。
+    両方のペアを出力する（同一流用先が双方に登場し得る）よう変更した。
 
 実行:
     cd DXF-diff-manager
@@ -65,7 +65,7 @@ def test_revup_detected_independently():
 
 
 def test_same_target_appears_in_both():
-    """RevUp で対応済みの比較先でも別の流用元図番があれば両方に登場する。"""
+    """RevUp で対応済みの流用先でも別の流用元図番があれば両方に登場する。"""
     source = {
         'EE6333-365-61B': _src('EE6333-365-61B'),
         'XX9999-000-01A': _src('XX9999-000-01A'),
@@ -87,12 +87,12 @@ def test_exact_revup_pair_not_duplicated():
 
 
 def test_revup_target_not_flagged_no_source_defined():
-    """RevUp 対応済みで流用元図番が無い比較先を孤立扱いしない。"""
+    """RevUp 対応済みで流用元図番が無い流用先を孤立扱いしない。"""
     source = {'EE6333-365-61B': _src('EE6333-365-61B')}
     dest = {'EE6333-365-61C': _dst('EE6333-365-61C', source=None)}
     pairs = app.create_pair_list(source, dest)
     orphans = {p['main_drawing'] for p in pairs if p['status'] == 'no_source_defined'}
-    assert 'EE6333-365-61C' not in orphans, f"RevUp 比較先 61C が孤立扱い: {pairs}"
+    assert 'EE6333-365-61C' not in orphans, f"RevUp 流用先 61C が孤立扱い: {pairs}"
     assert _keys(pairs, relation='RevUp') == {('EE6333-365-61C', 'EE6333-365-61B')}
 
 

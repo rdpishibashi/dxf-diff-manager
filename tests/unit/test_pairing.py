@@ -20,6 +20,12 @@ from utils.pairing import (
     build_pairs_from_list,
     find_revup_pairs,
     extract_base_drawing_number,
+    primary_status_by_drawing,
+    drawings_with_status,
+    compute_unchanged_drawings,
+    get_brand_new_drawing_pairs,
+    compute_total_drawings_count,
+    normalize_pair_list_columns,
     RELATION_REVUP,
     RELATION_DEPENDENCY,
     RELATION_PAIR_LIST,
@@ -155,26 +161,145 @@ def test_build_pairs_progress_callback_invoked():
 def test_build_pairs_from_list_statuses():
     files = {'A': _f('A'), 'C': _f('C')}
     df = pd.DataFrame({
-        '比較元図番': ['A', 'A', 'X', 'A', '',  'A'],
-        '比較先図番': ['C', 'A', 'C', 'Z', 'C', ''],
+        '流用元図番': ['A', 'A', 'X', 'A', '',  'A'],
+        '流用先図番': ['C', 'A', 'C', 'Z', 'C', ''],
     })
     pairs = build_pairs_from_list(df, files)
     statuses = [p['status'] for p in pairs]
     assert statuses == [
-        STATUS_COMPLETE,        # A->C 両方有
-        STATUS_IDENTICAL,       # A->A 同一
-        STATUS_MISSING_SOURCE,  # X(無)->C(有)
-        STATUS_MISSING_TARGET,  # A(有)->Z(無)
-        STATUS_ONE_SIDED,       # 空白->C
-        STATUS_ONE_SIDED,       # A->空白
+        STATUS_COMPLETE,          # A->C 両方有
+        STATUS_IDENTICAL,         # A->A 同一
+        STATUS_MISSING_SOURCE,    # X(無)->C(有)
+        STATUS_MISSING_TARGET,    # A(有)->Z(無)
+        STATUS_NO_SOURCE_DEFINED, # 空白->C（流用先はあるが流用元の記載なし＝完全新規図面）
+        STATUS_ONE_SIDED,         # A->空白（流用先が空白で比較対象がない）
     ]
     assert all(p['relation'] == RELATION_PAIR_LIST for p in pairs)
 
 
 def test_build_pairs_from_list_missing_both():
-    df = pd.DataFrame({'比較元図番': ['X'], '比較先図番': ['Y']})
+    df = pd.DataFrame({'流用元図番': ['X'], '流用先図番': ['Y']})
     pairs = build_pairs_from_list(df, {})
     assert pairs[0]['status'] == STATUS_MISSING_BOTH
+
+
+# --- primary_status_by_drawing / drawings_with_status (UI 表示の二重計上防止) ---
+#
+# 2026-06: 同じ流用先図番（main_drawing）が複数ステータスのペアに登場するケースで、
+# Step3 の各セクション集計（差分抽出が可能なペア / 流用元図番の図面がない図面 /
+# 変更していない図面 等）の合計が流用先総数と一致しなくなる実バグが見つかった。
+# 実データ（sample-dxf）でも RevUp パスと流用パスの両方が同一の流用先図番に対し
+# 異なるステータスのペアを生成するケースが確認されている。
+
+def test_primary_status_prefers_complete_over_missing_source_revup_case():
+    """方式A/B: 同一の流用先が RevUp(complete) と 流用(missing_source) の両方に登場するケース。"""
+    source = {'X002A': _f('X002A')}
+    target = {'X002B': _f('X002B', source='Y999')}  # Y999 は未アップロード
+    pairs = build_pairs(source, target)
+    primary = primary_status_by_drawing(pairs)
+    assert primary == {'X002B': STATUS_COMPLETE}
+
+
+def test_primary_status_prefers_complete_over_missing_source_duplicate_target_row():
+    """方式C: ペアリストに同一の流用先図番が複数行（流用元が異なる）あるケース。"""
+    df = pd.DataFrame({'流用元図番': ['A1', 'A2'], '流用先図番': ['B1', 'B1']})
+    files = {'A1': {'x': 1}, 'B1': {'x': 1}}  # A2 は未アップロード
+    pairs = build_pairs_from_list(df, files)
+    primary = primary_status_by_drawing(pairs)
+    assert primary == {'B1': STATUS_COMPLETE}
+
+
+def test_primary_status_prefers_complete_over_identical_duplicate_target_row():
+    """方式C: 同一の流用先図番が identical 行と complete 行の両方に登場するケース。"""
+    df = pd.DataFrame({'流用元図番': ['B1', 'A9'], '流用先図番': ['B1', 'B1']})
+    files = {'B1': {'x': 1}, 'A9': {'x': 1}}
+    pairs = build_pairs_from_list(df, files)
+    primary = primary_status_by_drawing(pairs)
+    assert primary == {'B1': STATUS_COMPLETE}
+
+
+def test_drawings_with_status_excludes_blank_main_drawing():
+    df = pd.DataFrame({'流用元図番': ['A1'], '流用先図番': ['']})
+    pairs = build_pairs_from_list(df, {'A1': {'x': 1}})
+    assert pairs[0]['status'] == STATUS_ONE_SIDED
+    assert drawings_with_status(pairs, STATUS_ONE_SIDED) == set()
+
+
+# --- compute_unchanged_drawings / get_brand_new_drawing_pairs (mode='auto') ---
+#
+# 2026-06: app.py から utils.pairing へ移動（session_state 直読みから引数渡しへ
+# 引数化）。'pair_list' モードの挙動は tests/regression/test_brand_new_drawing.py
+# で既にカバーされているため、ここでは 'auto' モード（source/dest_drawing_numbers
+# 引数を使う分岐）を確認する。
+
+def test_compute_unchanged_drawings_auto_mode_requires_common_pool_membership():
+    """方式B: no_source_defined でも、流用元・流用先の両プールに同名ファイルが
+    存在しなければ「変更していない図面」には含めない。"""
+    source = {'A1A': _f('A1A')}
+    target = {'A1A': _f('A1A')}  # 同じプールに同名図番が存在
+    pairs = build_pairs(source, target)
+    result = compute_unchanged_drawings(
+        pairs, 'auto',
+        source_drawing_numbers=set(source.keys()),
+        dest_drawing_numbers=set(target.keys()),
+    )
+    assert result == {'A1A'}
+
+
+def test_compute_unchanged_drawings_auto_mode_empty_pools_returns_empty():
+    pairs = build_pairs({'A1A': _f('A1A')}, {'A1A': _f('A1A')})
+    result = compute_unchanged_drawings(pairs, 'auto')  # 引数省略時は空集合扱い
+    assert result == set()
+
+
+def test_compute_unchanged_drawings_all_in_one_mode_returns_empty():
+    pairs = build_pairs({'A1A': _f('A1A')}, {'A1A': _f('A1A')})
+    assert compute_unchanged_drawings(pairs, 'all_in_one') == set()
+
+
+# --- compute_total_drawings_count ---
+
+def test_compute_total_drawings_count_all_in_one():
+    assert compute_total_drawings_count('all_in_one', all_in_one_count=5, dest_count=99) == 5
+
+
+def test_compute_total_drawings_count_auto():
+    assert compute_total_drawings_count('auto', all_in_one_count=99, dest_count=7) == 7
+
+
+def test_compute_total_drawings_count_pair_list():
+    df = pd.DataFrame({'流用先図番': ['A', 'B', 'C', '']})
+    assert compute_total_drawings_count(
+        'pair_list', pair_list_df=df, uploaded_drawing_numbers={'A', 'B'}
+    ) == 2
+
+
+def test_compute_total_drawings_count_pair_list_no_df():
+    assert compute_total_drawings_count('pair_list', pair_list_df=None) == 0
+
+
+# --- normalize_pair_list_columns ---
+
+def test_normalize_pair_list_columns_renames_legacy_names():
+    df = pd.DataFrame({'比較元図番': ['A'], '比較先図番': ['B']})
+    result, error = normalize_pair_list_columns(df)
+    assert error is None
+    assert list(result.columns) == ['流用元図番', '流用先図番']
+    assert result.iloc[0]['流用元図番'] == 'A'
+
+
+def test_normalize_pair_list_columns_missing_required_column():
+    df = pd.DataFrame({'流用元図番': ['A']})
+    result, error = normalize_pair_list_columns(df)
+    assert result is None
+    assert '流用先図番' in error
+
+
+def test_normalize_pair_list_columns_drops_fully_blank_rows():
+    df = pd.DataFrame({'流用元図番': ['A', ''], '流用先図番': ['B', '']})
+    result, error = normalize_pair_list_columns(df)
+    assert error is None
+    assert len(result) == 1
 
 
 def _run_all():
