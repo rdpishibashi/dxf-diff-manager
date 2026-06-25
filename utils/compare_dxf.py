@@ -572,9 +572,38 @@ class SignatureGenerator:
                     signature_parts.append(f"{entity_type.lower()}_vertices_{normalized_vertices}")
 
 
+def extract_linetype_patterns(doc) -> Dict[str, Tuple[List[float], str]]:
+    """ドキュメントのLTYPEテーブルから簡易線種パターンを抽出する。
+
+    出力DXF（ezdxf.new('R2018', setup=True)）のLTYPEテーブルには ByLayer/ByBlock/
+    Continuous と一般的な線種（DASHED/CENTER/PHANTOM等）しか含まれず、HIDDEN等
+    CADベンダー固有の線種は含まれない。差分抽出時にそのままコピーした
+    'linetype'属性がテーブルに存在しないと、出力ファイルがAutoCAD/DWG TrueView
+    で「無効なファイル」として開けなくなる（ezdxfの読み込みは寛容で検出しない）。
+    元ファイルの定義をその場で保持しておき、出力時に同名・同パターンで
+    テーブルへ追加できるようにする（未使用の線種は追加しないためファイルサイズへの
+    影響は最小限）。
+    """
+    patterns: Dict[str, Tuple[List[float], str]] = {}
+    for lt in doc.linetypes:
+        name = lt.dxf.name
+        if name in ('ByLayer', 'ByBlock', 'Continuous'):
+            continue
+        try:
+            tags = lt.pattern_tags.tags
+            total = next((t.value for t in tags if t.code == 40), 0.0)
+            elements = [t.value for t in tags if t.code == 49]
+            if elements:
+                patterns[name] = ([float(total)] + [float(v) for v in elements],
+                                   lt.dxf.get('description', ''))
+        except Exception:
+            continue
+    return patterns
+
+
 class DiffAnalyzer:
     """差分検出専用クラス"""
-    
+
     def __init__(self, signature_generator: SignatureGenerator, debug: bool = False):
         self.signature_generator = signature_generator
         self.debug = debug
@@ -671,12 +700,13 @@ class DiffAnalyzer:
         except Exception:
             pass
     
-    def extract_entities_from_doc(self, doc, doc_label: str, expander: EntityExpander) -> Tuple[Dict[str, List], Dict[str, Dict], Dict[str, Set[str]]]:
+    def extract_entities_from_doc(self, doc, doc_label: str, expander: EntityExpander) -> Tuple[Dict[str, List], Dict[str, Dict], Dict[str, Set[str]], Dict[str, Tuple[List[float], str]]]:
         """ドキュメントからエンティティを抽出"""
         entities_by_hash = defaultdict(list)
         hash_to_entity_data = {}
         hash_to_locations = defaultdict(set)
-        
+        linetype_patterns = extract_linetype_patterns(doc)
+
         absolute_entities = expander.expand_insert_entities(doc, doc_label)
         
         for absolute_entity in absolute_entities:
@@ -703,8 +733,8 @@ class DiffAnalyzer:
                         
             except Exception as e:
                 logger.warning(f"Error processing entity: {e}")
-        
-        return entities_by_hash, hash_to_entity_data, hash_to_locations
+
+        return entities_by_hash, hash_to_entity_data, hash_to_locations, linetype_patterns
 
 
 class LayerConfig:
@@ -747,23 +777,47 @@ class OutputGenerator:
         self.debug = debug
         self.excluded_attributes = {
             'handle', 'owner', 'reactors', 'dictionary', 'extension_dict',
-            'objectid', 'uuid', 'app_data', 'doc', 'entitydb', 'is_alive', 
+            'objectid', 'uuid', 'app_data', 'doc', 'entitydb', 'is_alive',
             'is_virtual', 'is_copy', 'soft_pointer_ids', 'hard_pointer_ids'
         }
-    
-    def create_entity_from_absolute(self, absolute_entity: Dict, target_space, layer_name: str, layer_color: int) -> bool:
+        # 出力ドキュメントのLTYPEテーブルに追加済みの線種名（再追加を避けるためのキャッシュ）
+        self._registered_linetypes: Set[str] = set()
+
+    def _ensure_linetype_defined(self, target_space, linetype_name: Optional[str],
+                                  source_patterns: Optional[Dict[str, Tuple[List[float], str]]]):
+        """エンティティが参照する線種が出力ドキュメントのLTYPEテーブルに無い場合、
+        元ファイルから取得したパターンで1回だけ追加する（ダングリング参照によるAutoCAD/
+        DWG TrueViewでの読み込みエラーを防止。未使用の線種は追加しないためファイル
+        サイズへの影響は使用された線種分のみ）。"""
+        if not linetype_name or linetype_name in self._registered_linetypes:
+            return
+        self._registered_linetypes.add(linetype_name)
+        try:
+            doc = target_space.doc
+            if linetype_name in doc.linetypes:
+                return
+            info = (source_patterns or {}).get(linetype_name)
+            if info:
+                pattern, description = info
+                doc.linetypes.add(linetype_name, pattern=pattern, description=description)
+        except Exception as e:
+            logger.warning(f"Failed to register linetype '{linetype_name}': {e}")
+
+    def create_entity_from_absolute(self, absolute_entity: Dict, target_space, layer_name: str, layer_color: int,
+                                     source_linetypes: Optional[Dict[str, Tuple[List[float], str]]] = None) -> bool:
         """絶対座標エンティティから実際のDXFエンティティを作成（レイヤー指定）"""
         try:
             entity_type = absolute_entity['dxftype']
             attrs = absolute_entity['attributes']
-            
-            dxfattribs = {k: v for k, v in attrs.items() 
+
+            dxfattribs = {k: v for k, v in attrs.items()
                          if k not in self.excluded_attributes and v is not None}
-            
+
             # レイヤーと色を設定
             dxfattribs['layer'] = layer_name
             dxfattribs['color'] = layer_color
-            
+            self._ensure_linetype_defined(target_space, dxfattribs.get('linetype'), source_linetypes)
+
             if entity_type == 'LINE':
                 start = attrs.get('start', (0, 0, 0))
                 end = attrs.get('end', (1, 1, 0))
@@ -938,9 +992,11 @@ class OutputGenerator:
             logger.warning(f"Error ensuring Japanese text compatibility: {e}")
             # エラーの場合は元のファイルをそのまま使用
     
-    def create_diff_dxf(self, entities_a: Dict, entities_b: Dict, 
-                        deleted_hashes: Set[str], added_hashes: Set[str], 
-                        common_hashes: Set[str], output_file: str):
+    def create_diff_dxf(self, entities_a: Dict, entities_b: Dict,
+                        deleted_hashes: Set[str], added_hashes: Set[str],
+                        common_hashes: Set[str], output_file: str,
+                        linetype_patterns_a: Optional[Dict[str, Tuple[List[float], str]]] = None,
+                        linetype_patterns_b: Optional[Dict[str, Tuple[List[float], str]]] = None):
         """差分DXFファイルを作成"""
         try:
             # R2018以降でより良いUnicode対応
@@ -963,29 +1019,32 @@ class OutputGenerator:
                 if entity_hash in entities_a:
                     for location, virtual_entity in entities_a[entity_hash]:
                         absolute_entity = virtual_entity['absolute_entity']
-                        self.create_entity_from_absolute(absolute_entity, msp, layer_name, layer_color)
+                        self.create_entity_from_absolute(absolute_entity, msp, layer_name, layer_color,
+                                                          source_linetypes=linetype_patterns_a)
                         break  # 最初のインスタンスのみ
-            
+
             # ADDED エンティティを追加
             layer_name = self.layer_config.get_layer_name('ADDED')
             layer_color = self.layer_config.get_layer_color('ADDED')
-            
+
             for entity_hash in added_hashes:
                 if entity_hash in entities_b:
                     for location, virtual_entity in entities_b[entity_hash]:
                         absolute_entity = virtual_entity['absolute_entity']
-                        self.create_entity_from_absolute(absolute_entity, msp, layer_name, layer_color)
+                        self.create_entity_from_absolute(absolute_entity, msp, layer_name, layer_color,
+                                                          source_linetypes=linetype_patterns_b)
                         break  # 最初のインスタンスのみ
-            
+
             # UNCHANGED エンティティを追加
             layer_name = self.layer_config.get_layer_name('UNCHANGED')
             layer_color = self.layer_config.get_layer_color('UNCHANGED')
-            
+
             for entity_hash in common_hashes:
                 if entity_hash in entities_a:
                     for location, virtual_entity in entities_a[entity_hash]:
                         absolute_entity = virtual_entity['absolute_entity']
-                        self.create_entity_from_absolute(absolute_entity, msp, layer_name, layer_color)
+                        self.create_entity_from_absolute(absolute_entity, msp, layer_name, layer_color,
+                                                          source_linetypes=linetype_patterns_a)
                         break  # 最初のインスタンスのみ
             
             # DXFファイルを保存（UTF-8エンコーディングで日本語テキストを保持）
@@ -1084,13 +1143,13 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
         # pair_cache がある場合、バッチ内で同じファイルが他のペアにも登場するなら
         # 読み込み・展開済みの結果を再利用する（再利用がないファイルはキャッシュしない）
         if pair_cache is not None:
-            entities_a, data_a, locations_a = pair_cache.get_or_compute(
+            entities_a, data_a, locations_a, linetypes_a = pair_cache.get_or_compute(
                 (file_a, None), lambda: _load_entities(file_a, "A", expander_a))
-            entities_b, data_b, locations_b = pair_cache.get_or_compute(
+            entities_b, data_b, locations_b, linetypes_b = pair_cache.get_or_compute(
                 (file_b, offset_b), lambda: _load_entities(file_b, "B", expander_b))
         else:
-            entities_a, data_a, locations_a = _load_entities(file_a, "A", expander_a)
-            entities_b, data_b, locations_b = _load_entities(file_b, "B", expander_b)
+            entities_a, data_a, locations_a, linetypes_a = _load_entities(file_a, "A", expander_a)
+            entities_b, data_b, locations_b, linetypes_b = _load_entities(file_b, "B", expander_b)
 
         # 差分計算
         hashes_a = set(entities_a.keys())
@@ -1117,7 +1176,8 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
 
         # 差分DXFファイル生成
         success = output_generator.create_diff_dxf(
-            entities_a, entities_b, deleted_hashes, added_hashes, common_hashes, output_file)
+            entities_a, entities_b, deleted_hashes, added_hashes, common_hashes, output_file,
+            linetype_patterns_a=linetypes_a, linetype_patterns_b=linetypes_b)
 
         # メモリ解放: ローカル変数を削除
         # entities_a/entities_b 等が pair_cache 内でまだ別ペアから参照される場合、
@@ -1142,3 +1202,38 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
         # エラー時もメモリ解放
         gc.collect()
         return False, None
+
+
+def count_entities_in_dxf_file(file_path: str, tolerance: float = 0.01) -> Optional[int]:
+    """
+    単一のDXFファイルのエンティティ数を数える（比較対象なし）。
+
+    流用元の参照を持たない完全新規図面を図面管理台帳に登録する際、その図面単独の
+    総エンティティ数を求めるために使う。compare_dxf_files_and_generate_dxf() と
+    同じ抽出経路（EntityExpander → SignatureGenerator → DiffAnalyzer）を使い、
+    シグネチャ単位の重複排除も同様に適用する（複数ファイル比較時の total_entities
+    の定義と揃える）。
+
+    Returns:
+        Optional[int]: エンティティ数。読み込み失敗時は None。
+    """
+    try:
+        tolerance_config = ToleranceConfig(tolerance)
+        transformer = CoordinateTransformer(tolerance_config, debug=False)
+        expander = EntityExpander(transformer, debug=False, global_offset=None)
+        signature_generator = SignatureGenerator(transformer, debug=False)
+        diff_analyzer = DiffAnalyzer(signature_generator, debug=False)
+
+        doc = ezdxf.readfile(file_path)
+        entities, _, _, _ = diff_analyzer.extract_entities_from_doc(doc, "A", expander)
+        del doc
+
+        count = len(entities)
+        del entities
+        gc.collect()
+        return count
+
+    except Exception as e:
+        logger.error(f"DXF entity count error: {e}")
+        gc.collect()
+        return None
