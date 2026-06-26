@@ -182,16 +182,18 @@ cython_debug/
 
 # MacOS
 .DS_Store
+**/.DS_Store
 
 # Others
 log*.txt
 .webloc
-tests/sample_data
+*.xlsx
 *.dxf
-# Symlink to the cross-project shared sample DXF pool (Tools/sample-dxf/) —
-# local-machine convenience, not portable across clones.
-/sample-dxf
 *.svg
 *.pdf
 *.png
 *.gif
+# Symlink to the cross-project shared sample DXF pool (Tools/sample-dxf/) —
+# local-machine convenience, not portable across clones.
+/sample-dxf
+
