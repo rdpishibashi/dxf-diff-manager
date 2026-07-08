@@ -84,7 +84,7 @@ DXF-diff-manager/
 
 | 層 | 場所 | 役割 |
 |---|---|---|
-| View / Driver | `app.py` | Streamlit UI（`render_*`）、`session_state` 管理、アップロードファイルの I/O アダプタ（`extract_drawing_info_from_file` 等） |
+| View / Driver | `app.py` | Streamlit UI（`render_*`）、`session_state` 管理、アップロードファイルの I/O アダプタ（`extract_source_number_from_dest_file` / `_extract_by_filename` 等） |
 | Model | `utils/pairing.py` | ペア生成・Step3表示分類ロジック（`build_pairs*`、`compute_unchanged_drawings`、`get_brand_new_drawing_pairs` 等） |
 | Model | `utils/master_ledger.py` | 図面管理台帳の読み込み・更新・Excel出力（`load_parent_child_master`、`update_parent_child_master`、`create_empty_master_df`、`save_master_to_bytes`） |
 | Model | `utils/diff_export.py` | `create_diff_zip()`（差分DXF・ラベル差分Excel・台帳更新を1つのZIPにまとめる） |
@@ -641,35 +641,6 @@ auto モードの流用先アップロードおよび all_in_one モードで使
 
 ---
 
-#### `extract_drawing_info_from_file(uploaded_file)`
-
-```python
-def extract_drawing_info_from_file(uploaded_file):
-    """
-    アップロードされた DXF ファイルから図番情報を抽出し、
-    セッションキャッシュを活用して同一ファイルの再処理を防ぐ。
-    """
-    file_hash = hashlib.sha256(uploaded_file.getbuffer()).hexdigest()
-    temp_path = save_uploadedfile(uploaded_file)
-
-    cache = st.session_state.get('drawing_info_cache', {})
-    cached_info = cache.get(file_hash)
-    if not cached_info:
-        _, info = extract_labels(
-            temp_path,
-            extract_drawing_numbers_option=True,
-            extract_title_option=True,
-            original_filename=uploaded_file.name
-        )
-        ...
-```
-
-DXFから図番・流用元図番・タイトル・サブタイトルを完全抽出する。`process_all_uploaded_files` のデフォルト `extractor`。現在は直接呼ばれる箇所はなく、`extractor` パラメータが省略された場合のデフォルトとしてのみ使用される。
-
-**キャッシュ戦略**: ファイルの SHA-256 ハッシュをキーとして、同一内容のファイルが再アップロードされた場合に `extract_labels()` の再呼び出しをスキップする。一時ファイルパスはキャッシュに含めない（パスはセッション固有のため）。
-
----
-
 #### `load_pair_list(uploaded_file)`（2026-06: 正規化部分を `utils.pairing.normalize_pair_list_columns()` へ分離）
 
 ```python
@@ -723,15 +694,14 @@ def process_all_uploaded_files(groups):
             - upload_key_name: st.session_state の upload_key キー名
             - failures_key: st.session_state の failures リスト キー名
             - summary_key: st.session_state の summary dict キー名
-            - extractor: (省略可) ファイル情報抽出関数
-                         省略時デフォルト: extract_drawing_info_from_file
+            - extractor: ファイル情報抽出関数（各呼び出し元が必ず明示指定する）
 
     Returns:
         bool: いずれかのファイルが処理されたかどうか
     """
 ```
 
-**extractor の使い分け**:
+**extractor の使い分け**（全呼び出し元が明示指定する。デフォルトは無い）:
 
 | 呼び出し箇所 | 渡す extractor | 処理内容 |
 |---|---|---|
@@ -739,7 +709,6 @@ def process_all_uploaded_files(groups):
 | auto 流用先 | `extract_source_number_from_dest_file` | ファイル名 + DXFから流用元図番のみ抽出 |
 | pair_list 全DXF | `_extract_by_filename` | ファイル名のみ、DXF解析なし |
 | all_in_one 全DXF | `extract_source_number_from_dest_file` | ファイル名 + DXFから流用元図番のみ抽出 |
-| （デフォルト） | `extract_drawing_info_from_file` | 完全抽出（図番・タイトル等） |
 
 全グループの合計ファイル数を先に集計し、単一の `st.progress` バーで進捗を表示する。ファイルごとに `extractor(uploaded_file)` を呼び、成功したら `files_dict[main_drawing_number] = file_info` に格納する。
 
@@ -2038,7 +2007,10 @@ BASE_DIR = Path("/Users/ryozo/Dropbox/Client/ULVAC/ElectricDesignManagement/Tool
 `make_dataframe_arrow_compatible()`（混在 object カラムのみ文字列統一した表示用コピーを
 返す純粋関数）を追加し、`app.py` の `render_preview_dataframe()` が `st.dataframe` 前に
 これを適用するようにした。表示のみの問題で差分抽出・Excel出力は元々正常。回帰テストを
-`tests/unit/test_master_ledger.py` に追加（10件 全パス））*
+`tests/unit/test_master_ledger.py` に追加（10件 全パス）。あわせて `app.py` の未使用関数
+`extract_drawing_info_from_file()` を削除（全呼び出し元の group dict が `extractor` を
+明示指定しており、`process_all_uploaded_files()` のデフォルト参照としてのみ残っていた
+デッドコード。`process_all_uploaded_files()` の `extractor` は必須引数化））*
 
 *過去の更新: 2026-06-24（保守性向上のためのリファクタリング。`app.py`（2275行）に蓄積していた
 streamlit非依存のロジックをモデル層へ分離（動作変更なし）。新設 `utils/master_ledger.py`
