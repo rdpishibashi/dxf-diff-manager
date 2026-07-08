@@ -322,6 +322,15 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                 for sym, v in sorted(invalid_dict.items())
             ]
 
+        # Summary シートの「図番」欄・ペアシートの並び順を図番のABC順にする。
+        # summary_data と diff_label_sheets は上のループで1ペアにつき1件ずつ同じ順序で
+        # 追加されているため（同一図番が複数ペアに登場する場合は元の順序を保つ = 安定ソート）、
+        # インデックスベースで両方を同じ並びに揃える。
+        if summary_data:
+            sort_order = sorted(range(len(summary_data)), key=lambda i: summary_data[i].get('図番') or '')
+            summary_data = [summary_data[i] for i in sort_order]
+            diff_label_sheets = [diff_label_sheets[i] for i in sort_order]
+
         diff_labels_excel = build_diff_labels_workbook(
             diff_label_sheets,
             summary_data=summary_data if summary_data else None,
