@@ -130,6 +130,7 @@ DXF-diff-manager/
 | `update_parent_child_master(master_df, new_pairs)` | 台帳に新規/既存ペアを追記・更新（Parent="none"・"n/a"文字列等、後述のロジックを含む） |
 | `create_empty_master_df()` | 空の台帳DataFrameを作成 |
 | `save_master_to_bytes(master_df, pairs=None, mode=None, total_drawings_count=None)` | 台帳をExcelバイトデータ（Summary + Diff List）に変換 |
+| `make_dataframe_arrow_compatible(df)` | 数値と文字列（`"n/a"`）が混在した object 型カラムを持つDataFrameを、pyarrowシリアライズ可能にした**表示用コピー**として返す（元のdfは不変）。`st.dataframe` プレビュー前処理用（後述） |
 
 ### モデル層 `utils/diff_export.py`（2026-06 新設）
 
@@ -585,6 +586,8 @@ def update_parent_child_master(master_df, new_pairs):
 2. `create_diff_zip()` 内（差分抽出時）: 同じ対象について `count_entities_in_dxf_file(main_file_info['temp_path'])` でエンティティ数を算出し追記。`pair['title']` が未設定（方式Cで `main_file_info` に title が入っていない場合）であれば `extract_labels(..., extract_title_option=True)` を個別に呼んでTitle/Subtitleも補完する（2026-06 追加。方式A/Bは元々取得済みのためスキップされる）。`get_brand_new_drawing_pairs()` の時点でファイル未アップロードの図番は既に除外されているため、ここでの `main_file_info` チェックは安全策
 
 **Summaryシートの合計が `"n/a"` 混在列でも壊れない理由**: `save_master_to_bytes()` のエンティティ統計集計は `pd.to_numeric(master_df[col], errors='coerce')` で非数値（`"n/a"`）を `NaN` に変換した上で `sum(skipna=True)` するため、完全新規図面の行が混在しても他行の数値だけが正しく合計される。
+
+**台帳プレビュー（`st.dataframe`）で `"n/a"` 混在列が pyarrow 警告を出さない理由**（2026-07 追加）: エンティティ数カラムは object dtype で整数（通常ペアの行）と `"n/a"` 文字列（完全新規図面の行）が混在する。これをそのまま `st.dataframe` に渡すと、Streamlit 内部の `pa.Table.from_pandas(df)` が先頭値（int）から列型を推測し、後続の `"n/a"` で `ArrowInvalid`（`Could not convert 'n/a' with type str: tried to convert to int64`）を送出する。Streamlit が自動フォールバックするため表示・出力は正常だが、トレースバックがログに出力されてしまう。`render_preview_dataframe()`（View層）は `st.dataframe` に渡す前に `make_dataframe_arrow_compatible()`（Model層）で**混在カラムのみ非NULL値を文字列統一した表示用コピー**を作ることでこれを解消する。数値のみ・文字列のみ・日時などの純粋なカラムは変換せず、元の DataFrame（Excel出力・集計に使う実体）も変更しない。回帰テスト: `tests/unit/test_master_ledger.py` の `test_make_dataframe_arrow_compatible_*`。
 
 ---
 
@@ -2029,7 +2032,15 @@ BASE_DIR = Path("/Users/ryozo/Dropbox/Client/ULVAC/ElectricDesignManagement/Tool
 
 ---
 
-*最終更新: 2026-06-24（保守性向上のためのリファクタリング。`app.py`（2275行）に蓄積していた
+*最終更新: 2026-07-08（図面管理台帳プレビュー（`st.dataframe`）で、エンティティ数カラムの
+`"n/a"`（完全新規図面の行）と整数（通常ペアの行）の混在により pyarrow の
+`ArrowInvalid` トレースバックがログ出力される問題を修正。`utils/master_ledger.py` に
+`make_dataframe_arrow_compatible()`（混在 object カラムのみ文字列統一した表示用コピーを
+返す純粋関数）を追加し、`app.py` の `render_preview_dataframe()` が `st.dataframe` 前に
+これを適用するようにした。表示のみの問題で差分抽出・Excel出力は元々正常。回帰テストを
+`tests/unit/test_master_ledger.py` に追加（10件 全パス））*
+
+*過去の更新: 2026-06-24（保守性向上のためのリファクタリング。`app.py`（2275行）に蓄積していた
 streamlit非依存のロジックをモデル層へ分離（動作変更なし）。新設 `utils/master_ledger.py`
 （`load_parent_child_master`/`update_parent_child_master`/`create_empty_master_df`/
 `save_master_to_bytes`）、新設 `utils/diff_export.py`（`create_diff_zip()`。内部の

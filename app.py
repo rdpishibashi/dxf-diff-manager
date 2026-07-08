@@ -25,6 +25,7 @@ from utils.master_ledger import (
     update_parent_child_master,
     create_empty_master_df,
     save_master_to_bytes,
+    make_dataframe_arrow_compatible,
 )
 from utils.diff_export import create_diff_zip, DIFF_LABELS_FILENAME, UNCHANGED_LABELS_FILENAME
 
@@ -630,14 +631,15 @@ def render_pair_list():
 
 def render_preview_dataframe(df, key_prefix):
     """プレビュー用データフレームの列幅を調整して表示"""
+    display_df = make_dataframe_arrow_compatible(df)
     column_config = {
         col: st.column_config.Column(col, width="small")
         if col in ("Coordinate X", "Coordinate Y", "Count")
         else st.column_config.Column(col)
-        for col in df.columns
+        for col in display_df.columns
     }
     st.dataframe(
-        df,
+        display_df,
         width='stretch',
         hide_index=True,
         column_config=column_config,
