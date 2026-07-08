@@ -121,6 +121,9 @@ def test_create_diff_zip_passes_old_new_in_correct_order_to_compare_dxf():
 def test_diff_labels_summary_and_sheets_sorted_alphabetically_by_drawing_number():
     """diff_labels.xlsx の Summary シート「図番」欄と個別シートの並びが図番の
     ABC順になることを確認する（処理順（ペアリスト順）のままだと順不同になるため）。
+    あわせて unchanged_labels.xlsx のシート順も同じABC順に揃っていることを確認する
+    （同一バッチから出力される2ファイルのシート順が食い違うと突き合わせにくいため、
+    2026-07 に diff_labels 側のソートと合わせて対応）。
     """
     with tempfile.TemporaryDirectory() as d:
         # わざと図番の並び順とは異なる処理順で pairs を渡す
@@ -157,6 +160,64 @@ def test_diff_labels_summary_and_sheets_sorted_alphabetically_by_drawing_number(
             assert cell.hyperlink is not None
             assert cell.hyperlink.location == f"'{expected}'!A1", \
                 f"{expected}行のハイパーリンクが対応するシートを指していない: {cell.hyperlink.location}"
+
+        # unchanged_labels.xlsx のシート順も diff_labels.xlsx と同じABC順であること
+        unchanged_xl = pd.ExcelFile(io.BytesIO(unchanged_labels_excel))
+        assert unchanged_xl.sheet_names == ['A-DRAW', 'B-DRAW', 'C-DRAW'], \
+            f"unchanged_labels.xlsxのシート順がdiff_labels.xlsxと食い違っている: {unchanged_xl.sheet_names}"
+
+
+def test_ignore_moved_labels_combined_with_prefix_filter_and_ref_designator_check():
+    """ignore_moved_labels（移動しただけのラベルを差分から除外）が、既存の
+    「未変更ラベル先頭文字列フィルタ」（prefixes）・「機器符号妥当性チェック」
+    （validate_ref_designators/filter_non_parts）と組み合わさっても正しく動作する。
+
+    dev-workflow スキルの選択肢組み合わせ表で「影響あり→要テスト」と判定した
+    組み合わせの回帰テスト。移動したラベル（旧座標→新座標、件数一致）が
+    prefixフィルタに一致する場合、diff_labels.xlsx からは除外されつつ、
+    unchanged_labels.xlsx（filter_unchanged_by_prefix 経由）には正しく残ることを
+    end-to-end（create_diff_zip 経由）で確認する。
+    """
+    with tempfile.TemporaryDirectory() as d:
+        # 'R10' という機器符号ラベルが座標だけ変わって移動したペアを用意
+        old_doc = ezdxf.new()
+        old_doc.modelspace().add_text('R10', dxfattribs={'insert': (0, 0)})
+        new_doc = ezdxf.new()
+        new_doc.modelspace().add_text('R10', dxfattribs={'insert': (100, 100)})
+        old_path = os.path.join(d, 'OLD-001.dxf')
+        new_path = os.path.join(d, 'NEW-001.dxf')
+        old_doc.saveas(old_path)
+        new_doc.saveas(new_path)
+
+        pairs = [{
+            'main_drawing': 'NEW-001',
+            'source_drawing': 'OLD-001',
+            'main_file_info': {'temp_path': new_path, 'title': None, 'subtitle': None},
+            'source_file_info': {'temp_path': old_path},
+            'status': 'complete',
+            'relation': 'RevUp',
+            'title': None,
+            'subtitle': None,
+        }]
+
+        zip_data, results, diff_labels_excel, unchanged_labels_excel, master_df = create_diff_zip(
+            pairs,
+            ignore_moved_labels=True,
+            prefixes=['R'],
+            validate_ref_designators=True,
+        )
+
+        assert results[0]['success']
+
+        # diff_labels.xlsx: 移動したラベルは変更候補から除外されているはず
+        sheet_df = pd.read_excel(io.BytesIO(diff_labels_excel), sheet_name='NEW-001')
+        assert len(sheet_df) == 0, f"移動したラベルが変更候補として残っている: {sheet_df}"
+
+        # unchanged_labels.xlsx: 移動先座標で 'R10' が prefix フィルタを通って残っているはず
+        unchanged_df = pd.read_excel(io.BytesIO(unchanged_labels_excel), sheet_name='NEW-001')
+        assert list(unchanged_df['Label']) == ['R10'], \
+            f"移動したラベルがunchanged_labels.xlsxに正しく残っていない: {unchanged_df}"
+        assert unchanged_df.iloc[0]['Coordinate X'] == 100.0  # 新座標を採用
 
 
 def _run_all():

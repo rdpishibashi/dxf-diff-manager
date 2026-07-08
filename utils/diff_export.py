@@ -337,6 +337,11 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
             total_data=total_data,
             invalid_data=invalid_data,
         )
+
+        # unchanged_labels.xlsx のシート順も diff_labels.xlsx と同じく図番のABC順に揃える
+        # （2026-07 追加。diff_labels 側だけソートすると同一バッチの2ファイル間で
+        # シート順が食い違い、突き合わせて確認する際に混乱するため）。
+        unchanged_label_sheets = sorted(unchanged_label_sheets, key=lambda s: s.get('sheet_name') or '')
         unchanged_labels_excel = build_unchanged_labels_workbook(unchanged_label_sheets)
 
         if diff_labels_excel:

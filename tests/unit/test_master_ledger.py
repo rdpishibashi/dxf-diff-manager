@@ -138,6 +138,55 @@ def test_save_master_to_bytes_round_trip_reloads_correctly(tmp_path):
     assert list(df['Parent']) == ['A1']
 
 
+def test_uploaded_master_merges_correctly_across_all_pairing_modes(tmp_path):
+    """Step0でアップロードした台帳（Summary+Diff List形式）が、Step1のどの
+    ペアリング方式（Type A/B の RevUp・流用、Type C のペアリスト）で得られた
+    ペアとも正しく合流する（新規追加は重複なく、既存行は上書き更新される）。
+
+    dev-workflow スキルの選択肢組み合わせ表で「台帳アップロード × Step1モード」を
+    影響あり→要確認と判定した組み合わせの回帰テスト。update_parent_child_master()
+    は pairs のスキーマ（pairing.py で全モード共通と規定）のみに依存し mode 分岐を
+    持たないため構造的には安全なはずだが、実際にアップロード経由で読み込んだ
+    DataFrame に対して確認する。
+    """
+    # Step0でアップロードされる形式（Summaryシートが先頭）の台帳を用意
+    path = tmp_path / "uploaded_master.xlsx"
+    with pd.ExcelWriter(path, engine='xlsxwriter') as writer:
+        pd.DataFrame({'エンティティ統計': ['削除図形 総数'], 'Unnamed: 1': [0]}).to_excel(
+            writer, sheet_name='Summary', index=False)
+        pd.DataFrame({'Child': ['EXIST-CHILD'], 'Parent': ['EXIST-PARENT'], 'Relation': ['流用']}).to_excel(
+            writer, sheet_name='Diff List', index=False)
+
+    master_df, error = load_parent_child_master(str(path))
+    assert error is None
+
+    # Type A/B の RevUp・流用、Type C のペアリスト、それぞれ新規追加のケース
+    for relation in ('RevUp', '流用', 'ペアリスト'):
+        pair = {
+            'main_drawing': f'NEW-{relation}', 'source_drawing': f'OLD-{relation}',
+            'relation': relation, 'title': 'T', 'subtitle': 'S',
+        }
+        master_df, added_count = update_parent_child_master(master_df, [pair])
+        assert added_count == 1, f"{relation} ペアが新規追加されなかった"
+
+    assert len(master_df) == 4  # 既存1件 + 新規3件
+
+    # 既存行の更新（Type C のペアリストで同じ Child/Parent が再検出されたケース）
+    update_pair = {
+        'main_drawing': 'EXIST-CHILD', 'source_drawing': 'EXIST-PARENT',
+        'relation': 'ペアリスト', 'title': 'T2', 'subtitle': 'S2',
+    }
+    master_df, added_count = update_parent_child_master(master_df, [update_pair])
+    assert added_count == 0, "既存行が更新ではなく新規追加されてしまった（重複）"
+    assert len(master_df) == 4  # 行数は増えない
+
+    match = master_df[(master_df['Child'] == 'EXIST-CHILD') & (master_df['Parent'] == 'EXIST-PARENT')]
+    assert len(match) == 1
+    # Relation は「新しい値+-changed」で記録される（既存の
+    # test_update_parent_child_master_existing_record_relation_changed_suffix と同じ仕様）
+    assert match.iloc[0]['Relation'] == 'ペアリスト-changed'
+
+
 def test_load_parent_child_master_no_matching_sheet_returns_error(tmp_path):
     """どのシートにも Child/Parent 列が無い場合は、従来どおりエラーを返す
     （先頭シートを対象にエラーメッセージを出す後方互換の挙動）。"""
