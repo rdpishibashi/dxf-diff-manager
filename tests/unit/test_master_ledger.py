@@ -92,6 +92,65 @@ def test_load_parent_child_master_success(tmp_path):
     assert len(df) == 1
 
 
+def test_load_parent_child_master_finds_data_sheet_when_first_sheet_has_no_child_column(tmp_path):
+    """save_master_to_bytes() が出力する台帳（Summaryシートが先頭）を再アップロード
+    しても、Child/Parent 列を持つシート（Diff List）を自動で見つけて読み込める。
+
+    実データ（ME24-9001-0_ZM00_405.xlsx）で「必須カラム 'Child' が見つかりません」
+    と誤って失敗していた不具合の回帰テスト: 先頭シート（Summary）を無条件に読んで
+    いたため、Child/Parent 列を持つ実データシート（Diff List）が無視されていた。
+    """
+    path = tmp_path / "master.xlsx"
+    with pd.ExcelWriter(path, engine='xlsxwriter') as writer:
+        # Summary シート（Child/Parent 列を持たない、統計情報のみ）を先頭に作成
+        pd.DataFrame({'エンティティ統計': ['削除図形 総数'], 'Unnamed: 1': [10]}).to_excel(
+            writer, sheet_name='Summary', index=False)
+        # Diff List シート（実データ）を2番目に作成
+        pd.DataFrame({'Child': ['B1'], 'Parent': ['A1']}).to_excel(
+            writer, sheet_name='Diff List', index=False)
+
+    df, error = load_parent_child_master(str(path))
+    assert error is None
+    assert df is not None
+    assert list(df['Child']) == ['B1']
+    assert list(df['Parent']) == ['A1']
+
+
+def test_save_master_to_bytes_round_trip_reloads_correctly(tmp_path):
+    """save_master_to_bytes() の出力をそのまま load_parent_child_master() で
+    再読み込みできる（エクスポート→再アップロードの往復を保証する）。"""
+    master_df = create_empty_master_df()
+    master_df.loc[0] = {
+        'Child': 'B1', 'Parent': 'A1', 'Relation': '流用',
+        'Title': None, 'Subtitle': None, 'Recorded Date': None, 'Note': None,
+        'Deleted Entities': 1, 'Added Entities': 2, 'Diff Entities': 3,
+        'Unchanged Entities': 4, 'Total Entities': 5,
+    }
+    data = save_master_to_bytes(master_df, pairs=[], mode='auto', total_drawings_count=1)
+
+    path = tmp_path / "roundtrip.xlsx"
+    path.write_bytes(data)
+
+    df, error = load_parent_child_master(str(path))
+    assert error is None
+    assert df is not None
+    assert list(df['Child']) == ['B1']
+    assert list(df['Parent']) == ['A1']
+
+
+def test_load_parent_child_master_no_matching_sheet_returns_error(tmp_path):
+    """どのシートにも Child/Parent 列が無い場合は、従来どおりエラーを返す
+    （先頭シートを対象にエラーメッセージを出す後方互換の挙動）。"""
+    path = tmp_path / "master.xlsx"
+    with pd.ExcelWriter(path, engine='xlsxwriter') as writer:
+        pd.DataFrame({'foo': [1]}).to_excel(writer, sheet_name='Sheet1', index=False)
+        pd.DataFrame({'bar': [2]}).to_excel(writer, sheet_name='Sheet2', index=False)
+
+    df, error = load_parent_child_master(str(path))
+    assert df is None
+    assert 'Child' in error
+
+
 # --- save_master_to_bytes ---
 
 def test_save_master_to_bytes_returns_nonempty_excel():

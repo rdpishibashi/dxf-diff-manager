@@ -531,13 +531,22 @@ def read_zip_member(zip_data, member_name):
 
 ---
 
-#### `load_parent_child_master(uploaded_file)`（2026-06: `utils/master_ledger.py` へ移動）
+#### `load_parent_child_master(uploaded_file)`（2026-06: `utils/master_ledger.py` へ移動。2026-07: シート自動検出に変更）
 
 ```python
 def load_parent_child_master(uploaded_file):
     """図面管理台帳Excelを読み込み、必須カラムを検証して (DataFrame, エラーメッセージ) を返す"""
-    df = pd.read_excel(uploaded_file)
     required_columns = ['Child', 'Parent']
+    excel_file = pd.ExcelFile(uploaded_file)
+
+    target_sheet = excel_file.sheet_names[0]
+    for sheet_name in excel_file.sheet_names:
+        header_df = pd.read_excel(excel_file, sheet_name=sheet_name, nrows=0)
+        if all(col in header_df.columns for col in required_columns):
+            target_sheet = sheet_name
+            break
+
+    df = pd.read_excel(excel_file, sheet_name=target_sheet)
     for col in required_columns:
         if col not in df.columns:
             return None, f"必須カラム '{col}' が見つかりません。"
@@ -545,6 +554,10 @@ def load_parent_child_master(uploaded_file):
 ```
 
 `Child` / `Parent` の2カラムが必須。それ以外のカラム（Relation, Title, Subtitle 等）は存在しなければ後続処理で動的に追加される。streamlit非依存化のため `st.error()` を直接呼ばず `(df, error)` を返す。`app.py` の呼び出し元（`render_step0_master`）が `error` を `st.error()` で表示する。
+
+**シート自動検出（2026-07 追加）**: `save_master_to_bytes()` が出力する台帳Excelは Summary シートを先頭に持つ（`save_master_to_bytes()` のコメント「先に追加してタブ順を先頭にする」参照）。単純に `pd.read_excel(uploaded_file)`（シート指定なし＝先頭シート）で読むと Summary シート（Child/Parent 列を持たない）が選ばれ、本来のデータシートが無視されて「必須カラム 'Child' が見つかりません」と誤って失敗する——**このツール自身が出力した台帳を Step0 で再アップロードすると必ず失敗する**重大な不具合だった（実データ `ME24-9001-0_ZM00_405.xlsx` で発覚）。
+
+データシートの名前（過去の改修で `Sheet1` → `Diff List` と変遷した実績があり、固定名に依存すると再び壊れうる）に頼らず、**Child/Parent 列を両方持つシートを優先的に探す**方式にした。各シートはヘッダーのみ（`nrows=0`）読んで列名を確認するため、行数が多い台帳でも軽量。該当シートが無い場合は後方互換のため先頭シートを対象にし、従来どおりカラム欠落エラーを返す（単一シートの古い台帳・手動作成ファイル等でも動作を変えない）。回帰テスト: `tests/unit/test_master_ledger.py` の `test_load_parent_child_master_finds_data_sheet_when_first_sheet_has_no_child_column` / `test_save_master_to_bytes_round_trip_reloads_correctly`（エクスポート→再アップロードの往復を保証）/ `test_load_parent_child_master_no_matching_sheet_returns_error`。
 
 ---
 
@@ -2087,7 +2100,17 @@ BASE_DIR = Path("/Users/ryozo/Dropbox/Client/ULVAC/ElectricDesignManagement/Tool
 
 ---
 
-*最終更新: 2026-07-08（(1) diff_labels.xlsx の Summary シート「図番」欄と個別ペアシートの
+*最終更新: 2026-07-08（Step0「既存の図面管理台帳のアップロード」で、このツール自身が
+出力した台帳（`save_master_to_bytes()` の Summary+Diff List 形式）を再アップロードすると
+必ず「必須カラム 'Child' が見つかりません」で失敗する不具合を修正（実データ
+`ME24-9001-0_ZM00_405.xlsx` で発覚）。原因は `load_parent_child_master()` が
+`pd.read_excel(uploaded_file)`（シート指定なし）で常に先頭シート（Child/Parent 列を
+持たない Summary）を読んでいたこと。固定シート名に依存せず Child/Parent 列を両方持つ
+シートを自動検出する方式に変更（該当シートが無ければ後方互換で先頭シートを対象に従来
+どおりエラー）。回帰テストを `tests/unit/test_master_ledger.py` に3件追加（エクスポート→
+再アップロードの往復検証を含む）)*
+
+*過去の更新: 2026-07-08（(1) diff_labels.xlsx の Summary シート「図番」欄と個別ペアシートの
 並び順を図番のABC順にした。`create_diff_zip()` がペア処理順（ペアリスト順で順不同）のまま
 `summary_data`/`diff_label_sheets` を渡していたのを、`build_diff_labels_workbook()` 呼び出し
 直前にインデックスベースで図番ソートするよう変更（両リストの1対1対応・ハイパーリンク先の

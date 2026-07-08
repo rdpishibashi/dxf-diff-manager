@@ -14,17 +14,35 @@ def load_parent_child_master(uploaded_file):
     """
     図面管理台帳ファイルを読み込む
 
+    save_master_to_bytes() が出力する台帳Excelは Summary シートを先頭に持つ
+    （タブ順を先頭にするため）。単純に先頭シートを読むと Summary が選ばれ、
+    本来のデータ（Child/Parent 列を持つシート）を見つけられず「必須カラムが
+    見つかりません」と誤って失敗する（2026-07 実データで確認）。そのため、
+    複数シートがある場合は Child/Parent 列を両方持つシートを優先的に探して読む。
+    シート名（'Diff List' 等）はこれまでの改修で変わってきた実績があるため、
+    固定シート名に依存せず列の有無で判定する。該当シートが無ければ、後方互換の
+    ため先頭シートを読み（単一シートの古い台帳・手動作成ファイル等）、従来どおり
+    カラム欠落エラーとする。
+
     Args:
         uploaded_file: アップロードされたExcelファイル（ファイルパスやファイルオブジェクト）
 
     Returns:
         tuple: (DataFrame または None, エラーメッセージ または None)
     """
+    required_columns = ['Child', 'Parent']
     try:
-        df = pd.read_excel(uploaded_file)
+        excel_file = pd.ExcelFile(uploaded_file)
 
-        # 必要なカラムが存在するか確認
-        required_columns = ['Child', 'Parent']
+        target_sheet = excel_file.sheet_names[0]
+        for sheet_name in excel_file.sheet_names:
+            header_df = pd.read_excel(excel_file, sheet_name=sheet_name, nrows=0)
+            if all(col in header_df.columns for col in required_columns):
+                target_sheet = sheet_name
+                break
+
+        df = pd.read_excel(excel_file, sheet_name=target_sheet)
+
         for col in required_columns:
             if col not in df.columns:
                 return None, f"必須カラム '{col}' が見つかりません。"
