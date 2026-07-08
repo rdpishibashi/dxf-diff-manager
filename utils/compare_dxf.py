@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 class ToleranceConfig:
     """許容誤差設定クラス"""
     
-    def __init__(self, base_tolerance: float = 0.01):
+    def __init__(self, base_tolerance: float = 0.05):
         self.base_tolerance = base_tolerance
         self.coordinate_tolerance = base_tolerance
         self.connection_tolerance = base_tolerance * 0.1
@@ -1156,7 +1156,7 @@ class PairFileCache:
 
 
 def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: str,
-                                       tolerance: float = 0.01,
+                                       tolerance: float = 0.05,
                                        deleted_color: int = 6,
                                        added_color: int = 4,
                                        unchanged_color: int = 7,
@@ -1269,7 +1269,7 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
         return False, None
 
 
-def count_entities_in_dxf_file(file_path: str, tolerance: float = 0.01) -> Optional[int]:
+def count_entities_in_dxf_file(file_path: str, tolerance: float = 0.05) -> Optional[int]:
     """
     単一のDXFファイルのエンティティ数を数える（比較対象なし）。
 

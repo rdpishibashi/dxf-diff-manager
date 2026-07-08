@@ -21,7 +21,8 @@ class DiffConfig:
     """差分比較関連の設定"""
 
     # デフォルト値
-    DEFAULT_TOLERANCE = 0.01       # 座標許容誤差
+    DEFAULT_TOLERANCE = 0.05       # 座標許容誤差（2026-07: 0.01→0.05。UI初期値・
+                                   # create_diff_zip フォールバックの両方に反映される）
 
     # DXFレイヤー色設定（AutoCADカラーインデックス）
     DEFAULT_DELETED_COLOR = 6      # 削除エンティティ（マゼンタ）

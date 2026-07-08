@@ -68,7 +68,7 @@ def group_labels_by_coordinate(rounded_labels: List[Tuple[str, float, float]]):
 def compute_label_differences(
     new_file: str,
     old_file: str,
-    tolerance: float = 0.01,
+    tolerance: float = 0.05,
     label_cache: Optional[dict] = None,
     filter_non_parts: bool = False,
     validate_ref_designators: bool = False,
