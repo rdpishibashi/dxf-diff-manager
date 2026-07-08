@@ -32,7 +32,7 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                     deleted_color=None, added_color=None, unchanged_color=None,
                     prefixes=None, progress_callback=None, on_error=None,
                     filter_non_parts=False, validate_ref_designators=False,
-                    ignore_moved_labels=False,
+                    ignore_moved_labels=False, ignore_color_only_changes=False,
                     step1_mode=None, total_drawings_count=None,
                     source_drawing_numbers=None, dest_drawing_numbers=None):
     """
@@ -52,6 +52,10 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
         ignore_moved_labels: True の場合、diff_labels.xlsx で同一ラベルの削除件数・
             追加件数が一致する分を「移動しただけ」とみなし変更候補から除外する
             （compute_label_differences 参照。差分DXFのエンティティ比較には影響しない）
+        ignore_color_only_changes: True の場合、差分DXFで座標・形状が一致し color
+            だけが異なるエンティティを UNCHANGED として扱う
+            （compare_dxf_files_and_generate_dxf/count_entities_in_dxf_file 参照。
+            diff_labels.xlsx のラベル比較には影響しない）
         step1_mode: ペアリング方式（Summaryシートのラベル・分母の算出、完全新規図面の
             判定に使用）
         total_drawings_count: Summaryシートの図面統計の分母件数（呼び出し側で算出）
@@ -190,7 +194,8 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                     added_color=added_color,
                     unchanged_color=unchanged_color,
                     offset_b=None,
-                    pair_cache=pair_cache
+                    pair_cache=pair_cache,
+                    ignore_color_only_changes=ignore_color_only_changes,
                 )
 
                 if success:
@@ -277,7 +282,9 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                 file_info = pair.get('main_file_info')
                 if not file_info or not file_info.get('temp_path'):
                     continue  # ファイル未アップロードのため算出不可
-                count = count_entities_in_dxf_file(file_info['temp_path'], tolerance=tolerance)
+                count = count_entities_in_dxf_file(
+                    file_info['temp_path'], tolerance=tolerance,
+                    ignore_color_only_changes=ignore_color_only_changes)
                 if count is None:
                     continue
                 pair_with_counts = dict(pair, relation='完全新規図面')

@@ -1247,6 +1247,19 @@ def render_step3_diff(complete_pairs):
                      "見た目上区別できなくなります。"
             )
 
+            st.write("")
+            ignore_color_only_changes = st.checkbox(
+                "**色だけが異なる図形は変更なし扱いにする**",
+                value=False,
+                help="座標・形状（線の始点終点、円の中心・半径、文字内容等）が完全に一致し、"
+                     "色（color）だけが異なる図形要素を、差分DXFで UNCHANGED（変更なし）として"
+                     "扱います。改訂箇所を色分けマーキングした図面などで、同じ図形が色の違いだけで"
+                     "DELETED＋ADDEDの組として大量に検出される場合に使用します"
+                     "（diff_labels.xlsx のラベル比較には影響しません）。"
+                     "\n\n注意: 色の変更自体が意図的な改訂マーキングである場合、この機能を"
+                     "有効にするとその色変更が差分として検出されなくなります。"
+            )
+
         with col2:
             st.write("**レイヤー色設定**")
 
@@ -1306,6 +1319,7 @@ def render_step3_diff(complete_pairs):
                     filter_non_parts=filter_non_parts,
                     validate_ref_designators=validate_ref_designators,
                     ignore_moved_labels=ignore_moved_labels,
+                    ignore_color_only_changes=ignore_color_only_changes,
                     step1_mode=step1_mode,
                     total_drawings_count=compute_total_drawings_count(step1_mode),
                     source_drawing_numbers=set(st.session_state.source_files_dict.keys()),

@@ -22,6 +22,7 @@ import ezdxf
 from utils.compare_dxf import (
     ToleranceConfig, CoordinateTransformer, EntityExpander,
     SignatureGenerator, DiffAnalyzer, compare_dxf_files_and_generate_dxf,
+    count_entities_in_dxf_file,
 )
 
 
@@ -31,11 +32,11 @@ def _make_expander():
     return EntityExpander(transformer, debug=False)
 
 
-def _diff_counts(doc_old, doc_new):
+def _diff_counts(doc_old, doc_new, ignore_color=False):
     """2ドキュメントを比較し (deleted, added, unchanged) の署名数を返す。"""
     tol = ToleranceConfig(0.01)
     tr = CoordinateTransformer(tol, debug=False)
-    da = DiffAnalyzer(SignatureGenerator(tr, debug=False), debug=False)
+    da = DiffAnalyzer(SignatureGenerator(tr, debug=False, ignore_color=ignore_color), debug=False)
     ea, _, _, _ = da.extract_entities_from_doc(doc_old, "A", EntityExpander(tr))
     eb, _, _, _ = da.extract_entities_from_doc(doc_new, "B", EntityExpander(tr))
     sa, sb = set(ea), set(eb)
@@ -205,6 +206,120 @@ def test_file_a_only_is_deleted_file_b_only_is_added():
 
         assert by_layer.get('DELETED') == 'ONLY_IN_A'
         assert by_layer.get('ADDED') == 'ONLY_IN_B'
+
+
+# --- ignore_color_only_changes: 座標・形状が一致し color だけ異なる場合の扱い ---
+
+def test_color_only_difference_detected_by_default():
+    """デフォルト（ignore_color=False）では、座標・形状が一致していても color が
+    異なれば DELETED+ADDED として検出される（既存の挙動を変えない）。"""
+    old = ezdxf.new()
+    old.modelspace().add_line((0, 0), (10, 10), dxfattribs={'color': 7})
+    new = ezdxf.new()
+    new.modelspace().add_line((0, 0), (10, 10), dxfattribs={'color': 4})
+
+    deleted, added, unchanged = _diff_counts(old, new, ignore_color=False)
+    assert deleted == 1
+    assert added == 1
+    assert unchanged == 0
+
+
+def test_color_only_difference_treated_as_unchanged_when_ignored():
+    """ignore_color=True では、座標・形状（start/end）が完全一致し color だけが
+    異なる LINE/CIRCLE は UNCHANGED として扱われる。
+
+    実データ EE2505-633-43E_vs_43D で確認: 改訂マーキングと思われる色変更
+    （lineweight・color を伴う）により、座標・形状が完全一致するのに334ペアが
+    DELETED+ADDED として誤検出（に見える形）で出力されていた。color だけを
+    署名から除外することで、これらを UNCHANGED として扱えるようにした
+    （R1ラベル近傍の抵抗シンボルLINE・F8ラベル近傍のヒューズCIRCLEで確認）。
+    """
+    old = ezdxf.new()
+    old.modelspace().add_line((0, 0), (10, 10), dxfattribs={'color': 7, 'lineweight': 25})
+    new = ezdxf.new()
+    new.modelspace().add_line((0, 0), (10, 10), dxfattribs={'color': 4, 'lineweight': 50})
+
+    deleted, added, unchanged = _diff_counts(old, new, ignore_color=True)
+    assert deleted == 0
+    assert added == 0
+    assert unchanged == 1
+
+    # CIRCLE でも同様に確認
+    old_c = ezdxf.new()
+    old_c.modelspace().add_circle((5, 5), radius=4.2, dxfattribs={'color': 7})
+    new_c = ezdxf.new()
+    new_c.modelspace().add_circle((5, 5), radius=4.2, dxfattribs={'color': 4})
+
+    deleted_c, added_c, unchanged_c = _diff_counts(old_c, new_c, ignore_color=True)
+    assert deleted_c == 0
+    assert added_c == 0
+    assert unchanged_c == 1
+
+
+def test_ignore_color_does_not_hide_genuine_position_changes():
+    """ignore_color=True でも、実際に位置・形状が異なるエンティティは正しく
+    差分として検出される（過剰な同一視で本物の変更を見逃さない）。"""
+    old = ezdxf.new()
+    old.modelspace().add_line((0, 0), (10, 10), dxfattribs={'color': 7})
+    new = ezdxf.new()
+    new.modelspace().add_line((0, 0), (20, 20), dxfattribs={'color': 7})  # 終点が違う
+
+    deleted, added, unchanged = _diff_counts(old, new, ignore_color=True)
+    assert deleted == 1
+    assert added == 1
+
+
+def test_ignore_color_only_changes_end_to_end_via_compare_dxf_files():
+    """compare_dxf_files_and_generate_dxf() の ignore_color_only_changes 引数が、
+    実際のファイル読み込み経路でも正しく機能する（app.py の呼び出しと同じ経路）。"""
+    import tempfile
+
+    old_doc = ezdxf.new()
+    old_doc.modelspace().add_line((0, 0), (10, 10), dxfattribs={'color': 7})
+    new_doc = ezdxf.new()
+    new_doc.modelspace().add_line((0, 0), (10, 10), dxfattribs={'color': 4})
+
+    with tempfile.TemporaryDirectory() as d:
+        old_path = os.path.join(d, 'old.dxf')
+        new_path = os.path.join(d, 'new.dxf')
+        out_path = os.path.join(d, 'out.dxf')
+        old_doc.saveas(old_path)
+        new_doc.saveas(new_path)
+
+        ok, counts = compare_dxf_files_and_generate_dxf(
+            old_path, new_path, out_path, ignore_color_only_changes=True)
+        assert ok
+        assert counts['deleted_entities'] == 0
+        assert counts['added_entities'] == 0
+        assert counts['unchanged_entities'] == 1
+
+
+def test_count_entities_in_dxf_file_respects_ignore_color_only_changes():
+    """count_entities_in_dxf_file()（完全新規図面の Total Entities 算出に使用）も
+    ignore_color_only_changes と整合していることを確認する。
+
+    dev-workflow スキルの選択肢組み合わせ表で「ignore_color_only_changes ×
+    count_entities_in_dxf_file」を影響あり→要対応と判定した組み合わせ。揃えないと、
+    Deleted/Added/Unchanged Entities は color 無視で数えているのに、完全新規図面の
+    Total Entities だけ color を区別して数えてしまい、台帳内で定義が食い違う。
+    """
+    import tempfile
+
+    doc = ezdxf.new()
+    msp = doc.modelspace()
+    # 同一座標・同一形状で color だけ異なる LINE を2本配置
+    msp.add_line((0, 0), (10, 10), dxfattribs={'color': 7})
+    msp.add_line((0, 0), (10, 10), dxfattribs={'color': 4})
+
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, 'brand_new.dxf')
+        doc.saveas(path)
+
+        count_default = count_entities_in_dxf_file(path)
+        assert count_default == 2  # color込みで別エンティティとして2つ数える
+
+        count_ignored = count_entities_in_dxf_file(path, ignore_color_only_changes=True)
+        assert count_ignored == 1  # color を無視すると同一エンティティとして1つに集約
 
 
 def _run_all():

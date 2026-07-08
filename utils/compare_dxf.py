@@ -493,10 +493,19 @@ class EntityExpander:
 
 class SignatureGenerator:
     """エンティティ署名生成専用クラス"""
-    
-    def __init__(self, transformer: CoordinateTransformer, debug: bool = False):
+
+    def __init__(self, transformer: CoordinateTransformer, debug: bool = False,
+                 ignore_color: bool = False):
         self.transformer = transformer
         self.debug = debug
+        # True の場合、署名に color を含めない。座標・形状（position・text・radius・
+        # angle 等）が完全一致するのに color だけ異なるエンティティを UNCHANGED として
+        # 扱いたい場合に使う（2026-07 追加。実データ EE2505-633-43E_vs_43D で、
+        # 同一座標・同一形状の LINE/CIRCLE が改訂時の色分け（マーキング）だけで
+        # DELETED+ADDED の334ペアに誤って見える、という報告を受けて対応。color は
+        # 純粋な描画スタイル属性であり、height/radius/start_angle/end_angle のような
+        # 幾何形状を表す属性ではないため、これだけを個別に除外可能にする）。
+        self.ignore_color = ignore_color
     
     def create_absolute_entity_signature(self, absolute_entity: Dict) -> str:
         """絶対座標エンティティの署名生成"""
@@ -557,11 +566,13 @@ class SignatureGenerator:
                 logger.debug(f"Error creating signature: {e}")
             return f"{entity_type}_error_{id(absolute_entity)}"
     
-    def _add_important_attributes(self, signature_parts: List, attrs: Dict, 
+    def _add_important_attributes(self, signature_parts: List, attrs: Dict,
                                 entity_type: str, absolute_entity: Dict):
         """重要な属性を署名に追加"""
         important_attrs = ['color', 'height', 'radius', 'start_angle', 'end_angle']
-        
+        if self.ignore_color:
+            important_attrs = [a for a in important_attrs if a != 'color']
+
         for attr_name in important_attrs:
             if attr_name in attrs:
                 value = attrs[attr_name]
@@ -1161,7 +1172,8 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
                                        added_color: int = 4,
                                        unchanged_color: int = 7,
                                        offset_b: Optional[Tuple[float, float]] = None,
-                                       pair_cache: Optional[PairFileCache] = None) -> Tuple[bool, Optional[Dict[str, int]]]:
+                                       pair_cache: Optional[PairFileCache] = None,
+                                       ignore_color_only_changes: bool = False) -> Tuple[bool, Optional[Dict[str, int]]]:
     """
     DXFファイル比較メイン処理（Streamlit用インターフェース）
 
@@ -1183,6 +1195,9 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
         pair_cache: バッチ内で同じファイルが複数ペアに登場する場合の再解析回避キャッシュ
                     （省略時はキャッシュなしで毎回読み込む。呼び出し元が
                     create_diff_zip() のバッチ単位で1つ生成し、全ペアに渡す想定）
+        ignore_color_only_changes: True の場合、座標・形状が一致し color だけが
+                    異なるエンティティを UNCHANGED として扱う（SignatureGenerator
+                    の ignore_color 参照）
 
     Returns:
         Tuple[bool, Optional[Dict[str, int]]]: (成功フラグ, エンティティ数情報)
@@ -1199,7 +1214,8 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
         transformer = CoordinateTransformer(tolerance_config, debug=False)
         expander_a = EntityExpander(transformer, debug=False, global_offset=None)
         expander_b = EntityExpander(transformer, debug=False, global_offset=offset_b)
-        signature_generator = SignatureGenerator(transformer, debug=False)
+        signature_generator = SignatureGenerator(transformer, debug=False,
+                                                 ignore_color=ignore_color_only_changes)
         diff_analyzer = DiffAnalyzer(signature_generator, debug=False)
         layer_config = LayerConfig(deleted_color, added_color, unchanged_color)
         output_generator = OutputGenerator(transformer, layer_config, debug=False)
@@ -1275,7 +1291,8 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
         return False, None
 
 
-def count_entities_in_dxf_file(file_path: str, tolerance: float = 0.05) -> Optional[int]:
+def count_entities_in_dxf_file(file_path: str, tolerance: float = 0.05,
+                               ignore_color_only_changes: bool = False) -> Optional[int]:
     """
     単一のDXFファイルのエンティティ数を数える（比較対象なし）。
 
@@ -1283,7 +1300,9 @@ def count_entities_in_dxf_file(file_path: str, tolerance: float = 0.05) -> Optio
     総エンティティ数を求めるために使う。compare_dxf_files_and_generate_dxf() と
     同じ抽出経路（EntityExpander → SignatureGenerator → DiffAnalyzer）を使い、
     シグネチャ単位の重複排除も同様に適用する（複数ファイル比較時の total_entities
-    の定義と揃える）。
+    の定義と揃える）。ignore_color_only_changes も同様に揃える必要がある——揃えないと
+    Deleted/Added/Unchanged Entities は color 無視で数えているのに、完全新規図面の
+    Total Entities だけ color を区別して数えてしまい、台帳内で定義が食い違う。
 
     Returns:
         Optional[int]: エンティティ数。読み込み失敗時は None。
@@ -1292,7 +1311,8 @@ def count_entities_in_dxf_file(file_path: str, tolerance: float = 0.05) -> Optio
         tolerance_config = ToleranceConfig(tolerance)
         transformer = CoordinateTransformer(tolerance_config, debug=False)
         expander = EntityExpander(transformer, debug=False, global_offset=None)
-        signature_generator = SignatureGenerator(transformer, debug=False)
+        signature_generator = SignatureGenerator(transformer, debug=False,
+                                                 ignore_color=ignore_color_only_changes)
         diff_analyzer = DiffAnalyzer(signature_generator, debug=False)
 
         doc = ezdxf.readfile(file_path)
