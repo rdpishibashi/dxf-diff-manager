@@ -1165,9 +1165,15 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
     """
     DXFファイル比較メイン処理（Streamlit用インターフェース）
 
+    file_a のみに存在するエンティティを DELETED、file_b のみに存在するエンティティを
+    ADDED として出力する（標準的な diff の慣習: file_a=旧基準、file_b=新比較対象）。
+    呼び出し元は必ず「旧図面ファイルを file_a、新図面ファイルを file_b」の順で渡すこと。
+    逆にすると ADDED/DELETED レイヤーの内容が入れ替わる（2026-07 に実際に発生した不具合。
+    utils/diff_export.py の呼び出し箇所と tests/unit/test_compare_dxf.py 参照）。
+
     Args:
-        file_a: 基準DXFファイルパス
-        file_b: 比較対象DXFファイルパス
+        file_a: 基準DXFファイルパス（旧図面。file_a のみに存在するエンティティが DELETED になる）
+        file_b: 比較対象DXFファイルパス（新図面。file_b のみに存在するエンティティが ADDED になる）
         output_file: 出力DXFファイルパス
         tolerance: 座標許容誤差
         deleted_color: 削除エンティティの色（デフォルト: 6=マゼンタ）

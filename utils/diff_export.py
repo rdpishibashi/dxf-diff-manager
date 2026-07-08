@@ -175,10 +175,15 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                 if progress_callback:
                     progress_callback(index - 1, total_pairs, f"{main_drawing} vs {source_drawing} 処理中")
 
-                # DXF比較処理（図番（新）を基準A、流用元図番（旧）を比較対象B）
+                # DXF比較処理。compare_dxf_files_and_generate_dxf() は file_a のみに
+                # 存在するエンティティを DELETED、file_b のみに存在するエンティティを
+                # ADDED として出力する（標準的な diff の慣習: file_a=旧基準、file_b=新
+                # 比較対象）。そのため流用元図番（旧）を file_a、図番（新）を file_b に
+                # 渡す（2026-07 修正: 以前は新旧が逆で ADDED/DELETED レイヤーの内容が
+                # 入れ替わっていた不具合があった）。
                 success, entity_counts = compare_dxf_files_and_generate_dxf(
-                    main_file_path,        # 基準ファイルA (新)
-                    source_file_path,      # 比較対象ファイルB (旧)
+                    source_file_path,      # 基準ファイルA (旧) → DELETED の判定基準
+                    main_file_path,        # 比較対象ファイルB (新) → ADDED の判定基準
                     temp_output,
                     tolerance=tolerance,
                     deleted_color=deleted_color,

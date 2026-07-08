@@ -21,7 +21,7 @@ import ezdxf
 
 from utils.compare_dxf import (
     ToleranceConfig, CoordinateTransformer, EntityExpander,
-    SignatureGenerator, DiffAnalyzer,
+    SignatureGenerator, DiffAnalyzer, compare_dxf_files_and_generate_dxf,
 )
 
 
@@ -164,6 +164,47 @@ def test_mtext_genuinely_different_text_is_detected():
     deleted, added, unchanged = _diff_counts(old, new)
     assert deleted == 1
     assert added == 1
+
+
+# --- compare_dxf_files_and_generate_dxf: file_a/file_b と DELETED/ADDED の対応 ---
+
+def test_file_a_only_is_deleted_file_b_only_is_added():
+    """compare_dxf_files_and_generate_dxf() は file_a のみに存在するエンティティを
+    DELETED、file_b のみに存在するエンティティを ADDED として出力する契約を保証する。
+
+    呼び出し元（utils/diff_export.py）がこの契約と逆の順で新旧ファイルを渡すと、
+    ADDED/DELETED レイヤーの内容が入れ替わる不具合が実際に発生した（実データ
+    EE4144-613-49D_vs_49C で確認: ADDED レイヤーに旧図面自身のテキスト
+    'EE4144-613-49C' が、DELETED レイヤーに新図面自身のテキスト 'EE4144-613-49D' が
+    混入していた）。file_a=旧、file_b=新で呼ぶことが正しい契約であることを固定する。
+    """
+    import tempfile
+
+    doc_a = ezdxf.new()  # 旧ファイル役
+    doc_a.modelspace().add_text('ONLY_IN_A', dxfattribs={'insert': (0, 0)})
+    doc_b = ezdxf.new()  # 新ファイル役
+    doc_b.modelspace().add_text('ONLY_IN_B', dxfattribs={'insert': (100, 100)})
+
+    with tempfile.TemporaryDirectory() as d:
+        path_a = os.path.join(d, 'a.dxf')
+        path_b = os.path.join(d, 'b.dxf')
+        out_path = os.path.join(d, 'out.dxf')
+        doc_a.saveas(path_a)
+        doc_b.saveas(path_b)
+
+        ok, counts = compare_dxf_files_and_generate_dxf(path_a, path_b, out_path)
+        assert ok
+        assert counts['deleted_entities'] == 1
+        assert counts['added_entities'] == 1
+
+        out_doc = ezdxf.readfile(out_path)
+        by_layer = {}
+        for e in out_doc.modelspace():
+            if e.dxftype() == 'TEXT':
+                by_layer[getattr(e.dxf, 'layer', '')] = e.dxf.text
+
+        assert by_layer.get('DELETED') == 'ONLY_IN_A'
+        assert by_layer.get('ADDED') == 'ONLY_IN_B'
 
 
 def _run_all():
