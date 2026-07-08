@@ -69,7 +69,7 @@ DXF-diff-manager/
 │   ├── label_diff.py         # ラベル差分計算・Excelワークブック生成
 │   └── common_utils.py       # 共通ユーティリティ（ファイル保存・エラー処理）
 ├── tests/
-│   ├── unit/                 # モデル層のユニットテスト（test_pairing.py / test_master_ledger.py）
+│   ├── unit/                 # モデル層のユニットテスト（test_pairing.py / test_master_ledger.py / test_compare_dxf.py）
 │   └── regression/           # 回帰テスト（RevUp/流用ペアリング・完全新規図面）
 └── .streamlit/
     └── config.toml           # Streamlit設定
@@ -342,7 +342,7 @@ class UIConfig:
 
 ```python
 class DiffConfig:
-    DEFAULT_TOLERANCE = 0.01         # 座標許容誤差（DXF差分・ラベル比較共通）
+    DEFAULT_TOLERANCE = 0.05         # 座標許容誤差（DXF差分・ラベル比較共通。2026-07: 0.01→0.05）
     DEFAULT_DELETED_COLOR = 6        # 削除エンティティ色（AutoCADカラー: マゼンタ）
     DEFAULT_ADDED_COLOR = 4          # 追加エンティティ色（シアン）
     DEFAULT_UNCHANGED_COLOR = 7      # 変更なしエンティティ色（白/黒）
@@ -1197,7 +1197,7 @@ SignatureGenerator       → エンティティの署名（ハッシュ）生成
 
 ```python
 class ToleranceConfig:
-    def __init__(self, base_tolerance: float = 0.01):
+    def __init__(self, base_tolerance: float = 0.05):  # 2026-07: 0.01→0.05（config.DEFAULT_TOLERANCE と一致）
         self.coordinate_tolerance = base_tolerance
         self.connection_tolerance = base_tolerance * 0.1   # 接続点は厳密に
         self.text_position_tolerance = base_tolerance * 2  # テキスト位置は緩く
@@ -1294,6 +1294,30 @@ def _expand_insert_recursive(self, doc, insert_entity, transform_matrix, expande
 これにより、ネストブロック内の実体（LINE等）が UNCHANGED/ADDED/DELETED の各レイヤーに
 正しく展開・分類されるようになった。
 
+**非表示レイヤー（off/frozen）のエンティティ除外（2026-07 追加）**:
+
+`expand_insert_entities()` の先頭で対象 doc のレイヤー可視性マップ
+（`_build_layer_visibility()`：レイヤー名 → `off でも frozen でもない` か）を構築し、
+**off または frozen なレイヤー上のエンティティを抽出対象から除外**する。off/frozen な
+レイヤーの図形は図面に表示されないため、ビジュアル差分は「見えている図形」だけを比較
+すべきという方針に基づく。除外は3箇所で行う:
+
+1. modelspace 直下のエンティティ: 自身のレイヤーが off/frozen なら除外
+2. modelspace 直下の INSERT: INSERT 自身のレイヤーが off/frozen なら参照全体を展開せず除外
+3. ブロック定義内のエンティティ（`_expand_insert_recursive`）: エンティティ自身が明示的な
+   off/frozen レイヤー上にあれば、参照元 INSERT が可視でも除外
+
+レイヤー `'0'` はブロック参照のレイヤーを継承するため常に可視扱いとし（`_is_layer_visible()`）、
+参照元 INSERT 側の可視性は上記2で別途判定する。未知レイヤー・判定不能時も安全側で可視扱い。
+
+この対策が無い場合、重なった旧タイトルブロック・改訂履歴メモ・旧図番テキスト等が
+off/frozen レイヤーに残っている DXF で、**新旧同一の不可視テキストが UNCHANGED として
+差分DXFに描画される**不具合が起きる（実データ `EE2505-611-79B_vs_79A` で確認: ブロック
+`JZB_0004` の MTEXT `EE2505-611-57B` / `Parts revised/KURIHARA` 等が off+frozen レイヤー上に
+あり、差分DXFの UNCHANGED レイヤーに図面上は見えない文字列として出力されていた。修正後は
+これら261件の不可視エンティティが UNCHANGED から除外され、可視図形の差分 ADDED=28/DELETED=79 は
+不変）。回帰テスト: `tests/unit/test_compare_dxf.py`。
+
 **ローカル属性キャッシュ（`safe_get_dxf_attributes()`、2026-06 追加、Step 4 高速化）**:
 
 同じブロックが多数の INSERT から参照される手描き回路図（記号の繰り返し配置）では、
@@ -1322,6 +1346,29 @@ def create_absolute_entity_signature(self, absolute_entity: Dict) -> str:
     signature_data = json.dumps(signature_parts, sort_keys=True, default=str)
     return hashlib.md5(signature_data.encode()).hexdigest()
 ```
+
+**MTEXT フォーマットコードの署名正規化（2026-07 追加）**:
+
+`create_absolute_entity_signature()` は、MTEXT の `text_content` を署名に含める際、
+生の文字列ではなく `clean_mtext_format_codes()`（`utils/extract_labels.py`。diff_labels.xlsx
+が使うのと同じ関数）でフォーマットコードを除去してから使う。TEXT は書式コードを持たない
+ため従来どおり `strip()` のみ。
+
+理由: MTEXT の `text_content` には `\W`（幅係数）・`\T`（文字間隔）・`\A`（揃え）等の
+インライン書式コードが含まれ、その数値（例 `\W0.892749`）は**改訂時に同一ラベルでも
+CADが僅かに再計算する**ことがある。生の `text_content` を署名に使うと、見た目・本文が
+同一のラベルが新旧で別署名になり、**DELETED＋ADDED の大量の偽差分**が発生する。
+一方 diff_labels.xlsx は `extract_labels()` 経由で `plain_mtext()` により同コードを除去済みの
+ため「変化なし」と出る。この結果、**同じペアで差分DXF（大量の DELETED/ADDED）と
+diff_labels.xlsx（変化なし）が食い違う**不整合が生じていた（実データ
+`EE6588-405C_vs_405B` で確認: 偽差分 DELETED 318→15・ADDED 332→29、UNCHANGED 825→1128 に
+改善し、diff_labels の変更18行と整合）。`clean_mtext_format_codes` を両者で共有することで
+判定基準を揃えている。回帰テスト: `tests/unit/test_compare_dxf.py`
+（`test_mtext_differing_format_codes_treated_as_unchanged` / `test_mtext_genuinely_different_text_is_detected`）。
+
+> 注: 全角/半角の中黒（`・` U+30FB vs `･` U+FF65）等、**コードポイントが異なる文字**は
+> フォーマットコードではないため除去されず、diff_labels・差分DXF の双方で差分として
+> 検出される（両者とも NFKC 正規化はしていないため挙動が一致する）。
 
 ### 8.6 `compare_dxf_files_and_generate_dxf(file_a, file_b, ...)`
 
@@ -2001,7 +2048,32 @@ BASE_DIR = Path("/Users/ryozo/Dropbox/Client/ULVAC/ElectricDesignManagement/Tool
 
 ---
 
-*最終更新: 2026-07-08（図面管理台帳プレビュー（`st.dataframe`）で、エンティティ数カラムの
+*最終更新: 2026-07-08（差分DXF（`compare_dxf.py`）の2件の不具合修正＋座標マージン既定値変更。
+回帰テスト `tests/unit/test_compare_dxf.py` を新設（6件 全パス）。
+
+(1) **非表示レイヤーのエンティティ除外**: 差分DXFの UNCHANGED レイヤーに、図面上は見えない
+文字列（重なった旧タイトルブロック・改訂履歴メモ・旧図番等）が描画される不具合。
+`EntityExpander` が off/frozen（非表示）レイヤー上のエンティティも比較対象に含めていたため、
+新旧同一の不可視エンティティが UNCHANGED として出力されていた。抽出段階でレイヤー可視性を
+判定し off/frozen レイヤーの図形を除外（実データ EE2505-611-79B_vs_79A で不可視テキスト261件を
+除外、可視図形の差分は不変）。
+
+(2) **MTEXT フォーマットコードの署名正規化**: 見た目・本文が同一の MTEXT ラベルが大量に
+DELETED＋ADDED として誤判定され、同じペアの diff_labels.xlsx（変化なし）と食い違う不具合。
+署名生成が MTEXT の生 `text_content`（`\W` 幅係数・`\T` 文字間隔コード込み）を使っており、
+これらが改訂時に僅かに再計算されるため同一ラベルが別署名になっていた。diff_labels と同じ
+`clean_mtext_format_codes()` でコード除去してから署名に含めるようにした（実データ
+EE6588-405C_vs_405B で偽差分 DELETED 318→15・ADDED 332→29、diff_labels の変更18行と整合）。
+
+(3) **差分検出の座標マージン（デフォルト）を 0.01→0.05 に変更**: `config.DiffConfig.DEFAULT_TOLERANCE`
+（UI「差分検出の際の座標マージン」の初期値・`create_diff_zip` のフォールバック）を 0.05 に。
+併せて `compare_dxf.py` の `ToleranceConfig` / `compare_dxf_files_and_generate_dxf` /
+`count_entities_in_dxf_file`、`label_diff.compute_label_differences` のフォールバック既定値も
+0.05 に揃え、コードベース全体でデフォルトを一貫させた（各呼び出し元は従来どおり明示値を
+渡すため実挙動はUIのデフォルト初期値のみ変化）。実データ2ペアでは 0.01→0.05 で差分DXF・
+diff_labels の結果は不変（残差分が座標ジッタでなく内容変更のため。効果が出始めるのは 0.1 以上）。）*
+
+*過去の更新: 2026-07-08（図面管理台帳プレビュー（`st.dataframe`）で、エンティティ数カラムの
 `"n/a"`（完全新規図面の行）と整数（通常ペアの行）の混在により pyarrow の
 `ArrowInvalid` トレースバックがログ出力される問題を修正。`utils/master_ledger.py` に
 `make_dataframe_arrow_compatible()`（混在 object カラムのみ文字列統一した表示用コピーを
