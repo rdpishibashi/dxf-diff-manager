@@ -1592,6 +1592,8 @@ def build_unchanged_labels_workbook(sheets: List[Dict]) -> bytes:
 
 Summary シートは `workbook.add_worksheet('Summary')` で手書き生成し、「図番」セルに `worksheet.write_url()` で対応ペアシートへの内部ハイパーリンクを設定する。ペアシート名は Summary 書き込みより前に事前確定させる（`pair_sheet_names` リスト）。
 
+**Summary シート「図番」欄・ペアシートの並び順（2026-07 追加）**: `build_diff_labels_workbook()` 自体は渡された `sheets`/`summary_data` の順序をそのまま使う（ソートしない）。図番のABC順に並べる処理は呼び出し元の `create_diff_zip()` 側で行う——`summary_data` と `diff_label_sheets` はペア処理ループ内で1ペアにつき1件ずつ**同じ順序**で追加されるため（index が一致する）、`build_diff_labels_workbook()` を呼ぶ直前に両リストを `summary_data[i].get('図番')` でインデックスベースにソートしてから渡す（同一図番が複数ペアに登場する場合は安定ソートで元の順序を保つ）。これにより Summary シートの行順・ハイパーリンク先・ペアシートの並びが常に一致したまま図番ABC順になる。回帰テスト: `tests/unit/test_diff_export.py` の `test_diff_labels_summary_and_sheets_sorted_alphabetically_by_drawing_number`。
+
 ### 9.5 `format_sheet(writer, sheet_name, df)`
 
 全シートに共通の書式設定を適用する。
@@ -2085,7 +2087,16 @@ BASE_DIR = Path("/Users/ryozo/Dropbox/Client/ULVAC/ElectricDesignManagement/Tool
 
 ---
 
-*最終更新: 2026-07-08（差分DXFの ADDED/DELETED レイヤーの内容が新旧で入れ替わっていた
+*最終更新: 2026-07-08（(1) diff_labels.xlsx の Summary シート「図番」欄と個別ペアシートの
+並び順を図番のABC順にした。`create_diff_zip()` がペア処理順（ペアリスト順で順不同）のまま
+`summary_data`/`diff_label_sheets` を渡していたのを、`build_diff_labels_workbook()` 呼び出し
+直前にインデックスベースで図番ソートするよう変更（両リストの1対1対応・ハイパーリンク先の
+整合を保ったまま）。回帰テスト: `tests/unit/test_diff_export.py`。
+(2) 前回の ADDED/DELETED 入れ替わり修正に対し、diff_labels.xlsx 側（New/Old 列）が同種の
+取り違えを起こしていないことを保証する回帰テストを追加（既存の呼び出し順序自体は元々
+正しく、変更なし）)*
+
+*過去の更新: 2026-07-08（差分DXFの ADDED/DELETED レイヤーの内容が新旧で入れ替わっていた
 重大な不具合を修正。`utils/diff_export.py` が `compare_dxf_files_and_generate_dxf(file_a, file_b, ...)`
 を `(main_file_path=新, source_file_path=旧)` の順で呼んでいたが、この関数は
 `file_a` のみに存在するエンティティを DELETED、`file_b` のみに存在するエンティティを

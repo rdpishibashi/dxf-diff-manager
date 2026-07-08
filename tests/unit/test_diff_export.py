@@ -17,8 +17,39 @@ import zipfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import ezdxf
+import pandas as pd
 
 from utils.diff_export import create_diff_zip
+
+
+def _make_pair_dxf_files(d, main_drawing, source_drawing,
+                          new_only_label, old_only_label,
+                          new_insert=(100, 100), old_insert=(0, 0)):
+    """1ペア分の新旧DXFファイルを作成し、pairs用のdictを返す。
+
+    new_only_label は main_drawing（新）側だけに、old_only_label は
+    source_drawing（旧）側だけに配置する。
+    """
+    old_doc = ezdxf.new()
+    old_doc.modelspace().add_text(old_only_label, dxfattribs={'insert': old_insert})
+    new_doc = ezdxf.new()
+    new_doc.modelspace().add_text(new_only_label, dxfattribs={'insert': new_insert})
+
+    old_path = os.path.join(d, f'{source_drawing}.dxf')
+    new_path = os.path.join(d, f'{main_drawing}.dxf')
+    old_doc.saveas(old_path)
+    new_doc.saveas(new_path)
+
+    return {
+        'main_drawing': main_drawing,
+        'source_drawing': source_drawing,
+        'main_file_info': {'temp_path': new_path, 'title': None, 'subtitle': None},
+        'source_file_info': {'temp_path': old_path},
+        'status': 'complete',
+        'relation': 'RevUp',
+        'title': None,
+        'subtitle': None,
+    }
 
 
 def test_create_diff_zip_passes_old_new_in_correct_order_to_compare_dxf():
@@ -34,26 +65,11 @@ def test_create_diff_zip_passes_old_new_in_correct_order_to_compare_dxf():
     新規追加された改訂メモが混入していた）。
     """
     with tempfile.TemporaryDirectory() as d:
-        old_doc = ezdxf.new()
-        old_doc.modelspace().add_text('OLD_ONLY_LABEL', dxfattribs={'insert': (0, 0)})
-        new_doc = ezdxf.new()
-        new_doc.modelspace().add_text('NEW_ONLY_LABEL', dxfattribs={'insert': (100, 100)})
-
-        old_path = os.path.join(d, 'OLD-001.dxf')
-        new_path = os.path.join(d, 'NEW-001.dxf')
-        old_doc.saveas(old_path)
-        new_doc.saveas(new_path)
-
-        pairs = [{
-            'main_drawing': 'NEW-001',
-            'source_drawing': 'OLD-001',
-            'main_file_info': {'temp_path': new_path, 'title': None, 'subtitle': None},
-            'source_file_info': {'temp_path': old_path},
-            'status': 'complete',
-            'relation': 'RevUp',
-            'title': None,
-            'subtitle': None,
-        }]
+        pair = _make_pair_dxf_files(
+            d, 'NEW-001', 'OLD-001',
+            new_only_label='NEW_ONLY_LABEL', old_only_label='OLD_ONLY_LABEL',
+        )
+        pairs = [pair]
 
         zip_data, results, diff_labels_excel, unchanged_labels_excel, master_df = create_diff_zip(pairs)
 
@@ -84,6 +100,63 @@ def test_create_diff_zip_passes_old_new_in_correct_order_to_compare_dxf():
                 f"DELETEDレイヤーに旧図面のラベルが期待通り出力されていない: {by_layer}"
         finally:
             os.unlink(out_path)
+
+        # diff_labels.xlsx 側の New/Old も新旧が入れ替わっていないことを確認する
+        # （compute_label_differences(new_file, old_file, ...) の呼び出し順序は今回の
+        # 修正で変更していないが、同種の取り違えが将来起きないことを保証する）
+        sheet_df = pd.read_excel(io.BytesIO(diff_labels_excel), sheet_name='NEW-001')
+        new_col = 'New: NEW-001'
+        old_col = 'Old: OLD-001'
+        assert new_col in sheet_df.columns and old_col in sheet_df.columns
+        new_values = set(sheet_df[new_col].dropna())
+        old_values = set(sheet_df[old_col].dropna())
+        assert 'NEW_ONLY_LABEL' in new_values, \
+            f"diff_labelsのNew列に新図面のラベルが無い: {new_values}"
+        assert 'OLD_ONLY_LABEL' in old_values, \
+            f"diff_labelsのOld列に旧図面のラベルが無い: {old_values}"
+        assert 'NEW_ONLY_LABEL' not in old_values and 'OLD_ONLY_LABEL' not in new_values, \
+            "diff_labelsのNew/Oldが入れ替わっている"
+
+
+def test_diff_labels_summary_and_sheets_sorted_alphabetically_by_drawing_number():
+    """diff_labels.xlsx の Summary シート「図番」欄と個別シートの並びが図番の
+    ABC順になることを確認する（処理順（ペアリスト順）のままだと順不同になるため）。
+    """
+    with tempfile.TemporaryDirectory() as d:
+        # わざと図番の並び順とは異なる処理順で pairs を渡す
+        pairs = [
+            _make_pair_dxf_files(d, 'C-DRAW', 'C-SRC', 'C_NEW', 'C_OLD'),
+            _make_pair_dxf_files(d, 'A-DRAW', 'A-SRC', 'A_NEW', 'A_OLD'),
+            _make_pair_dxf_files(d, 'B-DRAW', 'B-SRC', 'B_NEW', 'B_OLD'),
+        ]
+
+        zip_data, results, diff_labels_excel, unchanged_labels_excel, master_df = create_diff_zip(pairs)
+        assert len(results) == 3
+
+        xl = pd.ExcelFile(io.BytesIO(diff_labels_excel))
+
+        # 個別シートの並び（Summary の次から）が ABC 順になっていること
+        pair_sheet_names = [n for n in xl.sheet_names if n != 'Summary']
+        assert pair_sheet_names == ['A-DRAW', 'B-DRAW', 'C-DRAW'], \
+            f"個別シートの並びがABC順になっていない: {pair_sheet_names}"
+
+        # Summary シートの「図番」欄が ABC 順になっていること
+        summary_df = pd.read_excel(xl, sheet_name='Summary')
+        assert summary_df['図番'].tolist() == ['A-DRAW', 'B-DRAW', 'C-DRAW'], \
+            f"Summaryシートの図番欄がABC順になっていない: {summary_df['図番'].tolist()}"
+
+        # Summary の各行のハイパーリンクが、並び替え後も対応する図番のシートを
+        # 正しく指していること（summary_data と diff_label_sheets の対応がソートで
+        # 崩れていないことの確認）
+        import openpyxl
+        wb = openpyxl.load_workbook(io.BytesIO(diff_labels_excel))
+        ws = wb['Summary']
+        for row_idx, expected in enumerate(['A-DRAW', 'B-DRAW', 'C-DRAW'], start=2):
+            cell = ws.cell(row=row_idx, column=1)
+            assert cell.value == expected
+            assert cell.hyperlink is not None
+            assert cell.hyperlink.location == f"'{expected}'!A1", \
+                f"{expected}行のハイパーリンクが対応するシートを指していない: {cell.hyperlink.location}"
 
 
 def _run_all():
