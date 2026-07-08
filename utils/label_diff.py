@@ -6,7 +6,7 @@ diff_labels.xlsx / unchanged_labels.xlsx をアプリ内で生成する。
 """
 
 import io
-from collections import Counter
+from collections import Counter, defaultdict
 from typing import List, Dict, Tuple, Optional
 
 import pandas as pd
@@ -72,15 +72,21 @@ def compute_label_differences(
     label_cache: Optional[dict] = None,
     filter_non_parts: bool = False,
     validate_ref_designators: bool = False,
+    ignore_moved_labels: bool = False,
 ):
     """
     ラベルを抽出（ブロック展開を含む）し、変更候補・未変更候補を計算する。
+
+    Args:
+        ignore_moved_labels: True の場合、同一ラベルの削除件数・追加件数が一致する
+            分を「移動しただけ」とみなし、座標が異なっていても変更候補から除外する
+            （reclassify_moved_labels 参照）。
 
     Returns
     -------
     tuple(list, list, dict)
         change_rows: 変更候補（座標と旧/新ラベルを含む辞書のリスト）
-        unchanged_entries: 同一座標で一致したラベル情報のリスト
+        unchanged_entries: 同一座標で一致した（または移動とみなされた）ラベル情報のリスト
         extra_info: {'labels_new': [...], 'invalid_ref_designators': [...]}
     """
     labels_new, info_new = _load_labels_with_cache(new_file, label_cache, filter_non_parts, validate_ref_designators)
@@ -93,6 +99,8 @@ def compute_label_differences(
     grouped_old = group_labels_by_coordinate(rounded_old)
 
     change_rows, unchanged_entries = find_label_change_pairs(grouped_new, grouped_old)
+    if ignore_moved_labels:
+        change_rows, unchanged_entries = reclassify_moved_labels(change_rows, unchanged_entries)
     change_rows.sort(key=lambda r: ((r['Old Label'] or ''), (r['New Label'] or '')))
 
     extra_info = {
@@ -160,6 +168,79 @@ def find_label_change_pairs(group_new, group_old):
             })
 
     return change_rows, unchanged_entries
+
+
+# 「移動しただけ」の再分類から除外するラベル文字列（注記・特記事項用の記号）。
+_MOVED_LABEL_EXCLUDE_CHARS = ('☆',)
+
+
+def reclassify_moved_labels(change_rows, unchanged_entries):
+    """回路ブロックの移動により座標だけが変わったラベルを「変更なし」に振り替える。
+
+    find_label_change_pairs() は座標単位でしか突き合わせないため、ラベルの集合が
+    そのまま別の座標へ丸ごと移動すると、移動元では「削除」、移動先では「追加」として
+    検出される。同一ラベル文字列の削除件数・追加件数がちょうど一致する分は「移動した
+    だけ」とみなし、change_rows から取り除いて unchanged_entries に振り替える。
+
+    対象になるのは Old Label のみ（削除）・New Label のみ（追加）の行だけで、
+    同一座標での名称変更（Old/New 両方が存在する行）には影響しない。
+
+    「☆」を含むラベル（注記・特記事項として使われることが多い）は対象外とし、
+    件数が一致していても常に変更候補のまま残す。
+
+    注意（呼び出し元に伝えるべきリスク）: 座標を見ずに件数だけで判定するため、
+    たまたま同じラベル名の部品が「別の場所で削除」され「別の無関係な場所に同名の
+    部品が新規追加」された場合も区別できず「移動」とみなされる。また、同一ラベルが
+    複数箇所で移動した場合の新旧座標の対応付けは一意ではなく、座標順のソートで
+    機械的に対応付ける（実害はないが、対応関係自体に意味はない）。
+
+    Args:
+        change_rows: find_label_change_pairs() の戻り値（1つ目）
+        unchanged_entries: find_label_change_pairs() の戻り値（2つ目）
+
+    Returns:
+        tuple(list, list): (再分類後の change_rows, 移動分を追加した unchanged_entries)
+    """
+    deleted_by_label = defaultdict(list)  # label -> [change_row, ...]（New Label が None）
+    added_by_label = defaultdict(list)    # label -> [change_row, ...]（Old Label が None）
+    other_rows = []
+
+    for row in change_rows:
+        old_label, new_label = row['Old Label'], row['New Label']
+        if old_label is not None and new_label is None:
+            deleted_by_label[old_label].append(row)
+        elif old_label is None and new_label is not None:
+            added_by_label[new_label].append(row)
+        else:
+            other_rows.append(row)
+
+    remaining_rows = list(other_rows)
+    moved_entries = []
+
+    for label in sorted(set(deleted_by_label) | set(added_by_label)):
+        if any(ch in label for ch in _MOVED_LABEL_EXCLUDE_CHARS):
+            remaining_rows.extend(deleted_by_label.get(label, []))
+            remaining_rows.extend(added_by_label.get(label, []))
+            continue
+
+        deleted_rows = sorted(deleted_by_label.get(label, []),
+                               key=lambda r: (r['Coordinate X'], r['Coordinate Y']))
+        added_rows = sorted(added_by_label.get(label, []),
+                             key=lambda r: (r['Coordinate X'], r['Coordinate Y']))
+        matched = min(len(deleted_rows), len(added_rows))
+
+        for i in range(matched):
+            new_row = added_rows[i]
+            moved_entries.append({
+                'label': label,
+                'count': 1,
+                'coordinate': (new_row['Coordinate X'], new_row['Coordinate Y']),
+            })
+
+        remaining_rows.extend(deleted_rows[matched:])
+        remaining_rows.extend(added_rows[matched:])
+
+    return remaining_rows, unchanged_entries + moved_entries
 
 
 def filter_unchanged_by_prefix(unchanged_entries, prefixes: List[str]):

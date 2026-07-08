@@ -1233,6 +1233,20 @@ def render_step3_diff(complete_pairs):
             st.session_state.prefix_text_input = prefix_text
             prefix_list = get_prefix_list_from_state()
 
+            st.write("")
+            ignore_moved_labels = st.checkbox(
+                "**移動しただけのラベルを差分から除外**",
+                value=False,
+                help="回路ブロックをまるごと別の位置に移動すると、座標単位の比較では"
+                     "「削除＋追加」として検出されます。同一ラベルの削除件数と追加件数が"
+                     "一致する分は、座標が異なっていても diff_labels.xlsx の変更候補から"
+                     "除外し、変更なしとして扱います（差分DXFのエンティティ比較には影響しません）。"
+                     "「☆」を含むラベルは対象外（常に変更候補として残ります）。"
+                     "\n\n注意: 座標を見ず件数だけで判定するため、たまたま同じラベル名の部品が"
+                     "別の場所で削除・別の無関係な場所に追加された場合も「移動」とみなされ、"
+                     "見た目上区別できなくなります。"
+            )
+
         with col2:
             st.write("**レイヤー色設定**")
 
@@ -1291,6 +1305,7 @@ def render_step3_diff(complete_pairs):
                     on_error=st.error,
                     filter_non_parts=filter_non_parts,
                     validate_ref_designators=validate_ref_designators,
+                    ignore_moved_labels=ignore_moved_labels,
                     step1_mode=step1_mode,
                     total_drawings_count=compute_total_drawings_count(step1_mode),
                     source_drawing_numbers=set(st.session_state.source_files_dict.keys()),

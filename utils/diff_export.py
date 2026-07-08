@@ -32,6 +32,7 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                     deleted_color=None, added_color=None, unchanged_color=None,
                     prefixes=None, progress_callback=None, on_error=None,
                     filter_non_parts=False, validate_ref_designators=False,
+                    ignore_moved_labels=False,
                     step1_mode=None, total_drawings_count=None,
                     source_drawing_numbers=None, dest_drawing_numbers=None):
     """
@@ -48,6 +49,9 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
         progress_callback: (current, total, message) を受け取る進捗関数（任意）
         on_error: (message) を受け取るエラー通知関数（任意。streamlit非依存のため
             st.error() を直接呼ばず、呼び出し元から渡してもらう）
+        ignore_moved_labels: True の場合、diff_labels.xlsx で同一ラベルの削除件数・
+            追加件数が一致する分を「移動しただけ」とみなし変更候補から除外する
+            （compute_label_differences 参照。差分DXFのエンティティ比較には影響しない）
         step1_mode: ペアリング方式（Summaryシートのラベル・分母の算出、完全新規図面の
             判定に使用）
         total_drawings_count: Summaryシートの図面統計の分母件数（呼び出し側で算出）
@@ -121,6 +125,7 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                     label_cache=label_cache,
                     filter_non_parts=filter_non_parts,
                     validate_ref_designators=validate_ref_designators,
+                    ignore_moved_labels=ignore_moved_labels,
                 )
                 filtered_unchanged = filter_unchanged_by_prefix(unchanged_entries, prefixes)
                 change_label_count = len(change_rows)
