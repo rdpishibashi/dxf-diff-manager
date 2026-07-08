@@ -1375,6 +1375,29 @@ def create_absolute_entity_signature(self, absolute_entity: Dict) -> str:
     return hashlib.md5(signature_data.encode()).hexdigest()
 ```
 
+**MTEXT フォーマットコードの署名正規化（2026-07 追加）**:
+
+`create_absolute_entity_signature()` は、MTEXT の `text_content` を署名に含める際、
+生の文字列ではなく `clean_mtext_format_codes()`（`utils/extract_labels.py`。diff_labels.xlsx
+が使うのと同じ関数）でフォーマットコードを除去してから使う。TEXT は書式コードを持たない
+ため従来どおり `strip()` のみ。
+
+理由: MTEXT の `text_content` には `\W`（幅係数）・`\T`（文字間隔）・`\A`（揃え）等の
+インライン書式コードが含まれ、その数値（例 `\W0.892749`）は**改訂時に同一ラベルでも
+CADが僅かに再計算する**ことがある。生の `text_content` を署名に使うと、見た目・本文が
+同一のラベルが新旧で別署名になり、**DELETED＋ADDED の大量の偽差分**が発生する。
+一方 diff_labels.xlsx は `extract_labels()` 経由で `plain_mtext()` により同コードを除去済みの
+ため「変化なし」と出る。この結果、**同じペアで差分DXF（大量の DELETED/ADDED）と
+diff_labels.xlsx（変化なし）が食い違う**不整合が生じていた（実データ
+`EE6588-405C_vs_405B` で確認: 偽差分 DELETED 318→15・ADDED 332→29、UNCHANGED 825→1128 に
+改善し、diff_labels の変更18行と整合）。`clean_mtext_format_codes` を両者で共有することで
+判定基準を揃えている。回帰テスト: `tests/unit/test_compare_dxf.py`
+（`test_mtext_differing_format_codes_treated_as_unchanged` / `test_mtext_genuinely_different_text_is_detected`）。
+
+> 注: 全角/半角の中黒（`・` U+30FB vs `･` U+FF65）等、**コードポイントが異なる文字**は
+> フォーマットコードではないため除去されず、diff_labels・差分DXF の双方で差分として
+> 検出される（両者とも NFKC 正規化はしていないため挙動が一致する）。
+
 ### 8.6 `compare_dxf_files_and_generate_dxf(file_a, file_b, ...)`
 
 メインの差分比較関数。
@@ -2053,13 +2076,22 @@ BASE_DIR = Path("/Users/ryozo/Dropbox/Client/ULVAC/ElectricDesignManagement/Tool
 
 ---
 
-*最終更新: 2026-07-08（差分DXFの UNCHANGED レイヤーに、図面上は見えない文字列（重なった
-旧タイトルブロック・改訂履歴メモ・旧図番等）が描画される不具合を修正。`compare_dxf.py` の
+*最終更新: 2026-07-08（差分DXF（`compare_dxf.py`）の2件の不具合を修正。回帰テスト
+`tests/unit/test_compare_dxf.py` を新設（6件 全パス）。
+
+(1) **非表示レイヤーのエンティティ除外**: 差分DXFの UNCHANGED レイヤーに、図面上は見えない
+文字列（重なった旧タイトルブロック・改訂履歴メモ・旧図番等）が描画される不具合。
 `EntityExpander` が off/frozen（非表示）レイヤー上のエンティティも比較対象に含めていたため、
 新旧同一の不可視エンティティが UNCHANGED として出力されていた。抽出段階でレイヤー可視性を
-判定し off/frozen レイヤーの図形を除外するようにした（実データ EE2505-611-79B_vs_79A で
-不可視テキスト261件を除外、可視図形の差分は不変）。回帰テスト `tests/unit/test_compare_dxf.py`
-を追加（4件 全パス））*
+判定し off/frozen レイヤーの図形を除外（実データ EE2505-611-79B_vs_79A で不可視テキスト261件を
+除外、可視図形の差分は不変）。
+
+(2) **MTEXT フォーマットコードの署名正規化**: 見た目・本文が同一の MTEXT ラベルが大量に
+DELETED＋ADDED として誤判定され、同じペアの diff_labels.xlsx（変化なし）と食い違う不具合。
+署名生成が MTEXT の生 `text_content`（`\W` 幅係数・`\T` 文字間隔コード込み）を使っており、
+これらが改訂時に僅かに再計算されるため同一ラベルが別署名になっていた。diff_labels と同じ
+`clean_mtext_format_codes()` でコード除去してから署名に含めるようにした（実データ
+EE6588-405C_vs_405B で偽差分 DELETED 318→15・ADDED 332→29、diff_labels の変更18行と整合）。）*
 
 *過去の更新: 2026-06-24（保守性向上のためのリファクタリング。`app.py`（2275行）に蓄積していた
 streamlit非依存のロジックをモデル層へ分離（動作変更なし）。新設 `utils/master_ledger.py`

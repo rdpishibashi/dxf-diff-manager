@@ -19,13 +19,27 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 import ezdxf
 
-from utils.compare_dxf import ToleranceConfig, CoordinateTransformer, EntityExpander
+from utils.compare_dxf import (
+    ToleranceConfig, CoordinateTransformer, EntityExpander,
+    SignatureGenerator, DiffAnalyzer,
+)
 
 
 def _make_expander():
     tol = ToleranceConfig(0.01)
     transformer = CoordinateTransformer(tol, debug=False)
     return EntityExpander(transformer, debug=False)
+
+
+def _diff_counts(doc_old, doc_new):
+    """2ドキュメントを比較し (deleted, added, unchanged) の署名数を返す。"""
+    tol = ToleranceConfig(0.01)
+    tr = CoordinateTransformer(tol, debug=False)
+    da = DiffAnalyzer(SignatureGenerator(tr, debug=False), debug=False)
+    ea, _, _, _ = da.extract_entities_from_doc(doc_old, "A", EntityExpander(tr))
+    eb, _, _, _ = da.extract_entities_from_doc(doc_new, "B", EntityExpander(tr))
+    sa, sb = set(ea), set(eb)
+    return len(sa - sb), len(sb - sa), len(sa & sb)
 
 
 def _texts_from_expansion(doc):
@@ -111,6 +125,45 @@ def test_visible_content_preserved():
     texts = _texts_from_expansion(doc)
     assert 'DEFAULT_LAYER0' in texts
     assert 'ON_VISIBLE' in texts
+
+
+# --- MTEXT フォーマットコードの署名正規化 ---
+
+def test_mtext_differing_format_codes_treated_as_unchanged():
+    """同じ見た目・同じ位置の MTEXT が、\\W 幅係数・\\T 文字間隔コードだけ異なる場合に
+    UNCHANGED と判定される（DELETED+ADDED の偽差分を出さない）。
+
+    実データ EE6588-405C_vs_405B で、改訂時に再計算された \\W/\\T の僅差により
+    同一ラベル約313件が DELETED+ADDED に誤判定された不具合の回帰テスト。
+    diff_labels.xlsx は plain_mtext でこれらを除去済みのため変化なしと出るのに、
+    差分DXFだけ大量の偽差分が出ていた。
+    """
+    old = ezdxf.new()
+    old.modelspace().add_mtext('EE6588-405', dxfattribs={'insert': (10, 20)}).text = \
+        r'\A1;\W0.892749;\T0.892749;EE6588-405'
+    new = ezdxf.new()
+    new.modelspace().add_mtext('EE6588-405', dxfattribs={'insert': (10, 20)}).text = \
+        r'\A1;\W0.883176;\T0.883176;EE6588-405'
+
+    deleted, added, unchanged = _diff_counts(old, new)
+    assert deleted == 0, f"偽の DELETED が出た: {deleted}"
+    assert added == 0, f"偽の ADDED が出た: {added}"
+    assert unchanged == 1
+
+
+def test_mtext_genuinely_different_text_is_detected():
+    """フォーマットコード除去後の本文が異なる MTEXT は、正しく差分として検出される
+    （過剰な同一視で本物の変更を見逃さない）。"""
+    old = ezdxf.new()
+    old.modelspace().add_mtext('x', dxfattribs={'insert': (10, 20)}).text = \
+        r'\A1;\W0.9;\T0.9;EE6588-405B'
+    new = ezdxf.new()
+    new.modelspace().add_mtext('x', dxfattribs={'insert': (10, 20)}).text = \
+        r'\A1;\W0.9;\T0.9;EE6588-405C'
+
+    deleted, added, unchanged = _diff_counts(old, new)
+    assert deleted == 1
+    assert added == 1
 
 
 def _run_all():

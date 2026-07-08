@@ -12,6 +12,8 @@ import tempfile
 import os
 import gc
 
+from .extract_labels import clean_mtext_format_codes
+
 # 高精度計算設定
 getcontext().prec = 50
 
@@ -521,8 +523,21 @@ class SignatureGenerator:
             # テキスト内容
             text_content = absolute_entity.get('text_content')
             if text_content and text_content.strip():
-                clean_text = text_content.strip().replace('\n', '').replace('\r', '')
-                signature_parts.append(f"text_{clean_text}")
+                # MTEXT はフォーマットコード（\W 幅係数・\T 文字間隔・\A 揃え等）を
+                # 除去してから署名に含める。これらは描画上の書式であり、改訂時に同一
+                # ラベルでも僅かに再計算されることがある。生の text_content を使うと、
+                # 見た目・文字内容が同一のラベルが新旧で別署名になり、DELETED+ADDED に
+                # 大量誤判定される（diff_labels.xlsx は plain_mtext で同コードを除去済みの
+                # ため「変化なし」と出るのに、差分DXFだけ大量の偽差分が出る不整合の原因。
+                # 実データ EE6588-405C_vs_405B で確認: 偽の DELETED/ADDED 約313件が
+                # フォーマットコード差に起因していた）。diff_labels と同じ
+                # clean_mtext_format_codes を用いて両者の判定基準を揃える。
+                if entity_type == 'MTEXT':
+                    clean_text = clean_mtext_format_codes(text_content)
+                else:
+                    clean_text = text_content.strip().replace('\n', '').replace('\r', '')
+                if clean_text:
+                    signature_parts.append(f"text_{clean_text}")
             
             # ATTRIB固有情報
             if entity_type == 'ATTRIB':
