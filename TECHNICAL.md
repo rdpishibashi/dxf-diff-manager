@@ -69,7 +69,7 @@ DXF-diff-manager/
 │   ├── label_diff.py         # ラベル差分計算・Excelワークブック生成
 │   └── common_utils.py       # 共通ユーティリティ（ファイル保存・エラー処理）
 ├── tests/
-│   ├── unit/                 # モデル層のユニットテスト（test_pairing.py / test_master_ledger.py）
+│   ├── unit/                 # モデル層のユニットテスト（test_pairing.py / test_master_ledger.py / test_compare_dxf.py）
 │   └── regression/           # 回帰テスト（RevUp/流用ペアリング・完全新規図面）
 └── .streamlit/
     └── config.toml           # Streamlit設定
@@ -1322,6 +1322,30 @@ def _expand_insert_recursive(self, doc, insert_entity, transform_matrix, expande
 これにより、ネストブロック内の実体（LINE等）が UNCHANGED/ADDED/DELETED の各レイヤーに
 正しく展開・分類されるようになった。
 
+**非表示レイヤー（off/frozen）のエンティティ除外（2026-07 追加）**:
+
+`expand_insert_entities()` の先頭で対象 doc のレイヤー可視性マップ
+（`_build_layer_visibility()`：レイヤー名 → `off でも frozen でもない` か）を構築し、
+**off または frozen なレイヤー上のエンティティを抽出対象から除外**する。off/frozen な
+レイヤーの図形は図面に表示されないため、ビジュアル差分は「見えている図形」だけを比較
+すべきという方針に基づく。除外は3箇所で行う:
+
+1. modelspace 直下のエンティティ: 自身のレイヤーが off/frozen なら除外
+2. modelspace 直下の INSERT: INSERT 自身のレイヤーが off/frozen なら参照全体を展開せず除外
+3. ブロック定義内のエンティティ（`_expand_insert_recursive`）: エンティティ自身が明示的な
+   off/frozen レイヤー上にあれば、参照元 INSERT が可視でも除外
+
+レイヤー `'0'` はブロック参照のレイヤーを継承するため常に可視扱いとし（`_is_layer_visible()`）、
+参照元 INSERT 側の可視性は上記2で別途判定する。未知レイヤー・判定不能時も安全側で可視扱い。
+
+この対策が無い場合、重なった旧タイトルブロック・改訂履歴メモ・旧図番テキスト等が
+off/frozen レイヤーに残っている DXF で、**新旧同一の不可視テキストが UNCHANGED として
+差分DXFに描画される**不具合が起きる（実データ `EE2505-611-79B_vs_79A` で確認: ブロック
+`JZB_0004` の MTEXT `EE2505-611-57B` / `Parts revised/KURIHARA` 等が off+frozen レイヤー上に
+あり、差分DXFの UNCHANGED レイヤーに図面上は見えない文字列として出力されていた。修正後は
+これら261件の不可視エンティティが UNCHANGED から除外され、可視図形の差分 ADDED=28/DELETED=79 は
+不変）。回帰テスト: `tests/unit/test_compare_dxf.py`。
+
 **ローカル属性キャッシュ（`safe_get_dxf_attributes()`、2026-06 追加、Step 4 高速化）**:
 
 同じブロックが多数の INSERT から参照される手描き回路図（記号の繰り返し配置）では、
@@ -2029,7 +2053,15 @@ BASE_DIR = Path("/Users/ryozo/Dropbox/Client/ULVAC/ElectricDesignManagement/Tool
 
 ---
 
-*最終更新: 2026-06-24（保守性向上のためのリファクタリング。`app.py`（2275行）に蓄積していた
+*最終更新: 2026-07-08（差分DXFの UNCHANGED レイヤーに、図面上は見えない文字列（重なった
+旧タイトルブロック・改訂履歴メモ・旧図番等）が描画される不具合を修正。`compare_dxf.py` の
+`EntityExpander` が off/frozen（非表示）レイヤー上のエンティティも比較対象に含めていたため、
+新旧同一の不可視エンティティが UNCHANGED として出力されていた。抽出段階でレイヤー可視性を
+判定し off/frozen レイヤーの図形を除外するようにした（実データ EE2505-611-79B_vs_79A で
+不可視テキスト261件を除外、可視図形の差分は不変）。回帰テスト `tests/unit/test_compare_dxf.py`
+を追加（4件 全パス））*
+
+*過去の更新: 2026-06-24（保守性向上のためのリファクタリング。`app.py`（2275行）に蓄積していた
 streamlit非依存のロジックをモデル層へ分離（動作変更なし）。新設 `utils/master_ledger.py`
 （`load_parent_child_master`/`update_parent_child_master`/`create_empty_master_df`/
 `save_master_to_bytes`）、新設 `utils/diff_export.py`（`create_diff_zip()`。内部の

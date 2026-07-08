@@ -179,6 +179,40 @@ class EntityExpander:
         # メモ化する。transform_entity_to_absolute() 側は常に .copy() してから
         # 座標変換するため、このキャッシュの中身が書き換わることはない。
         self._local_attrs_cache: Dict[int, Dict] = {}
+        # レイヤー名 → 表示されるか（off でも frozen でもない）のマップ。
+        # expand_insert_entities() の先頭で対象 doc から構築する。
+        self._layer_visible: Dict[str, bool] = {}
+
+    def _build_layer_visibility(self, doc) -> None:
+        """レイヤー名 → 可視（off でも frozen でもない）かのマップを構築する。
+
+        off/frozen なレイヤー上のエンティティは図面に表示されない。ビジュアル差分は
+        「見えている図形」を比較対象とすべきなので、これらを抽出段階で除外するために使う。
+        重なった旧タイトルブロックや改訂履歴メモ等が off/frozen レイヤーに残っている
+        DXF で、新旧同一の不可視テキストが UNCHANGED として差分DXFに描画される不具合の対策
+        （実データ EE2505-611-79B_vs_79A で確認: ブロック JZB_0004 の MTEXT
+        'EE2505-611-57B' 等が off+frozen レイヤー上にあった）。
+        """
+        vis = {}
+        try:
+            for layer in doc.layers:
+                try:
+                    vis[layer.dxf.name] = not (layer.is_off() or layer.is_frozen())
+                except Exception:
+                    vis[layer.dxf.name] = True  # 判定不能時は表示扱い（安全側）
+        except Exception:
+            pass
+        self._layer_visible = vis
+
+    def _is_layer_visible(self, layer_name) -> bool:
+        """レイヤーが表示される（off/frozen でない）か。未知レイヤー・'0' は表示扱い。
+
+        '0' はブロック参照のレイヤーを継承するため、ここでは表示扱いにし、
+        参照元 INSERT のレイヤー可視性は呼び出し側で別途判定する。
+        """
+        if not layer_name or layer_name == '0':
+            return True
+        return self._layer_visible.get(layer_name, True)
 
     def safe_get_dxf_attributes(self, entity) -> Dict:
         """安全なDXF属性取得（変換行列に依存しないローカル属性。エンティティ単位でキャッシュする）"""
@@ -362,11 +396,18 @@ class EntityExpander:
         （ブロック内にさらにINSERTがある「ネストINSERT」も再帰的に展開する）"""
         expanded_entities = []
 
+        # off/frozen レイヤー上のエンティティ（＝図面に表示されない）を除外するための
+        # レイヤー可視性マップを構築する。
+        self._build_layer_visibility(doc)
+
         msp = doc.modelspace()
         for entity in msp:
             entity_type = entity.dxftype()
 
             if entity_type == 'INSERT':
+                # INSERT 自身が off/frozen レイヤーにあれば、その参照全体が表示されない
+                if not self._is_layer_visible(getattr(entity.dxf, 'layer', '0')):
+                    continue
                 try:
                     transform_matrix = self.transformer.create_transformation_matrix(entity)
                     self._expand_insert_recursive(doc, entity, transform_matrix, expanded_entities)
@@ -374,7 +415,9 @@ class EntityExpander:
                     logger.warning(f"Error expanding INSERT {entity.dxf.name}: {e}")
 
             elif entity_type != 'ATTDEF':
-                # 直接エンティティ
+                # 直接エンティティ（off/frozen レイヤーなら表示されないので除外）
+                if not self._is_layer_visible(getattr(entity.dxf, 'layer', '0')):
+                    continue
                 identity_matrix = np.eye(4)
                 absolute_entity = self.transform_entity_to_absolute(entity, identity_matrix)
                 if absolute_entity:
@@ -402,6 +445,13 @@ class EntityExpander:
 
         for block_entity in block:
             if block_entity.dxftype() == 'ATTDEF':
+                continue
+
+            # ブロック定義内エンティティが明示的な off/frozen レイヤー上にある場合、
+            # 参照元 INSERT のレイヤーに関わらず図面に表示されないため除外する。
+            # レイヤー '0' は INSERT のレイヤーを継承する（呼び出し前に INSERT 側の
+            # 可視性は確認済みなので表示扱いでよい）。
+            if not self._is_layer_visible(getattr(block_entity.dxf, 'layer', '0')):
                 continue
 
             if block_entity.dxftype() == 'INSERT':
