@@ -169,6 +169,31 @@ def update_parent_child_master(master_df, new_pairs):
     return updated_df, added_count
 
 
+def make_dataframe_arrow_compatible(df):
+    """object 型カラムに数値と文字列が混在した DataFrame を Arrow 互換にした
+    表示用コピーを返す（元の df は変更しない）。
+
+    図面管理台帳のエントリ数カラム（Deleted Entities 等）は、完全新規図面の行で
+    'n/a' 文字列、通常のペアの行で整数、という混在 object カラムになる（この
+    'n/a' 混在は本モジュールの update_parent_child_master が付与する仕様）。これを
+    そのまま st.dataframe に渡すと pyarrow が先頭値から列型を int と推測し、後続の
+    'n/a' で変換に失敗して警告（トレースバック）をログ出力する。表示のみの問題で
+    Streamlit が自動フォールバックするため機能は動くが、ログを汚すため事前に
+    混在カラムの非NULL値を文字列へ統一しておく。数値のみ・文字列のみ・日時などの
+    純粋なカラムはそのまま（数値の右寄せ表示等を保つため）。
+    """
+    display_df = df.copy()
+    for col in display_df.columns:
+        if display_df[col].dtype != object:
+            continue
+        non_null = [v for v in display_df[col] if not pd.isna(v)]
+        has_str = any(isinstance(v, str) for v in non_null)
+        has_non_str = any(not isinstance(v, str) for v in non_null)
+        if has_str and has_non_str:
+            display_df[col] = display_df[col].map(lambda v: v if pd.isna(v) else str(v))
+    return display_df
+
+
 def create_empty_master_df():
     """空の図面管理台帳DataFrameを作成（図面管理台帳.xlsx のフォーマットに準拠）"""
     return pd.DataFrame({

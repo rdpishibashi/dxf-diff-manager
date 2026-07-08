@@ -25,6 +25,7 @@ from utils.master_ledger import (
     update_parent_child_master,
     create_empty_master_df,
     save_master_to_bytes,
+    make_dataframe_arrow_compatible,
 )
 from utils.diff_export import create_diff_zip, DIFF_LABELS_FILENAME, UNCHANGED_LABELS_FILENAME
 
@@ -143,66 +144,6 @@ def extract_source_number_from_dest_file(uploaded_file):
 
     except Exception as e:
         st.error(f"ファイル {uploaded_file.name} の処理中にエラーが発生しました: {str(e)}")
-        return None
-
-
-def extract_drawing_info_from_file(uploaded_file):
-    """
-    アップロードされたDXFファイルから図面番号情報を抽出する
-
-    Args:
-        uploaded_file: アップロードファイル・オブジェクト
-
-    Returns:
-        dict or None
-    """
-    try:
-        file_hash = hashlib.sha256(uploaded_file.getbuffer()).hexdigest()
-        temp_path = save_uploadedfile(uploaded_file)
-
-        cache = st.session_state.get('drawing_info_cache', {})
-        cached_info = cache.get(file_hash)
-
-        if cached_info:
-            info = dict(cached_info)
-        else:
-            _, info = extract_labels(
-                temp_path,
-                filter_non_parts=False,
-                sort_order="none",
-                debug=False,
-                selected_layers=None,
-                validate_ref_designators=False,
-                extract_drawing_numbers_option=True,
-                extract_title_option=True,
-                original_filename=uploaded_file.name
-            )
-
-        main_drawing = info.get('main_drawing_number')
-        if not main_drawing:
-            main_drawing = Path(uploaded_file.name).stem
-
-        result = {
-            'filename': uploaded_file.name,
-            'temp_path': temp_path,
-            'main_drawing_number': main_drawing,
-            'source_drawing_number': info.get('source_drawing_number'),
-            'title': info.get('title'),
-            'subtitle': info.get('subtitle'),
-            'file_hash': file_hash
-        }
-
-        if not cached_info:
-            cache[file_hash] = {
-                key: value for key, value in result.items()
-                if key not in ('filename', 'temp_path')
-            }
-            st.session_state.drawing_info_cache = cache
-
-        return result
-
-    except Exception as e:
-        st.error(f"ファイル {uploaded_file.name} の図番抽出中にエラーが発生しました: {str(e)}")
         return None
 
 
@@ -630,14 +571,15 @@ def render_pair_list():
 
 def render_preview_dataframe(df, key_prefix):
     """プレビュー用データフレームの列幅を調整して表示"""
+    display_df = make_dataframe_arrow_compatible(df)
     column_config = {
         col: st.column_config.Column(col, width="small")
         if col in ("Coordinate X", "Coordinate Y", "Count")
         else st.column_config.Column(col)
-        for col in df.columns
+        for col in display_df.columns
     }
     st.dataframe(
-        df,
+        display_df,
         width='stretch',
         hide_index=True,
         column_config=column_config,
@@ -662,7 +604,8 @@ def process_all_uploaded_files(groups):
             - upload_key_name: アップロードキーのsession_state名
             - failures_key: 失敗ファイルリストのsession_state名
             - summary_key: サマリーのsession_state名
-            - extractor: (省略可) ファイル情報抽出関数。省略時は extract_drawing_info_from_file
+            - extractor: ファイル情報抽出関数（_extract_by_filename /
+                         extract_source_number_from_dest_file のいずれか）
 
     Returns:
         bool: いずれかのファイルが処理されたかどうか
@@ -686,7 +629,7 @@ def process_all_uploaded_files(groups):
     group_results = {id(g): {'processed': 0, 'failed': []} for _, g in all_items}
 
     for idx, (uploaded_file, group) in enumerate(all_items, start=1):
-        extractor = group.get('extractor', extract_drawing_info_from_file)
+        extractor = group['extractor']
         file_info = extractor(uploaded_file)
         gid = id(group)
         if file_info:
