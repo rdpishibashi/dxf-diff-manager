@@ -71,6 +71,14 @@ def update_parent_child_master(master_df, new_pairs):
     entity_count_columns = ['Deleted Entities', 'Added Entities', 'Diff Entities',
                             'Unchanged Entities', 'Total Entities']
 
+    # アップロードされた既存台帳で、まだ完全新規図面（"n/a"）の行が一度も無い場合、
+    # pandas はエントリ数カラムを float64 として読み込む。この状態のカラムへ後段で
+    # "n/a" 文字列を代入すると FutureWarning（将来的には TypeError）になるため、
+    # 更新前に object dtype へ統一しておく（2026-07 追加。値は変えない）。
+    for col in entity_count_columns:
+        if col in updated_df.columns and updated_df[col].dtype != object:
+            updated_df[col] = updated_df[col].astype(object)
+
     for pair in new_pairs:
         parent = pair.get('source_drawing')  # 流用元図番がParent
         child = pair.get('main_drawing')      # 図番がChild

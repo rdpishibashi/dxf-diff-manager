@@ -591,6 +591,8 @@ def update_parent_child_master(master_df, new_pairs):
 
 **動的カラム追加の仕組み**: 古い台帳（`Date` カラム等）との後方互換性のため、カラムが存在しない場合は `pd.Series(dtype='object')` で動的追加する。エンティティ数カラムも `pd.Series(dtype='object')` で追加する（2026-06 変更。以前は `Int64` だったが、完全新規図面の行に `"n/a"` 文字列を書き込めるよう object dtype に変更した）。
 
+**既存カラムが数値型（float64）で読み込まれた場合の dtype 統一（2026-07 追加）**: 上記の動的追加は「カラムが存在しない場合」のみを扱う。既存の台帳（アップロードされたExcel、または `"n/a"` 行が一度も無い状態で作られた台帳）でエンティティ数カラムに `"n/a"` 行が1件も無いと、`pd.read_excel()` はそのカラムを `float64` として読み込む。この状態のカラムへ `updated_df.loc[mask, col] = 'n/a'` で文字列を代入すると `FutureWarning`（"Setting an item of incompatible dtype... will raise an error in a future version of pandas"）が発生する——現状は警告のみで動作は変わらないが、将来の pandas バージョンでは例外化される。`update_parent_child_master()` の冒頭（`updated_df = master_df.copy()` の直後）でエンティティ数カラムが `object` dtype でなければ明示的に `astype(object)` へ統一することでこれを防いでいる（値は変えない）。回帰テスト: `tests/unit/test_master_ledger.py` の `test_update_parent_child_master_no_futurewarning_setting_na_on_numeric_column`（`warnings.simplefilter('error', FutureWarning)` で警告を例外に昇格させて検証）。
+
 **完全新規図面（Parentなし）の登録ルール（2026-06 追加）**: `is_brand_new = not parent` の行は、比較を行っていない（流用元が存在しない）ため、以下の固定ルールでエンティティ数列を書き込む。
 - `Deleted Entities` / `Diff Entities` / `Unchanged Entities` → 文字列 `"n/a"`（比較不可を明示）
 - `Added Entities` = `Total Entities` = その図面単独の総エンティティ数（`count_entities_in_dxf_file()` で算出。`entity_counts` が未確定の段階（pair-list作成直後の先行登録）では両方とも未設定のまま＝NaN）
@@ -2141,7 +2143,11 @@ BASE_DIR = Path("/Users/ryozo/Dropbox/Client/ULVAC/ElectricDesignManagement/Tool
 
 ---
 
-*最終更新: 2026-07-09（台帳出力の Diff List シートを `Child` 列の昇順でソートするよう変更
+*最終更新: 2026-07-10（`update_parent_child_master()` で、既存台帳のエンティティ数カラムが
+float64 のまま `"n/a"` を代入すると出ていた pandas FutureWarning を、関数冒頭での object dtype
+統一で解消）*
+
+*過去の更新: 2026-07-09（台帳出力の Diff List シートを `Child` 列の昇順でソートするよう変更
 （`save_master_to_bytes()`）。Step4「オプション設定」の表示順を「移動しただけのラベルを差分から
 除外」→「色だけが異なる図形は変更なし扱いにする」→「機器符号妥当性チェック」→座標マージン→
 未変更ラベルプレフィックスに変更（`app.py` col1 内の並び替えのみ、ロジック変更なし）)*

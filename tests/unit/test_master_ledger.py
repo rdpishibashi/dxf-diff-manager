@@ -63,6 +63,39 @@ def test_update_parent_child_master_skips_pair_without_child():
     assert len(updated) == 0
 
 
+def test_update_parent_child_master_no_futurewarning_setting_na_on_numeric_column():
+    """完全新規図面の先行登録（entity_counts 未確定 → 数値カラムが NaN のみで
+    float64 として残る）の後、create_diff_zip() 側の2回目の update 呼び出しで
+    実際のエンティティ数を書き込む際、同じ行の 'Deleted/Diff/Unchanged Entities'
+    に "n/a" 文字列を代入する（既存レコード更新パス、utils/master_ledger.py の
+    元の行141）。台帳を Excel 経由で読み込んだ場合など、この時点でカラムが
+    まだ float64 のままだと pandas FutureWarning（将来 TypeError 化予定）が出て
+    いた。警告を例外に昇格させ、出ないことを確認する回帰テスト。"""
+    import warnings
+
+    master_df = pd.DataFrame({
+        'Child': ['B1'], 'Parent': ['none'], 'Relation': ['完全新規図面'],
+        'Title': [None], 'Subtitle': [None], 'Recorded Date': [None], 'Note': [None],
+        'Deleted Entities': [float('nan')], 'Added Entities': [float('nan')],
+        'Diff Entities': [float('nan')], 'Unchanged Entities': [float('nan')],
+        'Total Entities': [float('nan')],
+    })
+    assert master_df['Deleted Entities'].dtype != object  # 前提: NaNのみで float64
+
+    brand_new_pair = {
+        'main_drawing': 'B1', 'source_drawing': None, 'relation': '完全新規図面',
+        'title': None, 'subtitle': None,
+        'entity_counts': {'added_entities': 6, 'total_entities': 6},
+    }
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', FutureWarning)
+        updated, added_count = update_parent_child_master(master_df, [brand_new_pair])
+    assert added_count == 0  # 既存レコードの更新
+    row = updated[updated['Child'] == 'B1'].iloc[0]
+    assert row['Deleted Entities'] == 'n/a'
+    assert row['Added Entities'] == 6
+
+
 def test_update_parent_child_master_existing_record_relation_changed_suffix():
     master_df = create_empty_master_df()
     first = {'main_drawing': 'B1', 'source_drawing': 'A1', 'relation': '流用'}
