@@ -326,8 +326,11 @@ def save_master_to_bytes(master_df, pairs=None, mode=None, total_drawings_count=
         summary_ws.write(row, 0, '流用率 [%]', label_fmt)
         summary_ws.write(row, 1, reuse_rate, pct_fmt)
 
-        # --- Diff List シート ---
-        master_df.to_excel(writer, sheet_name='Diff List', index=False)
+        # --- Diff List シート（Child で昇順ソート） ---
+        diff_list_df = master_df
+        if 'Child' in master_df.columns:
+            diff_list_df = master_df.sort_values('Child', kind='stable', na_position='last')
+        diff_list_df.to_excel(writer, sheet_name='Diff List', index=False)
 
     output.seek(0)
     return output.getvalue()

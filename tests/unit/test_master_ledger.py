@@ -208,6 +208,24 @@ def test_save_master_to_bytes_returns_nonempty_excel():
     assert isinstance(data, bytes) and len(data) > 0
 
 
+def test_save_master_to_bytes_sorts_diff_list_by_child():
+    """Diff List シートは Child 列の昇順（ABC順）でソートされる。"""
+    master_df = create_empty_master_df()
+    for i, child in enumerate(['EE3273-608-32B', 'EE3273-608-24B', 'DE5313-008-02A']):
+        master_df.loc[i] = {
+            'Child': child, 'Parent': 'none', 'Relation': '完全新規図面',
+            'Title': None, 'Subtitle': None, 'Recorded Date': None, 'Note': None,
+            'Deleted Entities': 'n/a', 'Added Entities': 1, 'Diff Entities': 'n/a',
+            'Unchanged Entities': 'n/a', 'Total Entities': 1,
+        }
+
+    data = save_master_to_bytes(master_df, pairs=[], mode='pair_list', total_drawings_count=3)
+    diff_list_df = pd.read_excel(pd.io.common.BytesIO(data), sheet_name='Diff List')
+    assert list(diff_list_df['Child']) == ['DE5313-008-02A', 'EE3273-608-24B', 'EE3273-608-32B']
+    # 元の master_df は変更されない（呼び出し元の順序に副作用を与えない）
+    assert list(master_df['Child']) == ['EE3273-608-32B', 'EE3273-608-24B', 'DE5313-008-02A']
+
+
 def test_save_master_to_bytes_handles_na_entity_strings():
     """完全新規図面の 'n/a' 文字列が混在してもサマリー合計でエラーにならない。"""
     master_df = create_empty_master_df()

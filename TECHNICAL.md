@@ -1896,6 +1896,8 @@ AutoCADカラーインデックス（ACI）: 1=赤, 2=黄, 3=緑, 4=シアン, 5
 
 図面管理台帳データ。全カラム構成は [Section 3.1](#31-図面管理台帳) 参照。
 
+**行の並び順（2026-07 追加）**: `Child` 列の昇順（ABC順）でソートして出力する（`save_master_to_bytes()` 内、`master_df.sort_values('Child', kind='stable', na_position='last')`）。ソートは出力用のコピーに対してのみ行い、呼び出し元が保持する `master_df` 自体の行順は変更しない。同一 `Child` に対して RevUp・流用など複数の関係行が存在する場合（[Section 11](#11-既知のハマりポイントと対策) 参照）も `Child` を主キーにまとめて隣接表示される。回帰テスト: `tests/unit/test_master_ledger.py` の `test_save_master_to_bytes_sorts_diff_list_by_child`。
+
 ---
 
 ## 13. プロジェクト間 utils 同期戦略
@@ -2139,7 +2141,8 @@ BASE_DIR = Path("/Users/ryozo/Dropbox/Client/ULVAC/ElectricDesignManagement/Tool
 
 ---
 
-*最終更新: 2026-07-09（Step4「オプション設定」の表示順を「移動しただけのラベルを差分から
+*最終更新: 2026-07-09（台帳出力の Diff List シートを `Child` 列の昇順でソートするよう変更
+（`save_master_to_bytes()`）。Step4「オプション設定」の表示順を「移動しただけのラベルを差分から
 除外」→「色だけが異なる図形は変更なし扱いにする」→「機器符号妥当性チェック」→座標マージン→
 未変更ラベルプレフィックスに変更（`app.py` col1 内の並び替えのみ、ロジック変更なし）)*
 
