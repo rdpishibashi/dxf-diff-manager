@@ -2,6 +2,7 @@ import streamlit as st
 import os
 import re
 import sys
+import traceback
 from pathlib import Path
 import zipfile
 from io import BytesIO
@@ -17,7 +18,7 @@ utils_path = os.path.join(current_dir, 'utils')
 sys.path.insert(0, utils_path)
 
 from utils.extract_labels import extract_labels
-from utils.common_utils import save_uploadedfile, handle_error, cleanup_stale_temp_files
+from utils.common_utils import save_uploadedfile, cleanup_stale_temp_files
 from utils import pairing
 from utils.pairing import build_pairs, build_pairs_from_list, primary_status_by_drawing
 from utils.master_ledger import (
@@ -30,7 +31,7 @@ from utils.master_ledger import (
 from utils.diff_export import create_diff_zip, DIFF_LABELS_FILENAME, UNCHANGED_LABELS_FILENAME
 
 # 設定をインポート
-from config import ui_config, diff_config, extraction_config, help_text
+from config import ui_config, diff_config, help_text
 
 st.set_page_config(
     page_title="DXF Diff Manager",
@@ -1348,7 +1349,8 @@ def render_step3_diff(complete_pairs):
                 gc.collect()
 
             except Exception as e:
-                handle_error(e)
+                st.error(f"エラーが発生しました: {str(e)}")
+                st.error(traceback.format_exc())
                 gc.collect()
             finally:
                 progress_placeholder.empty()
@@ -1564,7 +1566,6 @@ def app():
     # ペアリング方式の選択（プログラム説明の直後）
     prev_mode = st.session_state.step1_mode
     with st.container(border=True):
-#        st.markdown("#### :gear: ペアリング方式の選択")
         st.markdown("### ペアリング方式の選択")
         st.caption("方式によってDXFファイルのアップロード方法が変わります")
         mode = st.radio(

@@ -1,7 +1,6 @@
 import os
 import tempfile
 import time
-import traceback
 import re
 
 # このアプリが作成する一時ファイルの識別用prefix。
@@ -39,14 +38,6 @@ def cleanup_stale_temp_files(max_age_seconds=3 * 60 * 60):
                 pass  # 他プロセスが使用中などのエラーは無視
     except Exception:
         pass
-
-def handle_error(e, show_traceback=True):
-    """エラーを適切に処理して表示する"""
-    import streamlit as st
-    st.error(f"エラーが発生しました: {str(e)}")
-    if show_traceback:
-        st.error(traceback.format_exc())
-
 
 def filter_non_circuit_symbols(labels, debug=False):
     """機器符号フォーマットに一致しないラベルをフィルタリングする"""
