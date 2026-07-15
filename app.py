@@ -12,23 +12,23 @@ import gc
 import hashlib
 import time
 
-# utils モジュールをインポート可能にするためのパスの追加
+# model モジュールをインポート可能にするためのパスの追加
 current_dir = os.path.dirname(os.path.abspath(__file__))
-utils_path = os.path.join(current_dir, 'utils')
-sys.path.insert(0, utils_path)
+model_path = os.path.join(current_dir, 'model')
+sys.path.insert(0, model_path)
 
-from utils.extract_labels import extract_labels
-from utils.common_utils import save_uploadedfile, cleanup_stale_temp_files
-from utils import pairing
-from utils.pairing import build_pairs, build_pairs_from_list, primary_status_by_drawing
-from utils.master_ledger import (
+from model.extract_labels import extract_labels
+from model.common_utils import save_uploadedfile, cleanup_stale_temp_files
+from model import pairing
+from model.pairing import build_pairs, build_pairs_from_list, primary_status_by_drawing
+from model.master_ledger import (
     load_parent_child_master,
     update_parent_child_master,
     create_empty_master_df,
     save_master_to_bytes,
     make_dataframe_arrow_compatible,
 )
-from utils.diff_export import create_diff_zip, DIFF_LABELS_FILENAME, UNCHANGED_LABELS_FILENAME
+from model.diff_export import create_diff_zip, DIFF_LABELS_FILENAME, UNCHANGED_LABELS_FILENAME
 
 # 設定をインポート
 from config import ui_config, diff_config, help_text
@@ -151,7 +151,7 @@ def extract_source_number_from_dest_file(uploaded_file):
 def create_pair_list(source_files_dict, dest_files_dict, progress_callback=None):
     """auto モード用ペアリング（薄いシム）。
 
-    実体は流用判定と RevUp 判定を独立実行する `utils.pairing.build_pairs`。
+    実体は流用判定と RevUp 判定を独立実行する `model.pairing.build_pairs`。
     流用元グループ・流用先グループに限定してペアを生成する。
     """
     return build_pairs(source_files_dict, dest_files_dict, progress_callback=progress_callback)
@@ -164,7 +164,7 @@ def load_pair_list(uploaded_file):
     必須カラム: 流用元図番, 流用先図番
     （旧カラム名 比較元図番/比較先図番、または Reference/Target も後方互換で受け付ける）。
     ファイル読み込み（I/O）のみを担当し、カラム名・値の正規化は
-    `utils.pairing.normalize_pair_list_columns()`（streamlit非依存）に委譲する。
+    `model.pairing.normalize_pair_list_columns()`（streamlit非依存）に委譲する。
 
     Returns:
         DataFrame or None（カラム名は 流用元図番/流用先図番 に統一）
@@ -219,7 +219,7 @@ def process_dxf_files_by_filename(uploaded_files, files_dict, upload_key_name, f
 def create_pairs_from_pair_list(pair_list_df, all_files_dict):
     """pair_list モード用ペアリング（薄いシム）。
 
-    実体は明示ペアをそのまま解決する `utils.pairing.build_pairs_from_list`。
+    実体は明示ペアをそのまま解決する `model.pairing.build_pairs_from_list`。
     RevUp の自動補完は行わない。
     """
     return build_pairs_from_list(pair_list_df, all_files_dict)
@@ -332,7 +332,7 @@ def create_pairs_from_single_pool(files_dict):
     """all_in_one モード用ペアリング（薄いシム）。
 
     実体は単一プールに対し流用判定と RevUp 判定を独立実行する
-    `utils.pairing.build_pairs`（source と target に同一プールを渡す）。
+    `model.pairing.build_pairs`（source と target に同一プールを渡す）。
     """
     return build_pairs(files_dict, files_dict)
 
@@ -375,9 +375,9 @@ def update_master_if_needed(pairs, mode=None):
 
 
 def compute_total_drawings_count(mode):
-    """Summaryシート「図面統計」の分母件数を算出する（utils.pairing の薄い呼び出し）。
+    """Summaryシート「図面統計」の分母件数を算出する（model.pairing の薄い呼び出し）。
 
-    実体は streamlit 非依存の `utils.pairing.compute_total_drawings_count()`。
+    実体は streamlit 非依存の `model.pairing.compute_total_drawings_count()`。
     本関数は session_state から必要な値を取り出して渡すだけの Driver 層アダプタ。
     """
     return pairing.compute_total_drawings_count(
@@ -390,9 +390,9 @@ def compute_total_drawings_count(mode):
 
 
 def compute_unchanged_drawings(all_pairs, mode):
-    """「変更していない図面」対象図番集合を算出する（utils.pairing の薄い呼び出し）。
+    """「変更していない図面」対象図番集合を算出する（model.pairing の薄い呼び出し）。
 
-    実体は streamlit 非依存の `utils.pairing.compute_unchanged_drawings()`。
+    実体は streamlit 非依存の `model.pairing.compute_unchanged_drawings()`。
     本関数は session_state から必要な値を取り出して渡すだけの Driver 層アダプタ。
     """
     return pairing.compute_unchanged_drawings(
@@ -403,9 +403,9 @@ def compute_unchanged_drawings(all_pairs, mode):
 
 
 def get_brand_new_drawing_pairs(all_pairs, mode):
-    """完全新規図面のペアを算出する（utils.pairing の薄い呼び出し）。
+    """完全新規図面のペアを算出する（model.pairing の薄い呼び出し）。
 
-    実体は streamlit 非依存の `utils.pairing.get_brand_new_drawing_pairs()`。
+    実体は streamlit 非依存の `model.pairing.get_brand_new_drawing_pairs()`。
     本関数は session_state から必要な値を取り出して渡すだけの Driver 層アダプタ。
     """
     return pairing.get_brand_new_drawing_pairs(

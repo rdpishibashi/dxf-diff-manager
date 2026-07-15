@@ -2,7 +2,7 @@
 図面管理台帳（Parent-Child マスター）の読み込み・更新・Excel出力（UI 非依存のモデル層）。
 
 streamlit には依存しないため、`tests/` から直接ユニットテストできる
-（`utils/pairing.py` と同じ方針）。
+（`model/pairing.py` と同じ方針）。
 """
 from io import BytesIO
 from datetime import datetime

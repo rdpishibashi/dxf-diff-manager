@@ -1,5 +1,5 @@
 """
-utils.diff_export（UI 非依存）のユニットテスト。
+model.diff_export（UI 非依存）のユニットテスト。
 
 streamlit に依存しないため app.py をインポートせず、コアを直接検証する
 （tests/unit/test_pairing.py と同じ方針）。
@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 import ezdxf
 import pandas as pd
 
-from utils.diff_export import create_diff_zip
+from model.diff_export import create_diff_zip
 
 
 def _make_pair_dxf_files(d, main_drawing, source_drawing,

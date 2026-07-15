@@ -1,5 +1,5 @@
 """
-utils.compare_dxf の EntityExpander に関するユニットテスト（UI 非依存）。
+model.compare_dxf の EntityExpander に関するユニットテスト（UI 非依存）。
 
 off/frozen（非表示）レイヤー上のエンティティが、ビジュアル差分の抽出対象から
 除外されることを検証する。重なった旧タイトルブロック・改訂履歴メモ等が
@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 import ezdxf
 
-from utils.compare_dxf import (
+from model.compare_dxf import (
     ToleranceConfig, CoordinateTransformer, EntityExpander,
     SignatureGenerator, DiffAnalyzer, compare_dxf_files_and_generate_dxf,
     count_entities_in_dxf_file,
@@ -173,7 +173,7 @@ def test_file_a_only_is_deleted_file_b_only_is_added():
     """compare_dxf_files_and_generate_dxf() は file_a のみに存在するエンティティを
     DELETED、file_b のみに存在するエンティティを ADDED として出力する契約を保証する。
 
-    呼び出し元（utils/diff_export.py）がこの契約と逆の順で新旧ファイルを渡すと、
+    呼び出し元（model/diff_export.py）がこの契約と逆の順で新旧ファイルを渡すと、
     ADDED/DELETED レイヤーの内容が入れ替わる不具合が実際に発生した（実データ
     EE4144-613-49D_vs_49C で確認: ADDED レイヤーに旧図面自身のテキスト
     'EE4144-613-49C' が、DELETED レイヤーに新図面自身のテキスト 'EE4144-613-49D' が

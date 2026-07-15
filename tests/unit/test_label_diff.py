@@ -1,5 +1,5 @@
 """
-utils.label_diff（UI 非依存）のユニットテスト。
+model.label_diff（UI 非依存）のユニットテスト。
 
 streamlit に依存しないため app.py をインポートせず、コアを直接検証する
 （tests/unit/test_pairing.py と同じ方針）。
@@ -13,7 +13,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from utils.label_diff import (
+from model.label_diff import (
     group_labels_by_coordinate,
     round_labels_with_coordinates,
     find_label_change_pairs,
@@ -108,7 +108,7 @@ def test_ignore_moved_labels_disabled_by_default_via_compute_label_differences(t
     """compute_label_differences() は ignore_moved_labels=False がデフォルト
     （既存呼び出し元の挙動を変えない）ことを、シグネチャのデフォルト値で確認する。"""
     import inspect
-    from utils.label_diff import compute_label_differences
+    from model.label_diff import compute_label_differences
     sig = inspect.signature(compute_label_differences)
     assert sig.parameters['ignore_moved_labels'].default is False
 

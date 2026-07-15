@@ -2,7 +2,7 @@
 ペアリストに基づく差分DXF・ラベル差分Excel・図面管理台帳のZIP出力（UI 非依存のモデル層）。
 
 streamlit には依存しないため、`tests/` から直接ユニットテストできる
-（`utils/pairing.py` と同じ方針）。エラー通知・進捗表示は呼び出し元から渡される
+（`model/pairing.py` と同じ方針）。エラー通知・進捗表示は呼び出し元から渡される
 コールバック（`on_error`/`progress_callback`）経由で行う。
 """
 import os
@@ -12,16 +12,16 @@ import zipfile
 from io import BytesIO
 from collections import defaultdict, Counter
 
-from utils.compare_dxf import compare_dxf_files_and_generate_dxf, count_entities_in_dxf_file, PairFileCache
-from utils.extract_labels import extract_labels
-from utils.label_diff import (
+from .compare_dxf import compare_dxf_files_and_generate_dxf, count_entities_in_dxf_file, PairFileCache
+from .extract_labels import extract_labels
+from .label_diff import (
     compute_label_differences,
     filter_unchanged_by_prefix,
     build_diff_labels_workbook,
     build_unchanged_labels_workbook,
 )
-from utils.pairing import get_brand_new_drawing_pairs
-from utils.master_ledger import update_parent_child_master, save_master_to_bytes
+from .pairing import get_brand_new_drawing_pairs
+from .master_ledger import update_parent_child_master, save_master_to_bytes
 from config import diff_config
 
 DIFF_LABELS_FILENAME = "diff_labels.xlsx"
