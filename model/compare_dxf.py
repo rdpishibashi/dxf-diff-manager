@@ -1181,7 +1181,7 @@ def compare_dxf_files_and_generate_dxf(file_a: str, file_b: str, output_file: st
     ADDED として出力する（標準的な diff の慣習: file_a=旧基準、file_b=新比較対象）。
     呼び出し元は必ず「旧図面ファイルを file_a、新図面ファイルを file_b」の順で渡すこと。
     逆にすると ADDED/DELETED レイヤーの内容が入れ替わる（2026-07 に実際に発生した不具合。
-    utils/diff_export.py の呼び出し箇所と tests/unit/test_compare_dxf.py 参照）。
+    model/diff_export.py の呼び出し箇所と tests/unit/test_compare_dxf.py 参照）。
 
     Args:
         file_a: 基準DXFファイルパス（旧図面。file_a のみに存在するエンティティが DELETED になる）

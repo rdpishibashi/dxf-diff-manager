@@ -1,5 +1,5 @@
 """
-utils.pairing コア（UI 非依存）のユニットテスト。
+model.pairing コア（UI 非依存）のユニットテスト。
 
 streamlit に依存しないため app.py をインポートせず、コアを直接検証する。
 
@@ -14,8 +14,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 import pandas as pd
 
-from utils import pairing
-from utils.pairing import (
+from model import pairing
+from model.pairing import (
     build_pairs,
     build_pairs_from_list,
     find_revup_pairs,
@@ -227,7 +227,7 @@ def test_drawings_with_status_excludes_blank_main_drawing():
 
 # --- compute_unchanged_drawings / get_brand_new_drawing_pairs (mode='auto') ---
 #
-# 2026-06: app.py から utils.pairing へ移動（session_state 直読みから引数渡しへ
+# 2026-06: app.py から model.pairing へ移動（session_state 直読みから引数渡しへ
 # 引数化）。'pair_list' モードの挙動は tests/regression/test_brand_new_drawing.py
 # で既にカバーされているため、ここでは 'auto' モード（source/dest_drawing_numbers
 # 引数を使う分岐）を確認する。

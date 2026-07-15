@@ -22,14 +22,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 import pandas as pd
 
-from utils.pairing import (
+from model.pairing import (
     build_pairs_from_list,
     compute_unchanged_drawings,
     get_brand_new_drawing_pairs,
     STATUS_NO_SOURCE_DEFINED,
     STATUS_ONE_SIDED,
 )
-from utils.master_ledger import create_empty_master_df, update_parent_child_master
+from model.master_ledger import create_empty_master_df, update_parent_child_master
 
 
 def test_target_only_row_is_no_source_defined_not_one_sided():

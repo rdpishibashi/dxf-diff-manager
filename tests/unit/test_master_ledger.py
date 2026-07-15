@@ -1,5 +1,5 @@
 """
-utils.master_ledger（UI 非依存）のユニットテスト。
+model.master_ledger（UI 非依存）のユニットテスト。
 
 streamlit に依存しないため app.py をインポートせず、コアを直接検証する
 （tests/unit/test_pairing.py と同じ方針）。
@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 import pandas as pd
 
-from utils.master_ledger import (
+from model.master_ledger import (
     load_parent_child_master,
     update_parent_child_master,
     create_empty_master_df,
@@ -67,7 +67,7 @@ def test_update_parent_child_master_no_futurewarning_setting_na_on_numeric_colum
     """完全新規図面の先行登録（entity_counts 未確定 → 数値カラムが NaN のみで
     float64 として残る）の後、create_diff_zip() 側の2回目の update 呼び出しで
     実際のエンティティ数を書き込む際、同じ行の 'Deleted/Diff/Unchanged Entities'
-    に "n/a" 文字列を代入する（既存レコード更新パス、utils/master_ledger.py の
+    に "n/a" 文字列を代入する（既存レコード更新パス、model/master_ledger.py の
     元の行141）。台帳を Excel 経由で読み込んだ場合など、この時点でカラムが
     まだ float64 のままだと pandas FutureWarning（将来 TypeError 化予定）が出て
     いた。警告を例外に昇格させ、出ないことを確認する回帰テスト。"""
