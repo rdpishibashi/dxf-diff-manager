@@ -30,6 +30,18 @@ BASE_DIR = Path("/Users/ryozo/Dropbox/Client/ULVAC/ElectricDesignManagement/Tool
 PROJECT_A = BASE_DIR / "DXF-diff-manager"
 PROJECT_B = BASE_DIR / "DXF-visual-diff"
 
+# DXF-diff-manager renamed utils/ -> model/ (2026-07-15, 3-layer refactor);
+# DXF-visual-diff still uses utils/. Look up the right subdir name per project.
+SUBDIR_BY_PROJECT = {
+    PROJECT_A: "model",
+    PROJECT_B: "utils",
+}
+
+
+def utils_subdir(project_dir: Path) -> str:
+    """Return this project's model/utils subfolder name (see SUBDIR_BY_PROJECT)."""
+    return SUBDIR_BY_PROJECT[project_dir]
+
 # Utils files to sync
 UTILS_FILES = [
     "common_utils.py",
@@ -92,8 +104,8 @@ def compare_projects() -> Tuple[str, Dict[str, Dict]]:
     project_b_score = 0
 
     for filename in UTILS_FILES:
-        file_a = PROJECT_A / "utils" / filename
-        file_b = PROJECT_B / "utils" / filename
+        file_a = PROJECT_A / utils_subdir(PROJECT_A) / filename
+        file_b = PROJECT_B / utils_subdir(PROJECT_B) / filename
 
         info_a = get_file_info(file_a)
         info_b = get_file_info(file_b)
@@ -225,12 +237,12 @@ def sync_files(master: str, dry_run: bool = False) -> List[str]:
         List of synced files
     """
     if master == "DXF-diff-manager":
-        source_dir = PROJECT_A / "utils"
-        target_dir = PROJECT_B / "utils"
+        source_dir = PROJECT_A / utils_subdir(PROJECT_A)
+        target_dir = PROJECT_B / utils_subdir(PROJECT_B)
         target_name = "DXF-visual-diff"
     else:
-        source_dir = PROJECT_B / "utils"
-        target_dir = PROJECT_A / "utils"
+        source_dir = PROJECT_B / utils_subdir(PROJECT_B)
+        target_dir = PROJECT_A / utils_subdir(PROJECT_A)
         target_name = "DXF-diff-manager"
 
     print_colored("\n" + "="*80, Color.HEADER)
@@ -280,7 +292,7 @@ def verify_syntax(project_dir: Path) -> bool:
     print_colored(f"  構文チェック: {project_dir.name}", Color.HEADER)
     print_colored("="*80, Color.HEADER)
 
-    utils_dir = project_dir / "utils"
+    utils_dir = project_dir / utils_subdir(project_dir)
     app_file = project_dir / "app.py"
 
     files_to_check = [app_file]
