@@ -327,6 +327,31 @@ all_in_one モードでは単一プール内で次の2判定を**独立して**�
 - 「差分抽出開始」ボタンをクリック
 - 処理完了後、ZIPファイルをダウンロード
 
+### ZIPファイル名の自動生成（2026-07-28）
+
+「ZIPでダウンロード」ボタン直上に、ダウンロードファイル名（拡張子なし）の編集可能な
+`st.text_input` を配置している。`compute_default_zip_basename(master_file_name,
+step1_mode, revision)`（app.py）が初期値を組み立てる:
+
+- `master_file_name` が `"{指番}_{モジュール}_{サイド}.xlsx"` 形式
+  （`MASTER_FILENAME_PATTERN` に一致。台帳を新規作成した場合、または同じ命名規則の
+  台帳をアップロードした場合）なら、
+  `dxf_diff_results_Type{A/B/C}_{指番}_{モジュール}_{サイド}_{リビジョン}` を生成する。
+  `Type{A/B/C}` は `PAIRING_TYPE_LETTERS`（`{'all_in_one': 'A', 'auto': 'B',
+  'pair_list': 'C'}`）による `step1_mode` の変換で、画面の「Type A/B/C」表記と一致させる
+  （2026-07-28、旧 `Pair{A/B/C}` 表記から変更。命名規則を消費する Ledger-merger 側は
+  新旧どちらの表記も受け付ける）。リビジョンは既定 `"01"`。
+- `master_file_name` が `None`（台帳を作成していない）、または命名規則に一致しない
+  台帳をアップロードした場合は、従来通り `dxf_diff_results` のみを返す。
+
+**編集値の保持ロジック（`zip_basename_last_default` との比較）**: 台帳モード・
+ペアリング方式が変わるたびに初期値を再計算するが、`st.session_state.zip_basename_input`
+が直前に表示した自動生成値（`zip_basename_last_default`）と一致する場合のみ新しい
+自動生成値で上書きする。一致しない（＝ユーザーが編集済み）場合は、以後シグネチャが
+変わっても上書きしない。単純に「入力欄の値と直前の signature が一致するか」で判定すると、
+ユーザーがレビジョン部分だけ手で書き換えても次の rerun で `"01"` に戻ってしまう不具合が
+あったため、この方式に変更した（2026-07-28）。
+
 ---
 
 ## 5. 設定ファイル詳解 (config.py)
@@ -467,6 +492,8 @@ from config import ui_config, diff_config, help_text
 | `processing_settings` | dict | 差分抽出時の設定（tolerance・色設定等）。結果表示時の注記に使用 |
 | `downloaded` | bool | ZIPダウンロードボタンを押したか（二重ダウンロード防止用） |
 | `diff_preview_expanded` | bool | `diff_labels.xlsx` プレビューexpanderの開閉状態。シート選択(selectbox)の `on_change` でのみ True にする（2026-06 修正。以前は expander の中身が描画される度（collapsed表示中でも毎回実行される）に無条件で True を立てていたため、初回表示から常に展開済みになる不具合があった）。「新しい差分抽出を開始」ボタンでリセットされる |
+| `zip_basename_input` | str | ZIPダウンロードファイル名（拡張子なし）の入力欄の値。`compute_default_zip_basename()` の自動生成値を初期値とし、ユーザーの編集を保持する（2026-07-28、下記「ZIPファイル名の自動生成」参照） |
+| `zip_basename_last_default` | str | 直近に自動生成して表示した初期値。`zip_basename_input` と比較して「ユーザーが編集済みか」を判定するために使う |
 
 **`diff_labels_excel_data` / `unchanged_labels_excel_data` を session_state に保持しない理由**: これらのExcelバイト列は `zip_data` の中にも同一内容で書き込まれている（`create_diff_zip()` 内で `zip_file.writestr()` 済み）。以前は両方を別々に session_state に保持していたため、出力データが実質二重に保持されメモリを圧迫していた（Streamlit Community Cloud のリソース制限超過の一因）。現在はプレビュー表示時に `read_zip_member(zip_data, filename)` で `zip_data` から都度読み出す方式に変更し、`has_diff_labels` / `has_unchanged_labels` の bool フラグのみ保持する。
 
@@ -2134,7 +2161,17 @@ BASE_DIR = Path("/Users/ryozo/Dropbox/Client/ULVAC/ElectricDesignManagement/Tool
 
 ---
 
-*最終更新: 2026-07-15（DXF-extract-labelsと同様、3層構造の明確化のため `utils/` を
+*最終更新: 2026-07-28（「ZIPでダウンロード」ボタン直上に、ダウンロードファイル名
+（拡張子なし）の編集可能な入力欄を追加。台帳モード・ペアリング方式から
+`dxf_diff_results_Type{A/B/C}_{指番}_{モジュール}_{サイド}_{リビジョン}` を自動生成
+（`compute_default_zip_basename()`）し、判定できない場合は従来通り `dxf_diff_results`
+にフォールバックする。当初 `Pair{A/B/C}` 表記で実装したが、画面の「Type A/B/C」表記と
+不一致だったため `Type{A/B/C}` に修正。また、ユーザーがレビジョン番号を編集しても
+次のrerunで初期値に戻ってしまう不具合を修正（「直前に表示した自動生成値と一致するか」で
+編集済み判定するよう変更）。この命名規則はLedger-merger側の「指番_モジュール_サイド」
+単位の集計機能が依存する。全100件pass）*
+
+*過去の更新: 2026-07-15（DXF-extract-labelsと同様、3層構造の明確化のため `utils/` を
 `model/` にリネーム（`git mv`、履歴保持）。`model/`配下の相互importは全て相対import
 （`.extract_labels`等）のためファイル内容は無変更——他プロジェクトとのバイト一致コピー
 対象（`extract_labels.py`）にも影響なし。`diff_export.py` のみ内部importが絶対import
