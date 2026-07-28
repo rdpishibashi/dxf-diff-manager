@@ -46,6 +46,31 @@ SHIBAN_PATTERN = re.compile(r'^[A-Z]{2}\d{2}-\d{4}-\d$')   # 例: AA11-1111-1
 MODULE_PATTERN = re.compile(r'^[A-Z0-9]{4}$')              # 例: XXXX（英大文字・数字）
 SIDE_PATTERN = re.compile(r'^[A-Z0-9]{3}$')                # 例: XXX（英大文字・数字）
 
+# render_step0_master() が作成する master_file_name（"{指番}_{モジュール}_{サイド}.xlsx"）
+# から指番/モジュール/サイドを逆算するためのパターン。既存台帳をアップロードした場合も
+# 同じ命名規則に従っていれば逆算できる（モジュール/サイド未入力時は "na" になる）。
+MASTER_FILENAME_PATTERN = re.compile(
+    r'^(?P<shiban>[A-Z]{2}\d{2}-\d{4}-\d)_(?P<module>[A-Z0-9]{4}|na)_(?P<side>[A-Z0-9]{3}|na)\.xlsx$'
+)
+
+# ペアリング方式（step1_mode）と、ZIPファイル名に使う "Type A/B/C" 表記の対応。
+PAIRING_TYPE_LETTERS = {'all_in_one': 'A', 'auto': 'B', 'pair_list': 'C'}
+
+
+def compute_default_zip_basename(master_file_name, step1_mode, revision):
+    """ZIPダウンロードファイル名（拡張子なし）のデフォルト値を組み立てる。
+
+    指番/モジュール/サイドが master_file_name から逆算できる場合は
+    "dxf_diff_results_Pair{A/B/C}_{指番}_{モジュール}_{サイド}_{リビジョン}"、
+    できない場合（台帳を作成していない、または命名規則に一致しない台帳をアップロード
+    した場合）は従来通り "dxf_diff_results" のみを返す。
+    """
+    letter = PAIRING_TYPE_LETTERS.get(step1_mode, 'A')
+    match = MASTER_FILENAME_PATTERN.match(master_file_name or '')
+    if not match:
+        return "dxf_diff_results"
+    return f"dxf_diff_results_Pair{letter}_{match['shiban']}_{match['module']}_{match['side']}_{revision}"
+
 
 def read_zip_member(zip_data, member_name):
     """zip_data（bytes）からメンバーを読み出す。存在しない場合は None。
@@ -1469,11 +1494,32 @@ def render_step3_diff(complete_pairs):
         if successful_count > 0:
             st.subheader("Step 5: 差分抽出ファイルのダウンロード")
 
+            # ZIPファイル名（拡張子なしの基本名を編集可能にする。台帳モード・
+            # ペアリング方式が変わったら初期値を再計算し、それ以外はユーザーの
+            # 編集を保持する）
+            default_zip_basename = compute_default_zip_basename(
+                st.session_state.master_file_name, st.session_state.step1_mode, "01"
+            )
+            zip_basename_sig = (st.session_state.master_file_name, st.session_state.step1_mode)
+            if st.session_state.get('zip_basename_sig') != zip_basename_sig:
+                st.session_state.zip_basename_input = default_zip_basename
+                st.session_state.zip_basename_sig = zip_basename_sig
+
+            zip_basename = st.text_input(
+                "ダウンロードするZIPファイル名（拡張子なし）",
+                key='zip_basename_input',
+            )
+            st.caption(
+                "末尾の数字はレビジョンです。デフォルトは「01」です。"
+                "同じ指番・モジュール・サイドで複数回差分抽出する場合は、"
+                "レビジョン番号を手動で変更してください。"
+            )
+
             downloaded = st.session_state.get('downloaded', False)
             st.download_button(
                 label="ZIPでダウンロード",
                 data=st.session_state.zip_data,
-                file_name="dxf_diff_results.zip",
+                file_name=f"{(zip_basename or '').strip() or default_zip_basename}.zip",
                 mime="application/zip",
                 key="download_zip",
                 type="primary",
