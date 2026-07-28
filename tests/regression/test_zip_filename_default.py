@@ -4,7 +4,7 @@ ZIPダウンロードファイル名のデフォルト値（compute_default_zip_
 背景:
     Ledger-merger 側で「指番_モジュール_サイド」単位の集計機能を追加するにあたり、
     DXF-diff-manager 側のZIPダウンロードファイル名を
-    "dxf_diff_results_Pair{A/B/C}_{指番}_{モジュール}_{サイド}_{リビジョン}" という
+    "dxf_diff_results_Type{A/B/C}_{指番}_{モジュール}_{サイド}_{リビジョン}" という
     命名規則で自動生成・編集可能にした。指番/モジュール/サイドが逆算できない場合
     （台帳を作成していない、または命名規則に一致しない台帳をアップロードした場合）は
     従来通り "dxf_diff_results" のみとする。
@@ -22,25 +22,25 @@ import app
 
 
 def test_new_master_all_in_one_mode():
-    """指番_モジュール_サイド.xlsx 形式の台帳 + Type A（all_in_one）→ Pair A で命名。"""
+    """指番_モジュール_サイド.xlsx 形式の台帳 + Type A（all_in_one）→ Type A で命名。"""
     result = app.compute_default_zip_basename("ME24-1001-0_ZC00_405.xlsx", "all_in_one", "01")
-    assert result == "dxf_diff_results_PairA_ME24-1001-0_ZC00_405_01", result
+    assert result == "dxf_diff_results_TypeA_ME24-1001-0_ZC00_405_01", result
 
 
-def test_auto_mode_uses_pair_b():
+def test_auto_mode_uses_type_b():
     result = app.compute_default_zip_basename("ME24-1001-0_ZC00_405.xlsx", "auto", "02")
-    assert result == "dxf_diff_results_PairB_ME24-1001-0_ZC00_405_02", result
+    assert result == "dxf_diff_results_TypeB_ME24-1001-0_ZC00_405_02", result
 
 
-def test_pair_list_mode_uses_pair_c():
+def test_pair_list_mode_uses_type_c():
     result = app.compute_default_zip_basename("ME24-1001-0_ZC00_405.xlsx", "pair_list", "01")
-    assert result == "dxf_diff_results_PairC_ME24-1001-0_ZC00_405_01", result
+    assert result == "dxf_diff_results_TypeC_ME24-1001-0_ZC00_405_01", result
 
 
 def test_module_and_side_unspecified_uses_na():
     """モジュール・サイド未入力時は master_file_name 側で既に "na" になっている。"""
     result = app.compute_default_zip_basename("ME24-1001-0_na_na.xlsx", "all_in_one", "01")
-    assert result == "dxf_diff_results_PairA_ME24-1001-0_na_na_01", result
+    assert result == "dxf_diff_results_TypeA_ME24-1001-0_na_na_01", result
 
 
 def test_no_master_falls_back_to_legacy_name():

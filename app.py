@@ -61,15 +61,16 @@ def compute_default_zip_basename(master_file_name, step1_mode, revision):
     """ZIPダウンロードファイル名（拡張子なし）のデフォルト値を組み立てる。
 
     指番/モジュール/サイドが master_file_name から逆算できる場合は
-    "dxf_diff_results_Pair{A/B/C}_{指番}_{モジュール}_{サイド}_{リビジョン}"、
-    できない場合（台帳を作成していない、または命名規則に一致しない台帳をアップロード
-    した場合）は従来通り "dxf_diff_results" のみを返す。
+    "dxf_diff_results_Type{A/B/C}_{指番}_{モジュール}_{サイド}_{リビジョン}"
+    （"Type{A/B/C}" は画面表示の「Type A/B/C」と一致させる）、できない場合
+    （台帳を作成していない、または命名規則に一致しない台帳をアップロードした場合）は
+    従来通り "dxf_diff_results" のみを返す。
     """
     letter = PAIRING_TYPE_LETTERS.get(step1_mode, 'A')
     match = MASTER_FILENAME_PATTERN.match(master_file_name or '')
     if not match:
         return "dxf_diff_results"
-    return f"dxf_diff_results_Pair{letter}_{match['shiban']}_{match['module']}_{match['side']}_{revision}"
+    return f"dxf_diff_results_Type{letter}_{match['shiban']}_{match['module']}_{match['side']}_{revision}"
 
 
 def read_zip_member(zip_data, member_name):
@@ -1495,15 +1496,18 @@ def render_step3_diff(complete_pairs):
             st.subheader("Step 5: 差分抽出ファイルのダウンロード")
 
             # ZIPファイル名（拡張子なしの基本名を編集可能にする。台帳モード・
-            # ペアリング方式が変わったら初期値を再計算し、それ以外はユーザーの
-            # 編集を保持する）
+            # ペアリング方式が変わったら初期値を再計算するが、ユーザーが一度でも
+            # 自動生成値から編集した（＝入力欄の値が前回表示した自動生成値と異なる）
+            # 場合は、以後シグネチャが変わっても上書きしない
+            # （レビジョン等の手入力が rerun のたびに消えてしまう不具合の対策）。
             default_zip_basename = compute_default_zip_basename(
                 st.session_state.master_file_name, st.session_state.step1_mode, "01"
             )
-            zip_basename_sig = (st.session_state.master_file_name, st.session_state.step1_mode)
-            if st.session_state.get('zip_basename_sig') != zip_basename_sig:
+            not_yet_initialized = 'zip_basename_input' not in st.session_state
+            not_user_edited = st.session_state.get('zip_basename_input') == st.session_state.get('zip_basename_last_default')
+            if not_yet_initialized or (not_user_edited and st.session_state.get('zip_basename_input') != default_zip_basename):
                 st.session_state.zip_basename_input = default_zip_basename
-                st.session_state.zip_basename_sig = zip_basename_sig
+            st.session_state.zip_basename_last_default = default_zip_basename
 
             zip_basename = st.text_input(
                 "ダウンロードするZIPファイル名（拡張子なし）",
