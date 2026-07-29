@@ -626,7 +626,7 @@ def update_parent_child_master(master_df, new_pairs):
 
 呼び出し元は2段階で台帳を更新する（`complete` ペアと同じ二段階パターンに合わせている）:
 1. `update_master_if_needed(pairs, mode)`（pair-list作成直後）: `get_brand_new_drawing_pairs(pairs, mode)` で対象を求め、`relation='完全新規図面'` を付与して先行登録（エンティティ数・方式CのTitle/Subtitleはまだ不明な場合がある）
-2. `create_diff_zip()` 内（差分抽出時）: 同じ対象について `count_entities_in_dxf_file(main_file_info['temp_path'])` でエンティティ数を算出し追記。`pair['title']` が未設定（方式Cで `main_file_info` に title が入っていない場合）であれば `extract_labels(..., extract_title_option=True)` を個別に呼んでTitle/Subtitleも補完する（2026-06 追加。方式A/Bは元々取得済みのためスキップされる）。`get_brand_new_drawing_pairs()` の時点でファイル未アップロードの図番は既に除外されているため、ここでの `main_file_info` チェックは安全策
+2. `create_diff_zip()` 内（差分抽出時）: 同じ対象について `count_entities_in_dxf_file(main_file_info['temp_path'])` でエンティティ数を算出し追記。`pair['title']` が未設定（方式Cで `main_file_info` に title が入っていない場合）であれば `get_title_and_subtitle(temp_path, original_filename=...)`（`model/extract_labels.py`、2026-07-29追加。以前は `extract_labels()` を直接呼んでいたが、正しいオプションの組み合わせを都度指定しなくて済むこの軽量ラッパー経由に統一した）を個別に呼んでTitle/Subtitleも補完する（2026-06 追加。方式A/Bは元々取得済みのためスキップされる）。`get_brand_new_drawing_pairs()` の時点でファイル未アップロードの図番は既に除外されているため、ここでの `main_file_info` チェックは安全策
 
 **Summaryシートの合計が `"n/a"` 混在列でも壊れない理由**: `save_master_to_bytes()` のエンティティ統計集計は `pd.to_numeric(master_df[col], errors='coerce')` で非数値（`"n/a"`）を `NaN` に変換した上で `sum(skipna=True)` するため、完全新規図面の行が混在しても他行の数値だけが正しく合計される。
 
