@@ -1541,12 +1541,12 @@ class PairFileCache:
 
 ラベルの差分計算とExcelワークブック生成を担当するモジュール。
 
-### 9.1 `compute_label_differences(new_file, old_file, tolerance, label_cache, filter_non_parts, validate_ref_designators, ignore_moved_labels)`
+### 9.1 `compute_label_differences(new_file, old_file, tolerance, label_cache, filter_non_parts, validate_ref_designators, ignore_moved_labels, new_file_original_name)`
 
 ```python
 def compute_label_differences(new_file, old_file, tolerance=0.05, label_cache=None,
                                filter_non_parts=False, validate_ref_designators=False,
-                               ignore_moved_labels=False):
+                               ignore_moved_labels=False, new_file_original_name=None):
     """
     Returns: (change_rows, unchanged_entries, extra_info)
 
@@ -1573,6 +1573,14 @@ def compute_label_differences(new_file, old_file, tolerance=0.05, label_cache=No
 3. `group_labels_by_coordinate()` で座標ごとにラベルをカウント集計
 4. `find_label_change_pairs()` で座標単位で新旧を突き合わせ
 5. `ignore_moved_labels=True` の場合、`reclassify_moved_labels()` で座標単位の結果をさらに後処理
+
+**`_load_labels_with_cache()` は必ず `extract_drawing_numbers_option=True` を付けて `extract_labels()` を呼ぶ（2026-07-29 修正）**: `model/extract_labels.py` の `extract_title_and_subtitle()` は、同一図番を持つ複数のタイトルブロックが1ファイル内に存在する図面（例: 複数シートを1つのDXFにまとめた図面）で、`main_drawing_group`（`extract_drawing_numbers_option=True` を渡した場合にのみ計算される）を使って対象タイトルブロック内のラベルのみに候補を絞り込む（[Section 7.6](#76-extract_title_and_subtitledxf_all_labels-drawing_numbers-debug) 参照）。`_load_labels_with_cache()` がこのオプションを渡していなかったため、この絞り込みが働かず全タイトルブロック横断でタイトル候補を探してしまい、対象ブロックにたまたま「ELECTRICAL SCHEMATIC DIAGRAM」等のタイトル行が欠落していると、別ブロックの内容（サブタイトル・リビジョン文字・ページ数ラベル）を誤ってタイトル/サブタイトルとして拾っていた（実データ `DE3527-553-10E.dxf`（1ファイルに同一図番のタイトルブロックが5枚横並び、最右端だけタイトル欠落）で `title="ＩＮＰＵＴ ＬＡ／ＬＢ H"`、`subtitle="DE3527-553-10E 5 5"` のように誤抽出される不具合としてユーザー報告）。`DXF-extract-labels`（primary）は自身の全呼び出し箇所で `extract_drawing_numbers_option=True` と `extract_title_option=True` を常にセットで渡しており問題が出ていなかった——**共有 `extract_labels.py` 自体はbyte一致でも、呼び出し側がオプションを揃えていないとプロジェクト間で結果が食い違う**という教訓（`extract_labels.py` の同期状況だけでなく、呼び出し側のオプション指定もあわせて確認すること）。
+
+あわせて `new_file_original_name`（アップロード時の元ファイル名。呼び出し元 `diff_export.py` は `pair['main_file_info']['filename']` を渡す）を `_load_labels_with_cache()` → `extract_labels(original_filename=...)` まで貫通させ、図番の所属タイトルブロック判定の優先順位1（ファイル名照合）を有効にした。旧図面（old_file）側は戻り値の `info` を使わない（`title`/`subtitle` は新図面側のみ採用）ため、ファイル名は貫通させていない。
+
+`model/diff_export.py` の完全新規図面（流用元なし）個別Title抽出も同じ理由で `extract_drawing_numbers_option=False` を明示していたため、同時に `True` へ修正した。
+
+回帰テスト: `tests/regression/test_title_extraction_multi_sheet_titleblock.py`（実データ `sample-dxf/problems/DE3527-553-10E.dxf` を使用）。
 
 ### 9.2 `find_label_change_pairs(group_new, group_old)`
 
@@ -1969,7 +1977,7 @@ DXF-diff-manager/model/ → (sync_utils.py) → DXF-visual-diff/utils/
 |---|---|---|
 | `extract_labels.py` | 適応的同期 | try/except パターンを維持すること |
 | `compare_dxf.py` | 直接同期 | config依存なし |
-| `label_diff.py` | 直接同期 | config依存なし |
+| `label_diff.py` | 直接同期（**2026-07-29 時点で乖離を確認・要伝播**） | config依存なし |
 | `common_utils.py` | 直接同期 | 微小な差異あり（要注意） |
 
 **DXF-diff-manager → DXF-extract-labels（手動コピー）**
@@ -1978,6 +1986,8 @@ DXF-diff-manager/model/ → (sync_utils.py) → DXF-visual-diff/utils/
 |---|---|---|
 | `extract_labels.py` | 手動コピー（ファイル同一化） | 変更後は `diff` で一致確認 |
 | `common_utils.py` | 手動コピー（ファイル同一化） | 内容は完全同一 |
+
+**`label_diff.py` の乖離について（2026-07-29 発覚）**: 本節は「直接同期」と記載しているが、今回のTitle/Subtitle抽出修正のためDXF-visual-diffの`utils/label_diff.py`と`diff`したところ、`reclassify_moved_labels()`/`ignore_moved_labels`（[Section 9.2a](#92a-reclassify_moved_labelschange_rows-unchanged_entries2026-07-追加)、Step4「移動しただけのラベルを差分から除外」オプション用）一式がDXF-visual-diff側に未反映で、かつデフォルト`tolerance`も0.05 (DXF-diff-manager) / 0.01 (DXF-visual-diff) で食い違っていることが判明した。今回のTitle/Subtitle修正（`extract_drawing_numbers_option=True`追加・`new_file_original_name`引数追加）は、この既存の乖離とは別に、**DXF-diff-manager側にのみ**適用済み（DXF-visual-diffへの伝播は本修正のスコープ外）。`sync_utils.py`を使った本格的な同期整理は別タスクとして扱うこと。
 
 ### 13.5 同期スクリプトの使用方法
 
@@ -2161,7 +2171,22 @@ BASE_DIR = Path("/Users/ryozo/Dropbox/Client/ULVAC/ElectricDesignManagement/Tool
 
 ---
 
-*最終更新: 2026-07-28（「ZIPでダウンロード」ボタン直上に、ダウンロードファイル名
+*最終更新: 2026-07-29（`model/label_diff.py::_load_labels_with_cache()` が
+`extract_labels()` を呼ぶ際 `extract_drawing_numbers_option=True` を渡していなかった
+ため、複数タイトルブロックが1ファイルにまとまった図面（`sample-dxf/problems/DE3527-553-10E.dxf`
+等、5枚のシートが横並びで同一図番を共有し最右端のシートだけタイトル行が欠落）で
+Title/Subtitleが別タイトルブロックの内容と混同される不具合を修正。`extract_labels.py`
+自体はDXF-extract-labels（primary）とbyte一致だったが、呼び出し側がオプションを揃えて
+いなかったことが原因（同ファイルの2026-07-12修正 `main_drawing_group` によるタイトル
+ブロック限定機構が発動していなかった）。あわせて `new_file_original_name` を
+`compute_label_differences()` → `_load_labels_with_cache()` → `extract_labels()` まで
+貫通させ、図番の所属タイトルブロック判定（優先順位1: ファイル名照合）を有効にした。
+`model/diff_export.py` の完全新規図面個別Title抽出も同じ理由で `extract_drawing_numbers_option`
+を `False` → `True` に修正。回帰テスト `tests/regression/test_title_extraction_multi_sheet_titleblock.py`
+を追加（実データ使用）。全96件pass。詳細は [Section 9.1](#91-compute_label_differencesnew_file-old_file-tolerance-label_cache-filter_non_parts-validate_ref_designators-ignore_moved_labels-new_file_original_name)
+参照*
+
+*過去の更新: 2026-07-28（「ZIPでダウンロード」ボタン直上に、ダウンロードファイル名
 （拡張子なし）の編集可能な入力欄を追加。台帳モード・ペアリング方式から
 `dxf_diff_results_Type{A/B/C}_{指番}_{モジュール}_{サイド}_{リビジョン}` を自動生成
 （`compute_default_zip_basename()`）し、判定できない場合は従来通り `dxf_diff_results`

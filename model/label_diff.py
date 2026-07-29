@@ -19,9 +19,19 @@ def _load_labels_with_cache(
     label_cache: Optional[dict],
     filter_non_parts: bool = False,
     validate_ref_designators: bool = False,
+    original_filename: Optional[str] = None,
 ):
-    """キャッシュを利用してラベルを読み込む。(labels, info) を返す。"""
-    cache_key = (file_path, True, filter_non_parts, validate_ref_designators)
+    """キャッシュを利用してラベルを読み込む。(labels, info) を返す。
+
+    extract_drawing_numbers_option=True を渡すことで、同一図番を持つ複数の
+    タイトルブロックが1ファイル内に存在する図面（例: 複数シートを1つの
+    DXFにまとめた図面）でも、タイトル/サブタイトル抽出が対象タイトルブロック
+    のグループ内に限定される（extract_labels.py の main_drawing_group 機構）。
+    この呼び出しで extract_drawing_numbers_option を省略すると、グループ制限が
+    働かず全ブロックのラベルが候補に混在し、対象ブロックにたまたま欠落した
+    ラベルがあると別ブロックの内容を誤って拾う（2026-07-29 実データで発覚）。
+    """
+    cache_key = (file_path, True, filter_non_parts, validate_ref_designators, original_filename)
     if label_cache is not None and cache_key in label_cache:
         return label_cache[cache_key]
 
@@ -32,6 +42,8 @@ def _load_labels_with_cache(
         include_coordinates=True,
         validate_ref_designators=validate_ref_designators,
         extract_title_option=True,
+        extract_drawing_numbers_option=True,
+        original_filename=original_filename,
     )
     result = (labels, info)
     if label_cache is not None:
@@ -73,6 +85,7 @@ def compute_label_differences(
     filter_non_parts: bool = False,
     validate_ref_designators: bool = False,
     ignore_moved_labels: bool = False,
+    new_file_original_name: Optional[str] = None,
 ):
     """
     ラベルを抽出（ブロック展開を含む）し、変更候補・未変更候補を計算する。
@@ -81,6 +94,11 @@ def compute_label_differences(
         ignore_moved_labels: True の場合、同一ラベルの削除件数・追加件数が一致する
             分を「移動しただけ」とみなし、座標が異なっていても変更候補から除外する
             （reclassify_moved_labels 参照）。
+        new_file_original_name: new_file のアップロード時の元ファイル名（temp_path
+            ではなく図番を含む本来のファイル名）。図番の所属タイトルブロック判定
+            （優先順位1: ファイル名照合）に使う。省略時はファイル名一致に頼れず、
+            座標ベースのフォールバック判定になる（extract_labels.determine_drawing_number_types
+            参照）。
 
     Returns
     -------
@@ -89,7 +107,10 @@ def compute_label_differences(
         unchanged_entries: 同一座標で一致した（または移動とみなされた）ラベル情報のリスト
         extra_info: {'labels_new': [...], 'invalid_ref_designators': [...]}
     """
-    labels_new, info_new = _load_labels_with_cache(new_file, label_cache, filter_non_parts, validate_ref_designators)
+    labels_new, info_new = _load_labels_with_cache(
+        new_file, label_cache, filter_non_parts, validate_ref_designators,
+        original_filename=new_file_original_name,
+    )
     labels_old, _ = _load_labels_with_cache(old_file, label_cache, filter_non_parts, False)
 
     rounded_new = round_labels_with_coordinates(labels_new, tolerance)
