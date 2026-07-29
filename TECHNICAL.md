@@ -1940,7 +1940,7 @@ AutoCADカラーインデックス（ACI）: 1=赤, 2=黄, 3=緑, 4=シアン, 5
 | DXF-visual-diff | モジュール内部で `ExtractionConfig` クラスを定義 | `sync_utils.py` で同期 |
 | DXF-extract-labels | `config.py` なし → フォールバック設定を使用 | **ファイル同一化**（手動コピー） |
 
-**DXF-extract-labels との同一化（2026-05）**: `DXF-diff-manager/model/extract_labels.py` と `DXF-extract-labels/model/extract_labels.py` は同一ファイルに統一した。`try/except ImportError` パターンにより `config.py` のない環境でもフォールバック設定で正常動作する。同様に `common_utils.py` も両プロジェクトで同一内容にしている。変更時は両プロジェクトのファイルを同一内容に保つこと（`diff` コマンドで確認）。**ただしファイルのbyte一致は呼び出し側のオプション整合性までは保証しない**——[Section 9.1](#91-compute_label_differencesnew_file-old_file-tolerance-label_cache-filter_non_parts-validate_ref_designators-ignore_moved_labels-new_file_original_name)で扱ったTitle/Subtitle誤抽出はまさにこのケースだった。primary側（DXF-extract-labels）が2026-07-29に予防的な`warnings.warn()`（本ファイルに渡し忘れがあれば警告）を追加し、本プロジェクトにも同期済み（byte一致・MD5は`Tools/CLAUDE.md`参照）。
+**DXF-extract-labels との同一化（2026-05）**: `DXF-diff-manager/model/extract_labels.py` と `DXF-extract-labels/model/extract_labels.py` は同一ファイルに統一した。`try/except ImportError` パターンにより `config.py` のない環境でもフォールバック設定で正常動作する。同様に `common_utils.py` も両プロジェクトで同一内容にしている。変更時は両プロジェクトのファイルを同一内容に保つこと（`diff` コマンドで確認）。**ただしファイルのbyte一致は呼び出し側のオプション整合性までは保証しない**——[Section 9.1](#91-compute_label_differencesnew_file-old_file-tolerance-label_cache-filter_non_parts-validate_ref_designators-ignore_moved_labels-new_file_original_name)で扱ったTitle/Subtitle誤抽出はまさにこのケースだった。primary側（DXF-extract-labels）が2026-07-29に予防的な`warnings.warn()`を追加し、さらに同日中に根本対応（`extract_title_option=True`であれば`extract_drawing_numbers_option`の指定に関わらず内部的にタイトルブロックグループ判定を行う設計に変更）を行い、警告は不要になったため削除された。本プロジェクトにも同期済み（byte一致・MD5は`Tools/CLAUDE.md`参照）。本プロジェクトの呼び出し側は既に両オプションをセットで渡すよう修正済みのため、この根本対応による挙動変化はない。
 
 ### 13.2 採用した解決策: 適応的設定パターン
 
