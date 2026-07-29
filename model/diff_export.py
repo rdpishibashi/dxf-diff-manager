@@ -130,6 +130,7 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                     filter_non_parts=filter_non_parts,
                     validate_ref_designators=validate_ref_designators,
                     ignore_moved_labels=ignore_moved_labels,
+                    new_file_original_name=pair.get('main_file_info', {}).get('filename'),
                 )
                 filtered_unchanged = filter_unchanged_by_prefix(unchanged_entries, prefixes)
                 change_label_count = len(change_rows)
@@ -303,7 +304,7 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                             debug=False,
                             selected_layers=None,
                             validate_ref_designators=False,
-                            extract_drawing_numbers_option=False,
+                            extract_drawing_numbers_option=True,
                             extract_title_option=True,
                             original_filename=file_info.get('filename'),
                         )
