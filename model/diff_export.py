@@ -13,7 +13,7 @@ from io import BytesIO
 from collections import defaultdict, Counter
 
 from .compare_dxf import compare_dxf_files_and_generate_dxf, count_entities_in_dxf_file, PairFileCache
-from .extract_labels import extract_labels
+from .extract_labels import get_title_and_subtitle
 from .label_diff import (
     compute_label_differences,
     filter_unchanged_by_prefix,
@@ -297,19 +297,12 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                 # （2026-06 追加）。方式A/Bは元々 title/subtitle 取得済みのためスキップ。
                 if not pair_with_counts.get('title'):
                     try:
-                        _, title_info = extract_labels(
+                        title, subtitle = get_title_and_subtitle(
                             file_info['temp_path'],
-                            filter_non_parts=False,
-                            sort_order="none",
-                            debug=False,
-                            selected_layers=None,
-                            validate_ref_designators=False,
-                            extract_drawing_numbers_option=True,
-                            extract_title_option=True,
                             original_filename=file_info.get('filename'),
                         )
-                        pair_with_counts['title'] = title_info.get('title')
-                        pair_with_counts['subtitle'] = title_info.get('subtitle')
+                        pair_with_counts['title'] = title
+                        pair_with_counts['subtitle'] = subtitle
                     except Exception:
                         pass
                 brand_new_with_counts.append(pair_with_counts)
