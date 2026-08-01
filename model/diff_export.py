@@ -21,7 +21,10 @@ from .label_diff import (
     build_unchanged_labels_workbook,
 )
 from .pairing import get_brand_new_drawing_pairs
-from .master_ledger import update_parent_child_master, save_master_to_bytes
+from .master_ledger import (
+    update_parent_child_master, save_master_to_bytes,
+    update_drawing_list, parse_master_filename,
+)
 from config import diff_config
 
 DIFF_LABELS_FILENAME = "diff_labels.xlsx"
@@ -34,7 +37,8 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                     filter_non_parts=False, validate_ref_designators=False,
                     ignore_moved_labels=False, ignore_color_only_changes=False,
                     step1_mode=None, total_drawings_count=None,
-                    source_drawing_numbers=None, dest_drawing_numbers=None):
+                    source_drawing_numbers=None, dest_drawing_numbers=None,
+                    drawing_list_df=None):
     """
     ペアリストに基づいて差分DXFファイルを作成し、ZIPアーカイブを生成
 
@@ -61,9 +65,12 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
         total_drawings_count: Summaryシートの図面統計の分母件数（呼び出し側で算出）
         source_drawing_numbers/dest_drawing_numbers: 完全新規図面判定
             （get_brand_new_drawing_pairs、mode='auto'時のみ使用）に渡す図番集合
+        drawing_list_df: Drawing List DataFrame（Noneの場合は空から開始）。
+            master_df と異なり、既存の Child Drawing Number は上書きされず、
+            新規の Child Drawing Number のみが追加される（update_drawing_list 参照）
 
     Returns:
-        tuple: (zip_data, results, diff_labels_excel, unchanged_labels_excel, master_df)
+        tuple: (zip_data, results, diff_labels_excel, unchanged_labels_excel, master_df, drawing_list_df)
     """
     def report_error(message):
         if on_error:
@@ -310,6 +317,54 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
             if brand_new_with_counts:
                 master_df, _ = update_parent_child_master(master_df, brand_new_with_counts)
 
+            # Drawing List を更新（Child Drawing Number でユニーク、新規のみ追加）。
+            # Diff List/master_df とは異なり、対象は「差分抽出が成功したペア」に限らず
+            # pairs 全件（Type A: プール内の全ファイル、Type B: 流用先のすべて、
+            # Type C: ペアリストの全行）——build_pairs()/build_pairs_from_list() は
+            # いずれもステータスを問わず main_drawing を1件も欠かさず含むため、
+            # pairs をそのまま走査すれば各方式の「Step2でアップロードした対象すべて」
+            # を過不足なくカバーできる（model/pairing.py 参照）。
+            shiban, module, side = parse_master_filename(master_filename)
+            drawing_list_entries = []
+            seen_children = set()
+            for pair in pairs:
+                child = pair.get('main_drawing')
+                if not child or child in seen_children:
+                    continue
+                seen_children.add(child)
+
+                extracted = pair_extracted_info.get(child)
+                if extracted:
+                    title = extracted.get('title')
+                    subtitle = extracted.get('subtitle')
+                else:
+                    title = pair.get('title')
+                    subtitle = pair.get('subtitle')
+                    file_info = pair.get('main_file_info')
+                    # complete 以外（missing_source等）やdiff未実行のファイルは
+                    # title/subtitle 未抽出のことが多いため、実ファイルがあれば
+                    # ここで個別に抽出を試みる（完全新規図面と同じフォールバック）。
+                    if not title and file_info and file_info.get('temp_path'):
+                        try:
+                            title, subtitle = get_title_and_subtitle(
+                                file_info['temp_path'],
+                                original_filename=file_info.get('filename'),
+                            )
+                        except Exception:
+                            pass
+
+                drawing_list_entries.append({
+                    'main_drawing': child,
+                    'source_drawing': pair.get('source_drawing'),
+                    'title': title,
+                    'subtitle': subtitle,
+                })
+
+            if drawing_list_entries:
+                drawing_list_df, _ = update_drawing_list(
+                    drawing_list_df, drawing_list_entries, shiban, module, side
+                )
+
         # Total データ生成
         total_data = None
         if filter_non_parts and total_counter:
@@ -352,7 +407,8 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
 
         if master_df is not None:
             master_excel_data = save_master_to_bytes(
-                master_df, pairs=pairs, mode=step1_mode, total_drawings_count=total_drawings_count
+                master_df, pairs=pairs, mode=step1_mode, total_drawings_count=total_drawings_count,
+                drawing_list_df=drawing_list_df,
             )
             output_master_filename = master_filename if master_filename else diff_config.MASTER_FILENAME
             zip_file.writestr(output_master_filename, master_excel_data)
@@ -365,4 +421,4 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
     del unchanged_label_sheets
     gc.collect()
 
-    return zip_data, results, diff_labels_excel, unchanged_labels_excel, master_df
+    return zip_data, results, diff_labels_excel, unchanged_labels_excel, master_df, drawing_list_df

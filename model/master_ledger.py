@@ -4,10 +4,41 @@
 streamlit には依存しないため、`tests/` から直接ユニットテストできる
 （`model/pairing.py` と同じ方針）。
 """
+import re
 from io import BytesIO
 from datetime import datetime
 
 import pandas as pd
+
+DRAWING_LIST_SHEET_NAME = "Drawing List"
+
+# Diff List の「* Entities」列（object dtype: 整数と "n/a" 文字列が混在する）。
+# update_parent_child_master() のdtype統一・save_master_to_bytes() の列フォーマット
+# 適用の両方で使う共通定義。
+ENTITY_COUNT_COLUMNS = ['Deleted Entities', 'Added Entities', 'Diff Entities',
+                        'Unchanged Entities', 'Total Entities']
+
+# render_step0_master() が作成する台帳ファイル名（"{指番}_{モジュール}_{サイド}.xlsx"）
+# から指番/モジュール/サイドを逆算するためのパターン。既存台帳をアップロードした場合も
+# 同じ命名規則に従っていれば逆算できる（モジュール/サイド未入力時は "na" になる）。
+MASTER_FILENAME_PATTERN = re.compile(
+    r'^(?P<shiban>[A-Z]{2}\d{2}-\d{4}-\d)_(?P<module>[A-Z0-9]{4}|na)_(?P<side>[A-Z0-9]{3}|na)\.xlsx$'
+)
+
+
+def parse_master_filename(filename):
+    """台帳ファイル名から指番/モジュール/サイドを逆算する。
+
+    命名規則（"{指番}_{モジュール}_{サイド}.xlsx"）に一致しない場合
+    （自由な名前でアップロードされた台帳等）は (None, None, None) を返す。
+
+    Returns:
+        tuple: (shiban, module, side) または (None, None, None)
+    """
+    match = MASTER_FILENAME_PATTERN.match(filename or '')
+    if not match:
+        return None, None, None
+    return match['shiban'], match['module'], match['side']
 
 
 def load_parent_child_master(uploaded_file):
@@ -68,8 +99,7 @@ def update_parent_child_master(master_df, new_pairs):
     new_records = []
     updated_df = master_df.copy()
 
-    entity_count_columns = ['Deleted Entities', 'Added Entities', 'Diff Entities',
-                            'Unchanged Entities', 'Total Entities']
+    entity_count_columns = ENTITY_COUNT_COLUMNS
 
     # アップロードされた既存台帳で、まだ完全新規図面（"n/a"）の行が一度も無い場合、
     # pandas はエントリ数カラムを float64 として読み込む。この状態のカラムへ後段で
@@ -239,13 +269,108 @@ def create_empty_master_df():
     })
 
 
-def save_master_to_bytes(master_df, pairs=None, mode=None, total_drawings_count=None):
+def create_empty_drawing_list_df():
+    """空の Drawing List DataFrame を作成"""
+    return pd.DataFrame({
+        'Sashiban': pd.Series(dtype='object'),
+        'Module': pd.Series(dtype='object'),
+        'Side': pd.Series(dtype='object'),
+        'Child Drawing Number': pd.Series(dtype='object'),
+        'Parent Drawing Number': pd.Series(dtype='object'),
+        'Title': pd.Series(dtype='object'),
+        'Subtitle': pd.Series(dtype='object'),
+        'Recorded Date': pd.Series(dtype='object'),
+    })
+
+
+def load_drawing_list(uploaded_file):
+    """
+    台帳ファイルから 'Drawing List' シートを読み込む。
+
+    シートが存在しない場合（旧形式の台帳、本機能導入前に作成された台帳等）は
+    エラーではなく空の DataFrame を返す。
+
+    Args:
+        uploaded_file: アップロードされたExcelファイル（ファイルパスやファイルオブジェクト）
+
+    Returns:
+        tuple: (DataFrame, エラーメッセージ または None)
+    """
+    try:
+        excel_file = pd.ExcelFile(uploaded_file)
+        if DRAWING_LIST_SHEET_NAME in excel_file.sheet_names:
+            # Sashiban/Module/Side や図番が数字だけ（例: サイド "405"）の場合、
+            # dtype指定なしで読むと pandas が列全体を int64 と誤推測し、
+            # セル自体は文字列として保存されているにもかかわらず読み込み後に
+            # 数値化されてしまう（2026-08 実データ確認）。明示的に str 指定する。
+            df = pd.read_excel(excel_file, sheet_name=DRAWING_LIST_SHEET_NAME, dtype={
+                'Sashiban': str, 'Module': str, 'Side': str,
+                'Child Drawing Number': str, 'Parent Drawing Number': str,
+            })
+            return df, None
+        return create_empty_drawing_list_df(), None
+    except Exception as e:
+        return create_empty_drawing_list_df(), (
+            f"Drawing List シートの読み込み中にエラーが発生しました: {str(e)}"
+        )
+
+
+def update_drawing_list(drawing_list_df, new_entries, shiban, module, side):
+    """
+    Drawing List に新規の Child Drawing Number のみを追加する。
+
+    Diff List（update_parent_child_master）と異なり、既存行は一切上書きしない
+    ——「新規の Child Drawing Number があれば追加する」という仕様のため、
+    同じ Child が再度処理されても既存レコードはそのまま保持する。
+
+    Args:
+        drawing_list_df: 既存の Drawing List DataFrame（None可）
+        new_entries: [{'main_drawing', 'source_drawing', 'title', 'subtitle'}, ...]
+                     （update_parent_child_master の new_pairs と同じキー）
+        shiban/module/side: 台帳ファイル名から得た指番/モジュール/サイド（Noneなら空欄記録）
+
+    Returns:
+        tuple: (更新後のDataFrame, 追加件数)
+    """
+    updated = drawing_list_df.copy() if drawing_list_df is not None else create_empty_drawing_list_df()
+    if 'Child Drawing Number' not in updated.columns:
+        updated['Child Drawing Number'] = pd.Series(dtype='object')
+
+    existing_children = set(str(v) for v in updated['Child Drawing Number'].dropna())
+
+    new_records = []
+    for entry in new_entries:
+        child = entry.get('main_drawing')
+        if not child or child in existing_children:
+            continue
+        existing_children.add(child)  # 同一バッチ内の重複防止（先勝ち）
+        parent = entry.get('source_drawing') or 'none'
+        new_records.append({
+            'Sashiban': shiban or '',
+            'Module': module or '',
+            'Side': side or '',
+            'Child Drawing Number': child,
+            'Parent Drawing Number': parent,
+            'Title': entry.get('title'),
+            'Subtitle': entry.get('subtitle'),
+            'Recorded Date': datetime.now(),
+        })
+
+    added_count = len(new_records)
+    if new_records:
+        updated = pd.concat([updated, pd.DataFrame(new_records)], ignore_index=True)
+
+    return updated, added_count
+
+
+def save_master_to_bytes(master_df, pairs=None, mode=None, total_drawings_count=None, drawing_list_df=None):
     """
     図面管理台帳DataFrameをExcelバイトデータに変換
 
     シート構成:
-      1. Summary  : 統計サマリー（エンティティ合計・図形変更率・図面統計・流用率）
-      2. Diff List: 図面管理台帳データ
+      1. Summary     : 統計サマリー（エンティティ合計・図形変更率・図面統計・流用率）
+      2. Diff List   : 図面管理台帳データ
+      3. Drawing List: 差分処理対象となった入力ファイルの記録（Child Drawing Numberでユニーク）
 
     Args:
         master_df: 図面管理台帳DataFrame
@@ -253,6 +378,7 @@ def save_master_to_bytes(master_df, pairs=None, mode=None, total_drawings_count=
         mode: ペアリング方式（'all_in_one'(Type A) / 'auto'(Type B) / 'pair_list'(Type C)）。
               Type A は「アップロード図面総数」、Type B/C は「流用先図面総数」を分母に使う。
         total_drawings_count: 図面統計の分母件数（呼び出し側で mode に応じて算出する）
+        drawing_list_df: Drawing List DataFrame（Noneの場合は空シートを出力）
 
     Returns:
         bytes: Excelファイルのバイトデータ
@@ -323,6 +449,16 @@ def save_master_to_bytes(master_df, pairs=None, mode=None, total_drawings_count=
         pair_count = len([p for p in pairs if p['status'] == 'complete']) if pairs is not None else 0
         reuse_rate = (pair_count / total_drawings) if total_drawings > 0 else 0.0
 
+        # 完全新規図面数: 台帳（Diff List）の Relation='完全新規図面' の行から、
+        # Child のユニーク件数をカウントする（このExcel出力に書き込む master_df
+        # 全体＝累積台帳ベースの集計。差分抽出ペア数のような「今回バッチのみ」の
+        # 集計とは異なり、台帳全体の完全新規図面数を表す。2026-08 ユーザー指定）。
+        brand_new_count = 0
+        if 'Relation' in master_df.columns and 'Child' in master_df.columns:
+            brand_new_mask = master_df['Relation'] == '完全新規図面'
+            brand_new_count = master_df.loc[brand_new_mask, 'Child'].nunique()
+        brand_new_rate = (brand_new_count / total_drawings) if total_drawings > 0 else 0.0
+
         summary_ws.write(row, 0, total_drawings_label, label_fmt)
         summary_ws.write(row, 1, total_drawings, value_fmt)
         row += 1
@@ -331,14 +467,41 @@ def save_master_to_bytes(master_df, pairs=None, mode=None, total_drawings_count=
         summary_ws.write(row, 1, pair_count, value_fmt)
         row += 1
 
+        summary_ws.write(row, 0, '完全新規図面数', label_fmt)
+        summary_ws.write(row, 1, brand_new_count, value_fmt)
+        row += 1
+
         summary_ws.write(row, 0, '流用率 [%]', label_fmt)
         summary_ws.write(row, 1, reuse_rate, pct_fmt)
+        row += 1
+
+        summary_ws.write(row, 0, '新規作成率 [%]', label_fmt)
+        summary_ws.write(row, 1, brand_new_rate, pct_fmt)
 
         # --- Diff List シート（Child で昇順ソート） ---
         diff_list_df = master_df
         if 'Child' in master_df.columns:
             diff_list_df = master_df.sort_values('Child', kind='stable', na_position='last')
         diff_list_df.to_excel(writer, sheet_name='Diff List', index=False)
+        writer.sheets['Diff List'].freeze_panes(1, 0)  # タイトル行を固定
+
+        # 「* Entities」列は整数と "n/a" 文字列が混在する object dtype のため、
+        # to_excel() の既定書式のままだと数値セルは右揃え・"n/a" セルは左揃えになり
+        # 見た目が揃わない（2026-08 ユーザー指摘）。列フォーマット（xlsxwriterの
+        # set_column）は to_excel() が既に書き込んだセルにも後から一括適用されるため、
+        # 中央揃え＋桁区切りに統一する。
+        entity_col_fmt = workbook.add_format({'align': 'center', 'num_format': '#,##0'})
+        diff_list_ws = writer.sheets['Diff List']
+        for col_idx, col_name in enumerate(diff_list_df.columns):
+            if col_name in ENTITY_COUNT_COLUMNS:
+                diff_list_ws.set_column(col_idx, col_idx, None, entity_col_fmt)
+
+        # --- Drawing List シート（Diff List の後ろ。Child Drawing Number で昇順ソート） ---
+        dl_df = drawing_list_df if drawing_list_df is not None else create_empty_drawing_list_df()
+        if 'Child Drawing Number' in dl_df.columns:
+            dl_df = dl_df.sort_values('Child Drawing Number', kind='stable', na_position='last')
+        dl_df.to_excel(writer, sheet_name=DRAWING_LIST_SHEET_NAME, index=False)
+        writer.sheets[DRAWING_LIST_SHEET_NAME].freeze_panes(1, 0)  # タイトル行を固定
 
     output.seek(0)
     return output.getvalue()

@@ -39,6 +39,31 @@ def cleanup_stale_temp_files(max_age_seconds=3 * 60 * 60):
     except Exception:
         pass
 
+
+def is_drawing_number_filename(filename):
+    """
+    ファイル名（拡張子を除く部分）が図番フォーマットに完全一致するかを判定する。
+
+    対応フォーマット（config.ExtractionConfig.DRAWING_NUMBER_PATTERN と同じ形状）:
+      - 長: aannnn-nnn-nna（例: EE1234-567-89A）
+      - 短: aannnn-nnna    （例: EE1234-567A）
+    大文字のみを受け付ける（DXFテキスト内からの図番抽出はIGNORECASEで行うが、
+    ファイル名フィルタは表記揺れを避けるため大文字限定とする）。
+
+    Step2のDXFファイルアップロード（フォルダを丸ごとドラッグ&ドロップした際に
+    ブラウザが再帰展開する全ファイルの中から、図番フォーマットに合致する
+    DXFファイルのみを対象とする）に使用する。
+
+    config.py に依存する他の関数と異なりモジュール先頭でimportしないのは、
+    本ファイルが他プロジェクト（DXF-extract-labels等）にもコピーされて
+    使われており、config.py が無い/構造が異なる環境でも本ファイルの他の
+    関数（filter_non_circuit_symbols等）を壊さないため（遅延import）。
+    """
+    from config import extraction_config
+    stem = os.path.splitext(filename)[0]
+    return re.fullmatch(extraction_config.DRAWING_NUMBER_PATTERN, stem) is not None
+
+
 def filter_non_circuit_symbols(labels, debug=False):
     """機器符号フォーマットに一致しないラベルをフィルタリングする"""
     patterns = [

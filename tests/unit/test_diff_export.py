@@ -20,6 +20,7 @@ import ezdxf
 import pandas as pd
 
 from model.diff_export import create_diff_zip
+from model.master_ledger import create_empty_master_df, create_empty_drawing_list_df
 
 
 def _make_pair_dxf_files(d, main_drawing, source_drawing,
@@ -71,7 +72,7 @@ def test_create_diff_zip_passes_old_new_in_correct_order_to_compare_dxf():
         )
         pairs = [pair]
 
-        zip_data, results, diff_labels_excel, unchanged_labels_excel, master_df = create_diff_zip(pairs)
+        zip_data, results, diff_labels_excel, unchanged_labels_excel, master_df, drawing_list_df = create_diff_zip(pairs)
 
         assert len(results) == 1
         assert results[0]['success']
@@ -133,7 +134,7 @@ def test_diff_labels_summary_and_sheets_sorted_alphabetically_by_drawing_number(
             _make_pair_dxf_files(d, 'B-DRAW', 'B-SRC', 'B_NEW', 'B_OLD'),
         ]
 
-        zip_data, results, diff_labels_excel, unchanged_labels_excel, master_df = create_diff_zip(pairs)
+        zip_data, results, diff_labels_excel, unchanged_labels_excel, master_df, drawing_list_df = create_diff_zip(pairs)
         assert len(results) == 3
 
         xl = pd.ExcelFile(io.BytesIO(diff_labels_excel))
@@ -200,7 +201,7 @@ def test_ignore_moved_labels_combined_with_prefix_filter_and_ref_designator_chec
             'subtitle': None,
         }]
 
-        zip_data, results, diff_labels_excel, unchanged_labels_excel, master_df = create_diff_zip(
+        zip_data, results, diff_labels_excel, unchanged_labels_excel, master_df, drawing_list_df = create_diff_zip(
             pairs,
             ignore_moved_labels=True,
             prefixes=['R'],
@@ -218,6 +219,129 @@ def test_ignore_moved_labels_combined_with_prefix_filter_and_ref_designator_chec
         assert list(unchanged_df['Label']) == ['R10'], \
             f"移動したラベルがunchanged_labels.xlsxに正しく残っていない: {unchanged_df}"
         assert unchanged_df.iloc[0]['Coordinate X'] == 100.0  # 新座標を採用
+
+
+def test_create_diff_zip_records_drawing_list_for_successful_pair():
+    """成功した complete ペアは Drawing List に Sashiban/Module/Side（台帳ファイル名から
+    逆算）・Child/Parent・解決済みTitle/Subtitleとともに記録される。"""
+    with tempfile.TemporaryDirectory() as d:
+        pair = _make_pair_dxf_files(d, 'NEW-001', 'OLD-001', 'NEW_ONLY', 'OLD_ONLY')
+        _, _, _, _, master_df, drawing_list_df = create_diff_zip(
+            [pair], master_df=create_empty_master_df(),
+            master_filename='AA11-1111-1_ZM00_405.xlsx',
+            drawing_list_df=create_empty_drawing_list_df(),
+        )
+        row = drawing_list_df[drawing_list_df['Child Drawing Number'] == 'NEW-001'].iloc[0]
+        assert row['Parent Drawing Number'] == 'OLD-001'
+        assert row['Sashiban'] == 'AA11-1111-1'
+        assert row['Module'] == 'ZM00'
+        assert row['Side'] == '405'
+
+
+def test_create_diff_zip_records_drawing_list_even_when_pair_processing_fails():
+    """失敗した complete ペア（DXF比較失敗）もDrawing Listには記録される
+    （Diff Listは成功ペアのみだが、Drawing Listは成否を問わず全件対象という仕様）。"""
+    with tempfile.TemporaryDirectory() as d:
+        pair = {
+            'main_drawing': 'NEW-BAD', 'source_drawing': 'OLD-MISSING-FILE',
+            'main_file_info': {'temp_path': os.path.join(d, 'NEW-BAD.dxf'), 'title': None, 'subtitle': None},
+            'source_file_info': {'temp_path': os.path.join(d, 'does_not_exist.dxf')},
+            'status': 'complete', 'relation': '流用', 'title': None, 'subtitle': None,
+        }
+        new_doc = ezdxf.new()
+        new_doc.modelspace().add_text('X', dxfattribs={'insert': (0, 0)})
+        new_doc.saveas(pair['main_file_info']['temp_path'])
+
+        _, results, _, _, master_df, drawing_list_df = create_diff_zip(
+            [pair], master_df=create_empty_master_df(),
+            master_filename='AA11-1111-1_ZM00_405.xlsx',
+            drawing_list_df=create_empty_drawing_list_df(),
+            on_error=lambda msg: None,
+        )
+        assert results[0]['success'] is False
+        row = drawing_list_df[drawing_list_df['Child Drawing Number'] == 'NEW-BAD'].iloc[0]
+        assert row['Parent Drawing Number'] == 'OLD-MISSING-FILE'
+
+
+def test_create_diff_zip_records_drawing_list_for_missing_source_pair():
+    """流用元ファイル未アップロード（missing_source）のペアも Drawing List に記録され、
+    流用先ファイルからTitleが直接抽出される（pair_extracted_infoに無いためフォールバック）。"""
+    with tempfile.TemporaryDirectory() as d:
+        new_doc = ezdxf.new()
+        new_doc.modelspace().add_text('X', dxfattribs={'insert': (0, 0)})
+        new_path = os.path.join(d, 'NEW-002.dxf')
+        new_doc.saveas(new_path)
+
+        pair = {
+            'main_drawing': 'NEW-002', 'source_drawing': 'OLD-002',
+            'main_file_info': {'temp_path': new_path, 'title': None, 'subtitle': None},
+            'source_file_info': None,
+            'status': 'missing_source', 'relation': '流用', 'title': None, 'subtitle': None,
+        }
+        _, _, _, _, master_df, drawing_list_df = create_diff_zip(
+            [pair], master_df=create_empty_master_df(),
+            master_filename='AA11-1111-1_ZM00_405.xlsx',
+            drawing_list_df=create_empty_drawing_list_df(),
+        )
+        row = drawing_list_df[drawing_list_df['Child Drawing Number'] == 'NEW-002'].iloc[0]
+        assert row['Parent Drawing Number'] == 'OLD-002'
+
+
+def test_create_diff_zip_does_not_overwrite_existing_drawing_list_entry():
+    """既にDrawing Listに登録済みのChild Drawing Numberは、同じ図番が再処理されても
+    上書きされない（新規のChild Drawing Numberのみ追加、という仕様）。"""
+    with tempfile.TemporaryDirectory() as d:
+        pair = _make_pair_dxf_files(d, 'NEW-001', 'OLD-001', 'NEW_ONLY', 'OLD_ONLY')
+
+        existing_drawing_list = create_empty_drawing_list_df()
+        existing_drawing_list.loc[0] = {
+            'Sashiban': 'ZZ99-9999-9', 'Module': 'na', 'Side': 'na',
+            'Child Drawing Number': 'NEW-001', 'Parent Drawing Number': 'ORIGINAL-PARENT',
+            'Title': 'ORIGINAL-TITLE', 'Subtitle': None, 'Recorded Date': None,
+        }
+
+        _, _, _, _, master_df, drawing_list_df = create_diff_zip(
+            [pair], master_df=create_empty_master_df(),
+            master_filename='AA11-1111-1_ZM00_405.xlsx',
+            drawing_list_df=existing_drawing_list,
+        )
+        assert len(drawing_list_df) == 1
+        row = drawing_list_df.iloc[0]
+        assert row['Parent Drawing Number'] == 'ORIGINAL-PARENT'
+        assert row['Title'] == 'ORIGINAL-TITLE'
+        assert row['Sashiban'] == 'ZZ99-9999-9'  # 元の指番も保持される
+
+
+def test_create_diff_zip_drawing_list_blank_shiban_when_master_filename_unresolvable():
+    """台帳ファイル名が命名規則に一致しない場合、新規追加行のSashiban/Module/Sideは空欄。"""
+    with tempfile.TemporaryDirectory() as d:
+        pair = _make_pair_dxf_files(d, 'NEW-001', 'OLD-001', 'NEW_ONLY', 'OLD_ONLY')
+        _, _, _, _, master_df, drawing_list_df = create_diff_zip(
+            [pair], master_df=create_empty_master_df(),
+            master_filename='my_free_named_master.xlsx',
+            drawing_list_df=create_empty_drawing_list_df(),
+        )
+        row = drawing_list_df[drawing_list_df['Child Drawing Number'] == 'NEW-001'].iloc[0]
+        assert row['Sashiban'] == ''
+        assert row['Module'] == ''
+        assert row['Side'] == ''
+
+
+def test_create_diff_zip_drawing_list_written_to_master_excel():
+    """create_diff_zip() の出力台帳Excelに Drawing List シートが Diff List の後ろに含まれる。"""
+    with tempfile.TemporaryDirectory() as d:
+        pair = _make_pair_dxf_files(d, 'NEW-001', 'OLD-001', 'NEW_ONLY', 'OLD_ONLY')
+        zip_data, _, _, _, _, _ = create_diff_zip(
+            [pair], master_df=create_empty_master_df(),
+            master_filename='AA11-1111-1_ZM00_405.xlsx',
+            drawing_list_df=create_empty_drawing_list_df(),
+        )
+        with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
+            master_bytes = zf.read('AA11-1111-1_ZM00_405.xlsx')
+        xl = pd.ExcelFile(io.BytesIO(master_bytes))
+        assert xl.sheet_names == ['Summary', 'Diff List', 'Drawing List']
+        dl = pd.read_excel(xl, sheet_name='Drawing List')
+        assert list(dl['Child Drawing Number']) == ['NEW-001']
 
 
 def _run_all():
