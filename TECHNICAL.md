@@ -130,14 +130,18 @@ DXF-diff-manager/
 | `load_parent_child_master(uploaded_file)` | 図面管理台帳Excelを読み込む。`(df, error)` を返す |
 | `update_parent_child_master(master_df, new_pairs)` | 台帳に新規/既存ペアを追記・更新（Parent="none"・"n/a"文字列等、後述のロジックを含む） |
 | `create_empty_master_df()` | 空の台帳DataFrameを作成 |
-| `save_master_to_bytes(master_df, pairs=None, mode=None, total_drawings_count=None)` | 台帳をExcelバイトデータ（Summary + Diff List）に変換 |
+| `save_master_to_bytes(master_df, pairs=None, mode=None, total_drawings_count=None, drawing_list_df=None)` | 台帳をExcelバイトデータ（Summary + Diff List + Drawing List）に変換 |
 | `make_dataframe_arrow_compatible(df)` | 数値と文字列（`"n/a"`）が混在した object 型カラムを持つDataFrameを、pyarrowシリアライズ可能にした**表示用コピー**として返す（元のdfは不変）。`st.dataframe` プレビュー前処理用（後述） |
+| `parse_master_filename(filename)` | 台帳ファイル名（`"{指番}_{モジュール}_{サイド}.xlsx"`）から指番/モジュール/サイドを逆算。一致しなければ `(None, None, None)`（2026-08 追加。以前 `app.py` にあった同ロジックを一本化） |
+| `create_empty_drawing_list_df()` | 空の Drawing List DataFrame を作成（2026-08 追加） |
+| `load_drawing_list(uploaded_file)` | 台帳ファイルから `Drawing List` シートを読み込む。シートが無ければエラーにせず空DFを返す。`(df, error)` を返す（2026-08 追加） |
+| `update_drawing_list(drawing_list_df, new_entries, shiban, module, side)` | Drawing List に新規の Child Drawing Number のみ追加（既存行は上書きしない）。`(df, added_count)` を返す（2026-08 追加） |
 
 ### モデル層 `model/diff_export.py`（2026-06 新設）
 
 | 関数 | 役割 |
 |------|------|
-| `create_diff_zip(pairs, master_df=None, ..., progress_callback=None, on_error=None, ...)` | ペアリストから差分DXF・ラベル差分Excel・台帳更新を行い、ZIPバイトデータを生成。`DIFF_LABELS_FILENAME`/`UNCHANGED_LABELS_FILENAME` 定数もここに定義（`app.py` はここから import） |
+| `create_diff_zip(pairs, master_df=None, ..., drawing_list_df=None, progress_callback=None, on_error=None, ...)` | ペアリストから差分DXF・ラベル差分Excel・台帳更新（Diff List・Drawing List 双方）を行い、ZIPバイトデータを生成。戻り値は `(zip_data, results, diff_labels_excel, unchanged_labels_excel, master_df, drawing_list_df)`（2026-08: `drawing_list_df` を追加）。`DIFF_LABELS_FILENAME`/`UNCHANGED_LABELS_FILENAME` 定数もここに定義（`app.py` はここから import） |
 
 ---
 
@@ -147,9 +151,10 @@ DXF-diff-manager/
 
 Step 1 で「既存の図面管理台帳のアップロード」「図面管理台帳の新規作成」「図面管理台帳を作成せず」のいずれかを選択して台帳を設定する（2026-06 改修）。新規作成時は台帳ファイル名を直接入力せず、**指番・モジュール・サイド**の3フィールドから自動生成する（4.「ステップ 1」参照）。処理完了後、台帳を作成した場合のみ更新したファイルをダウンロードZIPに含める（「作成せず」を選んだ場合は差分DXF・ラベルリストのみ出力）。
 
-出力 Excel は **2シート構成**:
-- **Summary**: 統計サマリー（エンティティ合計・図形変更率・図面統計・流用率）。ラベル・分母はペアリング方式（Type A/B/C）により異なる（12.4 参照）
+出力 Excel は **3シート構成**（2026-08: Drawing List 追加。以前は2シート構成）:
+- **Summary**: 統計サマリー（エンティティ合計・図形変更率・図面統計・流用率・完全新規図面数・新規作成率）。ラベル・分母はペアリング方式（Type A/B/C）により異なる（12.4 参照）
 - **Diff List**: 図面管理台帳データ（以下のカラム構成）
+- **Drawing List**: 差分処理対象となった入力ファイルの記録（Diff List の後ろ。詳細は 3.1.1・12.4 参照）
 
 | カラム名 | 内容 |
 |---|---|
@@ -167,6 +172,46 @@ Step 1 で「既存の図面管理台帳のアップロード」「図面管理�
 | Total Entities | 総図形数。完全新規図面の行はその図面単独の総エンティティ数（= Added Entities） |
 
 既存レコードは上書き更新（Child/Parent の一致で判定。完全新規図面は Parent="none" で判定）。関係種別が変わった場合は `{relation}-changed` 形式で記録。エンティティ数カラムは `object` dtype（数値と `"n/a"` 文字列が混在するため）。
+
+**5列（Deleted/Added/Diff/Unchanged/Total Entities）の表示書式（2026-08 追加）**: `"n/a"` 文字列と数値が混在するため、既定の `to_excel()` 書式のままだと数値セルは右揃え・`"n/a"` セルは左揃えになりアラインが揃わない。`save_master_to_bytes()` で列単位のフォーマット（`align: center`, `num_format: '#,##0'`）を後から一括適用し、両方とも中央揃え・桁区切り表示に統一している（`ENTITY_COUNT_COLUMNS` 定数で列名を管理）。
+
+**タイトル行の固定（2026-08 追加）**: Diff List・Drawing List とも `freeze_panes(1, 0)` でヘッダー行（1行目）を固定して出力する。
+
+#### 3.1.1 Drawing List（2026-08 新設）
+
+「差分処理を行った入力ファイル」を記録する台帳シート。Diff List とは別軸の記録で、
+**Child Drawing Number でユニーク**（既存の Child は上書きせず、新規の Child のみ追加する）。
+
+| カラム名 | 内容 |
+|---|---|
+| Sashiban | 指番（台帳ファイル名 `"{指番}_{モジュール}_{サイド}.xlsx"` から逆算。命名規則に一致しない台帳の場合は空欄） |
+| Module | モジュール（同上。未入力時は `"na"`） |
+| Side | サイド（同上。未入力時は `"na"`） |
+| Child Drawing Number | 図番（新図面） |
+| Parent Drawing Number | 流用元図番（旧図面）。流用元が無い場合は文字列 `"none"` |
+| Title | 図面タイトル |
+| Subtitle | 図面サブタイトル |
+| Recorded Date | 記録日時 |
+
+**データソースは Diff List より広い**: 対象は `create_diff_zip()` に渡される `pairs`
+全件（`status` を問わない——`complete` の成功/失敗、`missing_source`、`no_source_defined`、
+`identical` 等すべて）。`model/pairing.py` の `build_pairs()`/`build_pairs_from_list()` は
+いずれも対象ファイル・宣言されたペア行を1件も欠かさず `pairs` に含める設計のため、
+これがそのまま各方式の「Step2でアップロードした対象すべて」と一致する
+（Type A: プール内の全ファイル、Type B: 流用先のすべて、Type C: ペアリストの全行。
+`main_drawing` が空の行——ペアリストの one_sided 等——のみ記録対象外）。
+
+Title/Subtitle は、実際に差分処理が走った `complete` ペア（成功/失敗問わず）は
+`compute_label_differences()` で解決済みの値を使い、それ以外はファイルが
+アップロード済みであれば `get_title_and_subtitle()` で個別抽出、ファイル自体が
+未アップロードの場合は空欄のままとする。
+
+**更新タイミングは Step 4（`create_diff_zip()` 実行時）のみ**——Step 3 のペア確定時点
+（`update_master_if_needed()`）では Title/Subtitle が未解決のため、あえて Drawing List
+は更新しない（Diff List/`master_df` はこの時点でも先行登録される。3.1・6.3 参照）。
+
+同一 Child が `pairs` 内に複数回登場する場合（RevUp・流用の二重登場等）はバッチ内で
+最初に登場した方のみ採用する（先勝ち）。
 
 ### 3.2 3種類のペアリングモード
 
@@ -259,6 +304,15 @@ all_in_one モードでは単一プール内で次の2判定を**独立して**�
 | auto | 流用元・流用先が明確に分かれており、流用先DXFに流用元図番が記載されている場合 |
 | all_in_one | すべてのDXFが1つのフォルダにあり、各DXFに流用元図番が記載されている場合 |
 | pair_list | ペアの対応関係を自分で制御したい場合、または図番がDXFに記載されていない場合 |
+
+### Step2共通: フォルダアップロード時のファイル名フィルタ（2026-08 追加）
+
+以下のいずれのモードでも、DXFファイルのアップロード欄にフォルダを丸ごとドラッグ&ドロップ
+すると、ブラウザがサブフォルダも含めて中の全ファイルを再帰的に展開してアップロードする
+（Streamlitの標準動作）。そのうち**図番フォーマット**（`XX0000-000-00X` / `XX0000-000X`、
+大文字限定）に一致するファイル名の `.dxf` のみが読み込み対象になり、一致しないものは
+サイレントにスキップされる（詳細は [Section 11](#11-図面番号フォーマット仕様) 参照）。
+個別にファイルを選んでアップロードする場合も同じ判定が適用される。
 
 ### ステップ 2（auto モード）: DXFファイルのアップロード
 
@@ -442,6 +496,7 @@ from config import ui_config, diff_config, help_text
 | `pairs` | list | 確定したペアリスト |
 | `pairs_dirty` | bool | ファイル追加後・ペア生成前は True（ペア再生成が必要） |
 | `master_df` | DataFrame | 図面管理台帳（新規作成時は空DataFrame、アップロード時は読み込み済みデータ） |
+| `drawing_list_df` | DataFrame | Drawing List（新規作成時は空DataFrame、アップロード時は `load_drawing_list()` の読み込み結果。`master_df` と同じタイミングでinit/resetする。2026-08 追加） |
 | `master_file_name` | str | 台帳ファイル名（出力ZIPに使用） |
 | `added_relationships_count` | int | 台帳に追加した関係の累計件数 |
 | `drawing_info_cache` | dict | `{file_hash: 抽出情報}` のキャッシュ |
@@ -1757,6 +1812,19 @@ def process_circuit_symbol_labels(labels, filter_non_parts=False, validate_ref_d
 
 機器符号フィルタ3関数は DXF-extract-labels の `common_utils.py` と同一内容。一方 `save_uploadedfile()` / `TEMP_FILE_PREFIX` / `cleanup_stale_temp_files()` は本プロジェクト固有のメモリ最適化対応（2026-06）であり、他プロジェクトへの伝播時はこの差分を踏まえて個別判断すること。
 
+```python
+def is_drawing_number_filename(filename):
+    """ファイル名（拡張子除く）が図番フォーマットに完全一致するかを判定する（2026-08追加）。
+    config.ExtractionConfig.DRAWING_NUMBER_PATTERN を re.fullmatch・大文字限定で再利用。
+    Step2のDXFアップロード（フォルダD&D時のファイル名フィルタ）に使用。
+    config への import は遅延（他プロジェクトへの伝播時に他関数を壊さないため）。
+    """
+```
+
+これも本プロジェクト固有（`config.py` に依存）であり、他プロジェクトへ `common_utils.py`
+を伝播する際は個別判断が必要な関数のひとつ。詳細は [Section 11](#11-図面番号フォーマット仕様)
+の「ファイル名フィルタとしての利用」参照。
+
 ---
 
 ## 11. 図面番号フォーマット仕様
@@ -1822,6 +1890,30 @@ base = drawing_number[:-1]  # 末尾1文字を除去
 cd DXF-diff-manager
 python3 sync_utils.py
 ```
+
+### ファイル名フィルタとしての利用（Step2アップロード、2026-08追加）
+
+上記の `DRAWING_NUMBER_PATTERN`（DXFテキスト内からの図番抽出に `re.findall(...,
+re.IGNORECASE)` で使う）とは別に、`model/common_utils.py` の
+`is_drawing_number_filename(filename)` が**同じパターン文字列**を `re.fullmatch()`・
+大文字限定（`IGNORECASE` 無し）で再利用し、Step2 のDXFファイルアップロード
+（全モード共通の `process_all_uploaded_files()`、app.py）でファイル名フィルタとして
+使う。フォルダを丸ごとドラッグ&ドロップした際にブラウザが再帰展開する全ファイルの中
+から、図番フォーマットに一致するファイル名の `.dxf` のみを対象にし、一致しないもの
+（無関係ファイル・小文字ファイル名等）はサイレントにスキップする（エラー扱いにしない。
+既存の「アップロードできなかったファイル」＝パース失敗等の一覧とは別枠）。
+
+`file_uploader` は「フォルダをドロップした」か「個別ファイルを複数選択した」かを区別
+する手段を持たないため、このフィルタは**両方の操作方法に一律適用される**——個別に
+選んでアップロードする場合も、命名規則に合わないファイル名は同様に弾かれる。
+
+同じ文字列パターンを流用しているため、**パターン変更時の更新箇所（上記1・2）を
+更新すれば `is_drawing_number_filename()` の判定も自動的に追従する**（別途の定数
+コピーは持たない。`config.py` を持たない他プロジェクトへ `common_utils.py` が
+伝播された場合に備え、`config` の import は関数内の遅延importにしてある）。
+
+回帰テスト: `tests/unit/test_common_utils.py`（長/短フォーマット・大文字小文字・
+不正フォーマットの単体テスト）。
 
 ---
 
@@ -1894,11 +1986,12 @@ AutoCADカラーインデックス（ACI）: 1=赤, 2=黄, 3=緑, 4=シアン, 5
 
 ### 12.4 図面管理台帳 Excel（ファイル名は Step 1 で指定）
 
-`update_parent_child_master()` で更新された台帳。**2シート構成**で出力される。
+`update_parent_child_master()`/`update_drawing_list()` で更新された台帳。**3シート構成**
+（2026-08: Drawing List 追加。以前は2シート構成）で出力される。
 
-#### Summary シート（2026-06 改修：ラベル・分母がペアリング方式により異なる）
+#### Summary シート（2026-06 改修：ラベル・分母がペアリング方式により異なる。2026-08: 完全新規図面数・新規作成率を追加）
 
-`save_master_to_bytes(master_df, pairs, mode, total_drawings_count)` の `mode`（`st.session_state.step1_mode`）により、「総図形数」「図面統計」のラベル・分母が切り替わる。`total_drawings_count` は呼び出し側の `compute_total_drawings_count(mode)`（app.py）で算出する。
+`save_master_to_bytes(master_df, pairs, mode, total_drawings_count, drawing_list_df)` の `mode`（`st.session_state.step1_mode`）により、「総図形数」「図面統計」のラベル・分母が切り替わる。`total_drawings_count` は呼び出し側の `compute_total_drawings_count(mode)`（app.py）で算出する。
 
 | 行グループ | 項目 | 計算式 |
 |---|---|---|
@@ -1910,7 +2003,9 @@ AutoCADカラーインデックス（ACI）: 1=赤, 2=黄, 3=緑, 4=シアン, 5
 | | 図形変更率 [%] | `変更（追加+削除）図形 総数 ÷ 総図形数` |
 | 図面統計 | **Type A**: アップロード図面総数 / **Type B・C**: 流用先図面総数 | `compute_total_drawings_count(mode)`（下表） |
 | | 差分抽出ペア数 | `status == 'complete'` のペア数 |
+| | **完全新規図面数**（2026-08追加） | Diff List（`master_df`）の `Relation == '完全新規図面'` の行の、`Child` ユニーク件数。**台帳全体（累積）での集計**——差分抽出ペア数・図面総数のような「今回バッチのみ」の集計とは範囲が異なる点に注意 |
 | | 流用率 [%] | `差分抽出ペア数 ÷ 上記の図面総数` |
+| | **新規作成率 [%]**（2026-08追加） | `完全新規図面数 ÷ 上記の図面総数`（小数点2位まで、`流用率 [%]` と同じ `'0.00%'` 書式） |
 
 **`compute_total_drawings_count(mode)` の算出方法（app.py）:**
 
@@ -1925,6 +2020,17 @@ AutoCADカラーインデックス（ACI）: 1=赤, 2=黄, 3=緑, 4=シアン, 5
 図面管理台帳データ。全カラム構成は [Section 3.1](#31-図面管理台帳) 参照。
 
 **行の並び順（2026-07 追加）**: `Child` 列の昇順（ABC順）でソートして出力する（`save_master_to_bytes()` 内、`master_df.sort_values('Child', kind='stable', na_position='last')`）。ソートは出力用のコピーに対してのみ行い、呼び出し元が保持する `master_df` 自体の行順は変更しない。同一 `Child` に対して RevUp・流用など複数の関係行が存在する場合（[Section 11](#11-既知のハマりポイントと対策) 参照）も `Child` を主キーにまとめて隣接表示される。回帰テスト: `tests/unit/test_master_ledger.py` の `test_save_master_to_bytes_sorts_diff_list_by_child`。
+
+**エンティティ数5列の表示書式・タイトル行固定（2026-08 追加）**: `Deleted/Added/Diff/Unchanged/Total Entities` は列フォーマット（`align: center`, `num_format: '#,##0'`）で中央揃え・桁区切り表示に統一（`"n/a"` セルと数値セルのアラインが揃う）。ヘッダー行（1行目）は `freeze_panes(1, 0)` で固定。回帰テスト: `test_save_master_to_bytes_centers_and_formats_entity_columns`、`test_save_master_to_bytes_freezes_header_row_for_diff_list_and_drawing_list`。
+
+#### Drawing List シート（2026-08 新設）
+
+差分処理対象となった入力ファイルの記録。全カラム構成・データソース・更新ルールは
+[Section 3.1.1](#311-drawing-list2026-08-新設) 参照。**Child Drawing Number の昇順
+（ABC順）でソートして出力**（Diff List と同じ `sort_values(..., kind='stable',
+na_position='last')` 方式）。ヘッダー行は Diff List と同じく `freeze_panes(1, 0)` で
+固定。回帰テスト: `test_save_master_to_bytes_sorts_drawing_list_by_child_drawing_number`、
+`test_create_diff_zip_records_drawing_list_*`（`tests/unit/test_diff_export.py`）。
 
 ---
 
@@ -2171,7 +2277,30 @@ BASE_DIR = Path("/Users/ryozo/Dropbox/Client/ULVAC/ElectricDesignManagement/Tool
 
 ---
 
-*最終更新: 2026-07-29（`model/label_diff.py::_load_labels_with_cache()` が
+*最終更新: 2026-08-01（(1) 図面管理台帳Excelを2シート構成→**3シート構成**に変更し
+「Drawing List」シートを新設（Diff Listの後ろ）。差分処理対象となった入力ファイルを
+Child Drawing Numberでユニークに記録し、Diff Listと異なり既存行は上書きしない
+（新規のChild Drawing Numberのみ追加）。データソースはDiff Listより広く、`pairs`
+全件（成功/失敗・missing_source等ステータス問わず）が対象——`model/pairing.py` の
+`build_pairs()`/`build_pairs_from_list()` が対象ファイル・宣言ペアを1件も欠かさず
+含む設計を利用。`model/master_ledger.py` に `parse_master_filename()`/
+`create_empty_drawing_list_df()`/`load_drawing_list()`/`update_drawing_list()` を
+新設、`create_diff_zip()`（model/diff_export.py）の戻り値に `drawing_list_df` を追加
+（6要素タプルに変更）。詳細は Section 3.1.1・12.4 参照。
+(2) Step2のDXFアップロード（全モード共通）に図番フォーマット（`XX0000-000-00X` /
+`XX0000-000X`、大文字限定）のファイル名フィルタを追加。フォルダを丸ごとドラッグ&
+ドロップした際にブラウザが再帰展開する全ファイルのうち、フォーマット不一致のものは
+サイレントにスキップする。`model/common_utils.py` に `is_drawing_number_filename()`
+を新設（`config.ExtractionConfig.DRAWING_NUMBER_PATTERN` を `fullmatch`・大文字限定
+で再利用、config importは遅延）。詳細はSection 10・11参照。
+(3) Diff Listの `Deleted/Added/Diff/Unchanged/Total Entities` 列を中央揃え・桁区切り
+表示に統一（`"n/a"` セルと数値セルのアライン不一致を解消）。Diff List・Drawing List
+ともタイトル行を `freeze_panes(1, 0)` で固定。
+(4) Summaryシートの図面統計に「完全新規図面数」（差分抽出ペア数の直下。台帳全体で
+Relation='完全新規図面'のChildユニーク数）・「新規作成率 [%]」（流用率[%]の直下。
+完全新規図面数÷図面総数）を追加）*
+
+*2026-07-29（`model/label_diff.py::_load_labels_with_cache()` が
 `extract_labels()` を呼ぶ際 `extract_drawing_numbers_option=True` を渡していなかった
 ため、複数タイトルブロックが1ファイルにまとまった図面（`sample-dxf/problems/DE3527-553-10E.dxf`
 等、5枚のシートが横並びで同一図番を共有し最右端のシートだけタイトル行が欠落）で

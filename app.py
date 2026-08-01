@@ -18,7 +18,7 @@ model_path = os.path.join(current_dir, 'model')
 sys.path.insert(0, model_path)
 
 from model.extract_labels import extract_labels
-from model.common_utils import save_uploadedfile, cleanup_stale_temp_files
+from model.common_utils import save_uploadedfile, cleanup_stale_temp_files, is_drawing_number_filename
 from model import pairing
 from model.pairing import build_pairs, build_pairs_from_list, primary_status_by_drawing
 from model.master_ledger import (
@@ -27,6 +27,9 @@ from model.master_ledger import (
     create_empty_master_df,
     save_master_to_bytes,
     make_dataframe_arrow_compatible,
+    create_empty_drawing_list_df,
+    load_drawing_list,
+    parse_master_filename,
 )
 from model.diff_export import create_diff_zip, DIFF_LABELS_FILENAME, UNCHANGED_LABELS_FILENAME
 
@@ -46,13 +49,6 @@ SHIBAN_PATTERN = re.compile(r'^[A-Z]{2}\d{2}-\d{4}-\d$')   # 例: AA11-1111-1
 MODULE_PATTERN = re.compile(r'^[A-Z0-9]{4}$')              # 例: XXXX（英大文字・数字）
 SIDE_PATTERN = re.compile(r'^[A-Z0-9]{3}$')                # 例: XXX（英大文字・数字）
 
-# render_step0_master() が作成する master_file_name（"{指番}_{モジュール}_{サイド}.xlsx"）
-# から指番/モジュール/サイドを逆算するためのパターン。既存台帳をアップロードした場合も
-# 同じ命名規則に従っていれば逆算できる（モジュール/サイド未入力時は "na" になる）。
-MASTER_FILENAME_PATTERN = re.compile(
-    r'^(?P<shiban>[A-Z]{2}\d{2}-\d{4}-\d)_(?P<module>[A-Z0-9]{4}|na)_(?P<side>[A-Z0-9]{3}|na)\.xlsx$'
-)
-
 # ペアリング方式（step1_mode）と、ZIPファイル名に使う "Type A/B/C" 表記の対応。
 PAIRING_TYPE_LETTERS = {'all_in_one': 'A', 'auto': 'B', 'pair_list': 'C'}
 
@@ -65,12 +61,16 @@ def compute_default_zip_basename(master_file_name, step1_mode, revision):
     （"Type{A/B/C}" は画面表示の「Type A/B/C」と一致させる）、できない場合
     （台帳を作成していない、または命名規則に一致しない台帳をアップロードした場合）は
     従来通り "dxf_diff_results" のみを返す。
+
+    指番/モジュール/サイドの逆算（"{指番}_{モジュール}_{サイド}.xlsx" の命名規則）は
+    model.master_ledger.parse_master_filename() に委譲する（Drawing List の
+    Sashiban/Module/Side 記録と同じロジックを共有するため、2026-08 に一本化）。
     """
     letter = PAIRING_TYPE_LETTERS.get(step1_mode, 'A')
-    match = MASTER_FILENAME_PATTERN.match(master_file_name or '')
-    if not match:
+    shiban, module, side = parse_master_filename(master_file_name)
+    if shiban is None:
         return "dxf_diff_results"
-    return f"dxf_diff_results_Type{letter}_{match['shiban']}_{match['module']}_{match['side']}_{revision}"
+    return f"dxf_diff_results_Type{letter}_{shiban}_{module}_{side}_{revision}"
 
 
 def read_zip_member(zip_data, member_name):
@@ -284,6 +284,9 @@ def initialize_session_state():
 
     if 'master_df' not in st.session_state:
         st.session_state.master_df = None
+
+    if 'drawing_list_df' not in st.session_state:
+        st.session_state.drawing_list_df = None
 
     if 'master_file_name' not in st.session_state:
         st.session_state.master_file_name = None
@@ -638,11 +641,18 @@ def process_all_uploaded_files(groups):
         bool: いずれかのファイルが処理されたかどうか
     """
     # 全グループの合計ファイル数を算出
+    # フォルダを丸ごとドラッグ&ドロップした場合、ブラウザがサブフォルダも含めて
+    # 再帰的に全ファイルを展開してアップロードする（Streamlitの標準動作）。
+    # その中から図番フォーマットに一致するファイル名の.dxfのみを対象にし、
+    # 一致しないものはサイレントにスキップする（エラー扱いにしない。個別に
+    # ファイルを選んでアップロードする場合も同じ判定が適用される——
+    # file_uploaderにはフォルダドロップと個別選択を区別する手段が無いため）。
     all_items = []
     for g in groups:
         if g['uploaded_files']:
             for f in g['uploaded_files']:
-                all_items.append((f, g))
+                if is_drawing_number_filename(f.name):
+                    all_items.append((f, g))
 
     if not all_items:
         return False
@@ -751,6 +761,7 @@ def render_step0_master():
 
     if prev_step0_mode != step0_mode:
         st.session_state.master_df = None
+        st.session_state.drawing_list_df = None
         st.session_state.master_file_name = None
         st.session_state.added_relationships_count = 0
 
@@ -801,6 +812,7 @@ def render_step0_master():
 
         if errors or not shiban:
             st.session_state.master_df = None
+            st.session_state.drawing_list_df = None
             st.session_state.master_file_name = None
             st.session_state.added_relationships_count = 0
         else:
@@ -816,6 +828,7 @@ def render_step0_master():
 
             if st.session_state.master_df is None:
                 st.session_state.master_df = create_empty_master_df()
+                st.session_state.drawing_list_df = create_empty_drawing_list_df()
                 st.session_state.added_relationships_count = 0
             st.session_state.master_file_name = master_filename
 
@@ -838,17 +851,24 @@ def render_step0_master():
                     st.session_state.master_df = master_df
                     st.session_state.master_file_name = master_file.name
                     st.session_state.added_relationships_count = 0
+                    master_file.seek(0)
+                    drawing_list_df, dl_error = load_drawing_list(master_file)
+                    if dl_error:
+                        st.warning(dl_error)
+                    st.session_state.drawing_list_df = drawing_list_df
                     st.success(f"記録済み親子関係（{len(master_df)}件のレコード）")
             else:
                 st.info(f"既存の親子関係に追加します（{len(st.session_state.master_df)}件のレコード）")
         else:
             if st.session_state.master_df is not None:
                 st.session_state.master_df = None
+                st.session_state.drawing_list_df = None
                 st.session_state.master_file_name = None
                 st.session_state.added_relationships_count = 0
 
     else:  # 'none'
         st.session_state.master_df = None
+        st.session_state.drawing_list_df = None
         st.session_state.master_file_name = None
         st.session_state.added_relationships_count = 0
         st.info("図面管理台帳は作成・更新しません。差分抽出結果（差分DXF・ラベルリスト）のみをZIPで出力します。")
@@ -876,7 +896,11 @@ def _render_step1_auto_mode():
     """自動ペアリングモードのStep 2"""
     # Step 2-1: 流用元DXFファイルのアップロード
     st.subheader("Step 2-1: 流用元（旧）DXFファイルのアップロード")
-    st.caption("ファイル名（拡張子なし）が図番として使用されます。")
+    st.caption(
+        "ファイル名（拡張子なし）が図番として使用されます。"
+        "フォルダを丸ごとドラッグ&ドロップすると、サブフォルダ内も含めて図番フォーマット"
+        "（例: EE1234-567-89A / EE1234-567A）に一致するDXFファイルのみが読み込まれます。"
+    )
 
     source_uploaded_files = st.file_uploader(
         "流用元（旧）DXFファイルをアップロードしてください（複数可・フォルダ可・複数回可）",
@@ -894,6 +918,10 @@ def _render_step1_auto_mode():
 
     # Step 2-2: 流用先DXFファイルのアップロード
     st.subheader("Step 2-2: 流用先（新）DXFファイルのアップロード")
+    st.caption(
+        "フォルダを丸ごとドラッグ&ドロップすると、サブフォルダ内も含めて図番フォーマット"
+        "（例: EE1234-567-89A / EE1234-567A）に一致するDXFファイルのみが読み込まれます。"
+    )
 
     dest_uploaded_files = st.file_uploader(
         "流用先（新）DXFファイルをアップロードしてください（複数可・フォルダ可・複数回可）",
@@ -989,7 +1017,11 @@ def _render_step1_pair_list_mode():
 
     # Step 2-2: DXFファイルのアップロード
     st.subheader("Step 2-2: DXFファイルのアップロード（流用元・流用先まとめて）")
-    st.caption("ファイル名（拡張子なし）が図番として使用されます。流用元と流用先のファイルをまとめてアップロードしてください。")
+    st.caption(
+        "ファイル名（拡張子なし）が図番として使用されます。流用元と流用先のファイルをまとめてアップロードしてください。"
+        "フォルダを丸ごとドラッグ&ドロップすると、サブフォルダ内も含めて図番フォーマット"
+        "（例: EE1234-567-89A / EE1234-567A）に一致するDXFファイルのみが読み込まれます。"
+    )
 
     all_uploaded_files = st.file_uploader(
         "DXFファイル（複数可）",
@@ -1084,7 +1116,9 @@ def _render_step1_all_in_one_mode():
     st.subheader("Step 2: DXFファイルの一括アップロード")
     st.caption(
         "流用元・流用先を区別せず全DXFファイルをアップロードしてください。\n"
-        "ファイル名（拡張子なし）が図番として使用され、DXFから抽出した流用元図番でペアを自動作成します。"
+        "ファイル名（拡張子なし）が図番として使用され、DXFから抽出した流用元図番でペアを自動作成します。\n"
+        "フォルダを丸ごとドラッグ&ドロップすると、サブフォルダ内も含めて図番フォーマット"
+        "（例: EE1234-567-89A / EE1234-567A）に一致するDXFファイルのみが読み込まれます。"
     )
 
     all_in_one_uploaded_files = st.file_uploader(
@@ -1332,7 +1366,7 @@ def render_step3_diff(complete_pairs):
 
             try:
                 step1_mode = st.session_state.step1_mode
-                zip_data, results, diff_labels_excel, unchanged_labels_excel, updated_master = create_diff_zip(
+                zip_data, results, diff_labels_excel, unchanged_labels_excel, updated_master, updated_drawing_list = create_diff_zip(
                     st.session_state.pairs,
                     master_df=st.session_state.master_df,
                     master_filename=st.session_state.master_file_name,
@@ -1351,6 +1385,7 @@ def render_step3_diff(complete_pairs):
                     total_drawings_count=compute_total_drawings_count(step1_mode),
                     source_drawing_numbers=set(st.session_state.source_files_dict.keys()),
                     dest_drawing_numbers=set(st.session_state.dest_files_dict.keys()),
+                    drawing_list_df=st.session_state.drawing_list_df,
                 )
 
                 # セッション状態に保存
@@ -1370,6 +1405,8 @@ def render_step3_diff(complete_pairs):
                 }
                 if updated_master is not None:
                     st.session_state.master_df = updated_master
+                if updated_drawing_list is not None:
+                    st.session_state.drawing_list_df = updated_drawing_list
 
                 # メモリ解放
                 gc.collect()
@@ -1560,7 +1597,7 @@ def render_step3_diff(complete_pairs):
                         'all_in_one_files_dict', 'all_in_one_upload_key',
                         'all_in_one_upload_failures', 'all_in_one_upload_summary',
                         'results', 'zip_data', 'processing_settings',
-                        'master_df', 'master_file_name', 'added_relationships_count',
+                        'master_df', 'drawing_list_df', 'master_file_name', 'added_relationships_count',
                         'has_diff_labels', 'has_unchanged_labels',
                         'diff_preview_expanded',
                         'downloaded']:
