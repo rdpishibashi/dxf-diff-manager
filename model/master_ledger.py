@@ -357,8 +357,11 @@ def update_drawing_list(drawing_list_df, new_entries, shiban, module, side):
         })
 
     added_count = len(new_records)
-    if new_records:
-        updated = pd.concat([updated, pd.DataFrame(new_records)], ignore_index=True)
+    # pd.concat は既存側が空（0行）の場合に FutureWarning
+    # （"empty or all-NA entries" の dtype 除外に関する警告）を出すため、
+    # update_parent_child_master() と同じ「1行ずつ .loc で追加」方式にする。
+    for record in new_records:
+        updated.loc[len(updated)] = record
 
     return updated, added_count
 

@@ -492,15 +492,26 @@ def render_pair_list():
     no_source_pairs = get_brand_new_drawing_pairs(all_pairs, mode)
 
     # 差分抽出が可能なペア
-    # 「：N件」の件数は図面（main_drawing）のユニーク数（他セクションとの合計が
-    # 流用先総数と一致するようにするため）。同じ図面が複数の流用元と比較される
-    # 場合（RevUp と流用の双方で complete になる等）、表には全ペアを表示するため
-    # 表の行数が件数より多くなることがある。
+    # 「：N件」の件数は complete_pairs の実件数（＝直下の表の行数、実際に
+    # 差分抽出が実行される比較回数）と一致させる（2026-08 変更。以前は
+    # main_drawing のユニーク数を使っており、同じ図面が複数の流用元と比較される
+    # 場合（RevUp と流用の双方で complete になる等）に表の行数より少ない件数が
+    # 表示され、実データで「テーブルは5行なのに4件と表示される」と誤解を招いた
+    # ため、ユーザー判断でテーブル行数優先に変更。Summary シートの「差分抽出
+    # ペア数」（save_master_to_bytes 内 pair_count）と同じ集計方法に統一される。
+    # トレードオフ: 同一図面が複数関係で complete になる場合、本セクションの
+    # 件数と他セクション（未アップロード・変更なし・完全新規図面）の件数を
+    # 合計しても流用先総数と厳密には一致しなくなる（複数関係を持つ図面が
+    # 実際の関係数ぶん重複計上されるため）。
     if complete_pairs:
-        st.success(f"差分抽出が可能なペア：{len({p['main_drawing'] for p in complete_pairs})}件")
+        st.success(f"差分抽出が可能なペア：{len(complete_pairs)}件")
 
+        # 表示順は流用先（新）のABC順にソートする（処理順=complete_pairsの元の
+        # 順序とは無関係。実データで「流用先(新)がABC順になっていない」という
+        # 指摘を受けて追加。2026-08）。complete_pairs 自体の順序（Step4の処理・
+        # 戻り値）は変更しない——表示用にソート済みコピーを作るのみ。
         pair_data = []
-        for pair in complete_pairs:
+        for pair in sorted(complete_pairs, key=lambda p: p['main_drawing'] or ''):
             pair_data.append({
                 '流用先（新）': pair['main_drawing'],
                 '流用元（旧）': pair['source_drawing'],
@@ -531,7 +542,7 @@ def render_pair_list():
                 '流用先（新）': pair['main_drawing'] or '（なし）',
                 '流用元（旧）': pair['source_drawing'] or '（なし）',
                 'ステータス': status_text[pair['status']],
-            } for pair in missing_file_pairs]
+            } for pair in sorted(missing_file_pairs, key=lambda p: p['main_drawing'] or '')]
 
             # 件数は行数（ペアリストの行＝宣言された関係の数）で数える。one_sided は
             # main_drawing が空（複数行が同じ空値に collapse する）ため、main_drawing
@@ -549,7 +560,7 @@ def render_pair_list():
                 if p.get('relation') == 'RevUp'
             }
             missing_data = []
-            for pair in missing_pairs:
+            for pair in sorted(missing_pairs, key=lambda p: p['main_drawing'] or ''):
                 revup_source = revup_source_by_target.get(pair['main_drawing'])
                 if revup_source:
                     status = f'⚠️ 流用元の図面ファイルなし・RevUpあり（{revup_source}）'
@@ -571,7 +582,7 @@ def render_pair_list():
     # 完全新規図面（流用元図番なし）
     if no_source_pairs:
         no_source_data = []
-        for pair in no_source_pairs:
+        for pair in sorted(no_source_pairs, key=lambda p: p['main_drawing'] or ''):
             no_source_data.append({
                 '図番': pair['main_drawing'],
                 '関係': '完全新規図面',
@@ -648,8 +659,10 @@ def process_all_uploaded_files(groups):
     # ファイルを選んでアップロードする場合も同じ判定が適用される——
     # file_uploaderにはフォルダドロップと個別選択を区別する手段が無いため）。
     all_items = []
+    total_input_counts = {}  # gid -> アップロード欄に入力された総ファイル数（フィルタ前）
     for g in groups:
         if g['uploaded_files']:
+            total_input_counts[id(g)] = len(g['uploaded_files'])
             for f in g['uploaded_files']:
                 if is_drawing_number_filename(f.name):
                     all_items.append((f, g))
@@ -709,7 +722,8 @@ def process_all_uploaded_files(groups):
         st.session_state[g['summary_key']] = {
             'processed': res['processed'],
             'failed': len(res['failed']),
-            'elapsed': elapsed_total
+            'elapsed': elapsed_total,
+            'total_input': total_input_counts.get(gid, res['processed'] + len(res['failed'])),
         }
 
     return processed_any
@@ -724,20 +738,59 @@ def render_upload_status(summary_key, failures_key, label):
         failures_key: 失敗ファイルリストのsession_state名
         label: 表示ラベル（「流用元」「流用先」など）
     """
+    # type= を指定しない file_uploader（図番フォーマットフィルタで絞り込む方式、
+    # 2026-08）のため、入力欄に渡されるファイルはDXFに限らない（xlsx等が混ざり
+    # 得る）。「DXFファイル読み込み」と表現すると入力全体がDXFであるかのように
+    # 誤解されるため、「入力ファイル読み込み」とし、入力総数のうち実際に
+    # DXFファイルとして読み込まれた件数を分けて示す。
     upload_summary = st.session_state.get(summary_key)
     if upload_summary:
         processed = upload_summary.get('processed', 0)
         failed = upload_summary.get('failed', 0)
         elapsed = upload_summary.get('elapsed', 0.0)
+        total_input = upload_summary.get('total_input', processed + failed)
         if processed > 0:
-            st.success(f"直近の{label}ファイル読み込み: {processed}件（経過 {elapsed:.1f} 秒, 失敗 {failed}件）")
+            st.success(
+                f"直近の入力ファイル読み込み: 入力{total_input}件中、"
+                f"DXFファイルとして{processed}件を読み込みました"
+                f"（経過 {elapsed:.1f} 秒, 失敗 {failed}件）"
+            )
         elif failed > 0:
-            st.warning(f"直近の{label}ファイル読み込みは失敗しました（経過 {elapsed:.1f} 秒）")
+            st.warning(f"直近の入力ファイル読み込みは失敗しました（経過 {elapsed:.1f} 秒）")
 
     if st.session_state.get(failures_key):
         with st.expander(f"アップロードできなかった{label}ファイル", expanded=False):
             for name in st.session_state[failures_key]:
                 st.write(f"- {name}")
+
+
+def render_accepted_files_table(files_dict, label, show_source=False):
+    """
+    受理された（＝図番フォーマットに一致しファイル読み込みに成功した）DXFファイルの
+    一覧を折りたたみ式テーブルで表示する。
+
+    st.file_uploader 自体のファイル一覧（ドロップ直後のプレビュー）は、選択された
+    ファイルすべて（図番フォーマットに一致しないものも含む）を表示する仕様であり、
+    これを絞り込む/非表示にする公開APIが無い（内部DOM依存のCSSハックはバージョン
+    アップで壊れやすいため採用しない）。そのため「実際に読み込まれたDXFファイルだけ」
+    を確認する手段として、この関数が「ファイルを読み込む」実行後の正式な一覧表示を担う。
+
+    Args:
+        files_dict: 図番をキーとしたファイル情報辞書
+        label: 表示ラベル（「流用元（旧）図面」等）
+        show_source: True の場合、DXFから抽出した流用元図番の列も表示する
+    """
+    if not files_dict:
+        return
+    st.info(f"読み込み済み{label}: {len(files_dict)}件")
+    with st.expander(f"{label}一覧を表示", expanded=False):
+        rows = []
+        for drawing_number, info in sorted(files_dict.items()):
+            row = {'図番': drawing_number, 'ファイル名': info.get('filename', '')}
+            if show_source:
+                row['流用元図番（抽出）'] = info.get('source_drawing_number') or ''
+            rows.append(row)
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width='stretch')
 
 
 def render_step0_master():
@@ -898,13 +951,14 @@ def _render_step1_auto_mode():
     st.subheader("Step 2-1: 流用元（旧）DXFファイルのアップロード")
     st.caption(
         "ファイル名（拡張子なし）が図番として使用されます。"
-        "フォルダを丸ごとドラッグ&ドロップすると、サブフォルダ内も含めて図番フォーマット"
-        "（例: EE1234-567-89A / EE1234-567A）に一致するDXFファイルのみが読み込まれます。"
+        "フォルダをドラッグ&ドロップすると、サブフォルダ内も含めて図番フォーマット"
+        "（例: EE1234-567-89A / EE1234-567A）に一致するDXFファイルが自動的に抽出されます。"
+        "複数のフォルダを読み込む場合は、フォルダを1つずつ順番にアップロードしてください"
+        "（まとめてドロップすると一部が読み込まれないことがあります）。"
     )
 
     source_uploaded_files = st.file_uploader(
-        "流用元（旧）DXFファイルをアップロードしてください（複数可・フォルダ可・複数回可）",
-        type=ui_config.DXF_FILE_TYPES,
+        "DXFファイル（流用元/旧、複数可・フォルダ可・複数回可）",
         accept_multiple_files=True,
         key=f"source_upload_{st.session_state.source_upload_key}",
         help="流用元となる旧図面をアップロードしてください"
@@ -913,19 +967,20 @@ def _render_step1_auto_mode():
     render_upload_status('source_upload_summary', 'source_upload_failures', '流用元')
 
     source_count = len(st.session_state.source_files_dict)
-    if source_count > 0:
-        st.info(f"流用元（旧）図面: {source_count}件 読み込み済み")
+    render_accepted_files_table(st.session_state.source_files_dict, "流用元（旧）図面")
 
     # Step 2-2: 流用先DXFファイルのアップロード
     st.subheader("Step 2-2: 流用先（新）DXFファイルのアップロード")
     st.caption(
-        "フォルダを丸ごとドラッグ&ドロップすると、サブフォルダ内も含めて図番フォーマット"
-        "（例: EE1234-567-89A / EE1234-567A）に一致するDXFファイルのみが読み込まれます。"
+        "ファイル名（拡張子なし）が図番として使用され、DXFファイルの内容から流用元図番も"
+        "自動抽出されます。フォルダをドラッグ&ドロップすると、サブフォルダ内も含めて"
+        "図番フォーマットに一致するDXFファイルが自動的に抽出されます。"
+        "複数のフォルダを読み込む場合は、フォルダを1つずつ順番にアップロードしてください"
+        "（まとめてドロップすると一部が読み込まれないことがあります）。"
     )
 
     dest_uploaded_files = st.file_uploader(
-        "流用先（新）DXFファイルをアップロードしてください（複数可・フォルダ可・複数回可）",
-        type=ui_config.DXF_FILE_TYPES,
+        "DXFファイル（流用先/新、複数可・フォルダ可・複数回可）",
         accept_multiple_files=True,
         key=f"dest_upload_{st.session_state.dest_upload_key}",
         help="新しく作成した図面をアップロードしてください"
@@ -934,8 +989,7 @@ def _render_step1_auto_mode():
     render_upload_status('dest_upload_summary', 'dest_upload_failures', '流用先')
 
     dest_count = len(st.session_state.dest_files_dict)
-    if dest_count > 0:
-        st.info(f"流用先（新）図面: {dest_count}件 抽出済み")
+    render_accepted_files_table(st.session_state.dest_files_dict, "流用先（新）図面", show_source=True)
 
     # 読み込みボタン（両グループ共通）
     has_new_files = bool(source_uploaded_files) or bool(dest_uploaded_files)
@@ -1019,13 +1073,14 @@ def _render_step1_pair_list_mode():
     st.subheader("Step 2-2: DXFファイルのアップロード（流用元・流用先まとめて）")
     st.caption(
         "ファイル名（拡張子なし）が図番として使用されます。流用元と流用先のファイルをまとめてアップロードしてください。"
-        "フォルダを丸ごとドラッグ&ドロップすると、サブフォルダ内も含めて図番フォーマット"
-        "（例: EE1234-567-89A / EE1234-567A）に一致するDXFファイルのみが読み込まれます。"
+        "フォルダをドラッグ&ドロップすると、サブフォルダ内も含めて図番フォーマット"
+        "（例: EE1234-567-89A / EE1234-567A）に一致するDXFファイルが自動的に抽出されます。"
+        "複数のフォルダを読み込む場合は、フォルダを1つずつ順番にアップロードしてください"
+        "（まとめてドロップすると一部が読み込まれないことがあります）。"
     )
 
     all_uploaded_files = st.file_uploader(
-        "DXFファイル（複数可）",
-        type=ui_config.DXF_FILE_TYPES,
+        "DXFファイル（複数可・フォルダ可・複数回可）",
         accept_multiple_files=True,
         key=f"all_upload_{st.session_state.all_upload_key}",
     )
@@ -1033,8 +1088,7 @@ def _render_step1_pair_list_mode():
     render_upload_status('all_upload_summary', 'all_upload_failures', 'DXF')
 
     all_count = len(st.session_state.all_files_dict)
-    if all_count > 0:
-        st.info(f"読み込み済みDXFファイル: {all_count}件")
+    render_accepted_files_table(st.session_state.all_files_dict, "DXFファイル")
 
     has_new_files = bool(all_uploaded_files)
     if st.button("ファイルを読み込む", key="process_all_files", type="primary", disabled=not has_new_files):
@@ -1117,13 +1171,14 @@ def _render_step1_all_in_one_mode():
     st.caption(
         "流用元・流用先を区別せず全DXFファイルをアップロードしてください。\n"
         "ファイル名（拡張子なし）が図番として使用され、DXFから抽出した流用元図番でペアを自動作成します。\n"
-        "フォルダを丸ごとドラッグ&ドロップすると、サブフォルダ内も含めて図番フォーマット"
-        "（例: EE1234-567-89A / EE1234-567A）に一致するDXFファイルのみが読み込まれます。"
+        "フォルダをドラッグ&ドロップすると、サブフォルダ内も含めて図番フォーマット"
+        "（例: EE1234-567-89A / EE1234-567A）に一致するDXFファイルが自動的に抽出されます。"
+        "複数のフォルダを読み込む場合は、フォルダを1つずつ順番にアップロードしてください"
+        "（まとめてドロップすると一部が読み込まれないことがあります）。"
     )
 
     all_in_one_uploaded_files = st.file_uploader(
-        "DXFファイル（複数可）",
-        type=ui_config.DXF_FILE_TYPES,
+        "DXFファイル（複数可・フォルダ可・複数回可）",
         accept_multiple_files=True,
         key=f"all_in_one_upload_{st.session_state.all_in_one_upload_key}",
     )
@@ -1131,8 +1186,7 @@ def _render_step1_all_in_one_mode():
     render_upload_status('all_in_one_upload_summary', 'all_in_one_upload_failures', 'DXF')
 
     all_in_one_count = len(st.session_state.all_in_one_files_dict)
-    if all_in_one_count > 0:
-        st.info(f"読み込み済みDXFファイル: {all_in_one_count}件")
+    render_accepted_files_table(st.session_state.all_in_one_files_dict, "DXFファイル", show_source=True)
 
     has_new_files = bool(all_in_one_uploaded_files)
     if st.button("ファイルを読み込む", key="process_all_in_one_files", type="primary", disabled=not has_new_files):
@@ -1440,9 +1494,10 @@ def render_step3_diff(complete_pairs):
         else:
             st.error("全てのペアで処理に失敗しました ❌")
 
-        # 結果詳細
+        # 結果詳細（流用先（新）のABC順に表示。results 自体（zip内のファイル生成順等
+        # には影響しない）は変更せず、表示用にソート済みで走査するのみ。2026-08）
         result_data = []
-        for result in results:
+        for result in sorted(results, key=lambda r: r['main_drawing'] or ''):
             status = "✅ 成功" if result['success'] else "❌ 失敗"
             entity_counts = result.get('entity_counts')
 
@@ -1537,6 +1592,18 @@ def render_step3_diff(complete_pairs):
             # 自動生成値から編集した（＝入力欄の値が前回表示した自動生成値と異なる）
             # 場合は、以後シグネチャが変わっても上書きしない
             # （レビジョン等の手入力が rerun のたびに消えてしまう不具合の対策）。
+            # 仕様（2026-08 確定）:
+            #   - Step 5 に新しく入った時点（初回、またはデフォルト値が変わった時点）では、
+            #     ファイル名がデフォルトのままであっても常に未確定の状態から始まる。
+            #     「ファイル名を確定」ボタンを押すまで「ZIPでダウンロード」は表示しない。
+            #   - 確定はボタンクリックでのみ行う。テキスト入力欄でのEnter/blurは
+            #     確定として扱わない（Enterでも確定できてしまうと、ユーザーが確定した
+            #     つもりがない状態でも古い/新しい値が紛れやすくなるため、確定手段を
+            #     ボタン1つに一本化する——2026-08 ユーザー確認）。
+            #   - 確定後にファイル名を再度編集すると、再び未確定の状態に戻り、
+            #     ダウンロードするには改めてボタンを押す必要がある。
+            # zip_basename_confirmed は「未確定」を表す番人として None を使う
+            # （確定後は文字列になる）。
             default_zip_basename = compute_default_zip_basename(
                 st.session_state.master_file_name, st.session_state.step1_mode, "01"
             )
@@ -1544,29 +1611,68 @@ def render_step3_diff(complete_pairs):
             not_user_edited = st.session_state.get('zip_basename_input') == st.session_state.get('zip_basename_last_default')
             if not_yet_initialized or (not_user_edited and st.session_state.get('zip_basename_input') != default_zip_basename):
                 st.session_state.zip_basename_input = default_zip_basename
+                st.session_state.zip_basename_confirmed = None  # 未確定から開始
             st.session_state.zip_basename_last_default = default_zip_basename
+            if 'zip_basename_confirmed' not in st.session_state:
+                st.session_state.zip_basename_confirmed = None
 
-            zip_basename = st.text_input(
+            st.text_input(
                 "ダウンロードするZIPファイル名（拡張子なし）",
                 key='zip_basename_input',
             )
+
             st.caption(
                 "末尾の数字はレビジョンです。デフォルトは「01」です。"
                 "同じ指番・モジュール・サイドで複数回差分抽出する場合は、"
                 "レビジョン番号を手動で変更してください。"
+                "デフォルトのままダウンロードする場合も、"
+                "先に「ファイル名を確定」を押してください。"
             )
 
-            downloaded = st.session_state.get('downloaded', False)
-            st.download_button(
-                label="ZIPでダウンロード",
-                data=st.session_state.zip_data,
-                file_name=f"{(zip_basename or '').strip() or default_zip_basename}.zip",
-                mime="application/zip",
-                key="download_zip",
-                type="primary",
-                disabled=downloaded,
-                on_click=lambda: st.session_state.update({'downloaded': True})
+            # st.download_button はクリック時にサーバーへ再接続してファイル名を
+            # 再計算しない——直前のrerunでレンダリングされた内容をブラウザが
+            # そのままダウンロードするだけの仕組みのため、テキスト入力欄を編集した
+            # 直後（Enter/blurで確定する前）にこのボタンを押すと、編集前の
+            # ファイル名（既定の「..._01」）でダウンロードされてしまう不具合が
+            # あった（2026-08 ユーザー報告）。「ファイル名を確定」ボタンを唯一の
+            # 確定手段にすることで解消。通常の st.button はクリックのたびにその
+            # 時点の全ウィジェットの値（未確定の編集中テキストも含む）を携えて
+            # rerun するため、このボタンを経由させれば、その時点の最新入力値を
+            # zip_basename_confirmed に確実に反映できる。st.download_button には
+            # 常にこの確定済みの値だけを渡す。
+            #
+            # ボタン表示（streamlitスキル§11の動的ボタン色分けパターン。2026-08）:
+            # 未確定の間（zip_basename_confirmed が None、または入力欄の現在値と
+            # 一致しない間）は「ファイル名を確定」のみ青色（primary）で表示し、
+            # 「ZIPでダウンロード」は非表示にする——誤って古い名前・未確定のまま
+            # ダウンロードできてしまう余地を無くすため、グレーアウトではなく非表示を
+            # 選んだ。確定済みになったら逆に「ファイル名を確定」を非表示にし、
+            # 「ZIPでダウンロード」を青色で表示する。
+            needs_confirmation = (
+                st.session_state.zip_basename_confirmed is None
+                or (st.session_state.zip_basename_input or '') != st.session_state.zip_basename_confirmed
             )
+
+            if needs_confirmation:
+                if st.button("ファイル名を確定", key="confirm_zip_basename", type="primary"):
+                    st.session_state.zip_basename_confirmed = (
+                        (st.session_state.zip_basename_input or '').strip() or default_zip_basename
+                    )
+                    st.rerun()  # ボタン表示をこの場で「ZIPでダウンロード」側に切り替えるため
+                st.caption("「ファイル名を確定」を押すと、上記の内容でダウンロードできるようになります。")
+            else:
+                downloaded = st.session_state.get('downloaded', False)
+                st.download_button(
+                    label="ZIPでダウンロード",
+                    data=st.session_state.zip_data,
+                    file_name=f"{st.session_state.zip_basename_confirmed}.zip",
+                    mime="application/zip",
+                    key="download_zip",
+                    type="primary",
+                    disabled=downloaded,
+                    on_click=lambda: st.session_state.update({'downloaded': True})
+                )
+                st.caption(f"ダウンロードされるファイル名: **{st.session_state.zip_basename_confirmed}.zip**")
 
             # オプション設定の情報を表示
             st.info(f"""
