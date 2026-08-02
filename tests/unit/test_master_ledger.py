@@ -447,6 +447,26 @@ def test_parse_master_filename_returns_none_for_non_matching_name():
     assert parse_master_filename(None) == (None, None, None)
 
 
+def test_parse_master_filename_allows_underscore_suffix():
+    """指番_モジュール_サイドの後ろに "_" 区切りで任意の文字列が続いても認識する
+    （2026-08、既存台帳の再アップロード時に元のダウンロードファイル名〈例:
+    Ledger-merger 側が生成する "..._all.xlsx"〉に接尾辞が付くケースへの対応）。"""
+    shiban, module, side = parse_master_filename('AA11-1111-1_ZM00_405_all.xlsx')
+    assert (shiban, module, side) == ('AA11-1111-1', 'ZM00', '405')
+
+
+def test_parse_master_filename_allows_hyphen_suffix():
+    """区切り文字は "-" も許容する。"""
+    shiban, module, side = parse_master_filename('AA11-1111-1_ZM00_405-all.xlsx')
+    assert (shiban, module, side) == ('AA11-1111-1', 'ZM00', '405')
+
+
+def test_parse_master_filename_rejects_suffix_without_separator():
+    """区切り文字なしで直接くっつく形式は非対応のまま
+    （サイド直後の文字がサイドの一部か付加文字列かを区別できないため）。"""
+    assert parse_master_filename('AA11-1111-1_ZM00_4050.xlsx') == (None, None, None)
+
+
 # --- create_empty_drawing_list_df ---
 
 def test_create_empty_drawing_list_df_has_required_columns():

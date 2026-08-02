@@ -132,7 +132,7 @@ DXF-diff-manager/
 | `create_empty_master_df()` | 空の台帳DataFrameを作成 |
 | `save_master_to_bytes(master_df, pairs=None, mode=None, total_drawings_count=None, drawing_list_df=None)` | 台帳をExcelバイトデータ（Summary + Diff List + Drawing List）に変換 |
 | `make_dataframe_arrow_compatible(df)` | 数値と文字列（`"n/a"`）が混在した object 型カラムを持つDataFrameを、pyarrowシリアライズ可能にした**表示用コピー**として返す（元のdfは不変）。`st.dataframe` プレビュー前処理用（後述） |
-| `parse_master_filename(filename)` | 台帳ファイル名（`"{指番}_{モジュール}_{サイド}.xlsx"`）から指番/モジュール/サイドを逆算。一致しなければ `(None, None, None)`（2026-08 追加。以前 `app.py` にあった同ロジックを一本化） |
+| `parse_master_filename(filename)` | 台帳ファイル名（`"{指番}_{モジュール}_{サイド}.xlsx"`、末尾に `_`/`-` 区切りで任意の文字列が続くものも可）から指番/モジュール/サイドを逆算。一致しなければ `(None, None, None)`（2026-08 追加。以前 `app.py` にあった同ロジックを一本化。同月、区切り文字付き接尾辞への対応を追加） |
 | `create_empty_drawing_list_df()` | 空の Drawing List DataFrame を作成（2026-08 追加） |
 | `load_drawing_list(uploaded_file)` | 台帳ファイルから `Drawing List` シートを読み込む。シートが無ければエラーにせず空DFを返す。`(df, error)` を返す（2026-08 追加） |
 | `update_drawing_list(drawing_list_df, new_entries, shiban, module, side)` | Drawing List に新規の Child Drawing Number のみ追加（既存行は上書きしない）。`(df, added_count)` を返す（2026-08 追加） |
@@ -421,11 +421,16 @@ DXFとして受理された件数を分けて示す。`process_all_uploaded_file
 `st.text_input` を配置している。`compute_default_zip_basename(master_file_name,
 step1_mode, revision)`（app.py）が初期値を組み立てる:
 
-- `master_file_name` が `"{指番}_{モジュール}_{サイド}.xlsx"` 形式
+- `master_file_name` が `"{指番}_{モジュール}_{サイド}.xlsx"` 形式（末尾に `_`/`-`
+  区切りで任意の文字列が続くものも含む。例: `"AA11-1111-1_ZM00_405_all.xlsx"`。
+  区切り文字なしで直接くっつく形式は非対応——サイド直後の文字がサイドの一部か
+  付加文字列かを区別できないため）
   （`model.master_ledger.MASTER_FILENAME_PATTERN`/`parse_master_filename()` に一致。
   2026-08: app.py独自定義だった正規表現を model 層に一本化——Drawing List の
-  Sashiban/Module/Side 逆算と同じロジックを共有するため。台帳を新規作成した場合、
-  または同じ命名規則の台帳をアップロードした場合）なら、
+  Sashiban/Module/Side 逆算と同じロジックを共有するため。同月、既存台帳の
+  再アップロード時にファイル名へ接尾辞が付くケース〈Ledger-merger が生成する
+  `..._all.xlsx` 等〉に対応するため区切り文字付き接尾辞を許容するよう拡張。
+  台帳を新規作成した場合、または同じ命名規則の台帳をアップロードした場合）なら、
   `dxf_diff_results_Type{A/B/C}_{指番}_{モジュール}_{サイド}_{リビジョン}` を生成する。
   `Type{A/B/C}` は `PAIRING_TYPE_LETTERS`（`{'all_in_one': 'A', 'auto': 'B',
   'pair_list': 'C'}`）による `step1_mode` の変換で、画面の「Type A/B/C」表記と一致させる
@@ -2403,6 +2408,20 @@ BASE_DIR = Path("/Users/ryozo/Dropbox/Client/ULVAC/ElectricDesignManagement/Tool
 **副次修正**: LWPOLYLINE の `lineweight` も `attrs` から取得して保持するよう追加。
 
 ---
+
+*最終更新: 2026-08-02（ユーザー報告: Step 1で「既存の台帳をアップロード」を選んだ際、
+アップロードした台帳ファイル名が `"{指番}_{モジュール}_{サイド}.xlsx"` に完全一致
+しないと（例: Ledger-merger が生成する `"..._all.xlsx"` を再アップロードした場合）、
+ZIPファイル名が既定の `dxf_diff_results` にフォールバックし、Drawing List の
+Sashiban/Module/Side が空欄になっていた。`model.master_ledger.MASTER_FILENAME_PATTERN`
+に、サイドの直後に `_`/`-` 区切りで任意の文字列が続くことを許容する任意グループ
+`(?:[_-].*)?` を追加して解消。区切り文字なしで直接くっつく形式（例:
+`"AA11-1111-1_ZM00_4050.xlsx"`）は、サイド直後の文字がサイドの一部か付加文字列かを
+区別できないため意図的に非対応のまま。`compute_default_zip_basename()`（app.py）・
+Drawing List の Sashiban/Module/Side 記録（`model/diff_export.py`）はいずれも
+`parse_master_filename()` の戻り値をそのまま使うだけのため、この1関数の修正で両方に
+反映される。回帰テスト4件追加（`tests/unit/test_master_ledger.py` に3件・
+`tests/regression/test_zip_filename_default.py` に1件）、全131件pass）*
 
 *最終更新: 2026-08-01（(1) 図面管理台帳Excelを2シート構成→**3シート構成**に変更し
 「Drawing List」シートを新設（Diff Listの後ろ）。差分処理対象となった入力ファイルを
