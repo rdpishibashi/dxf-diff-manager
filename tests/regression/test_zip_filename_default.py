@@ -55,6 +55,14 @@ def test_unparseable_uploaded_master_filename_falls_back_to_legacy_name():
     assert result == "dxf_diff_results", result
 
 
+def test_uploaded_master_filename_with_underscore_suffix_still_parses():
+    """指番_モジュール_サイドの後ろに "_" 区切りで接尾辞が付いた台帳
+    （例: Ledger-merger が生成する "..._all.xlsx" を再アップロードした場合）でも
+    指番/モジュール/サイドを認識できる（2026-08）。"""
+    result = app.compute_default_zip_basename("ME24-1001-0_ZC00_405_all.xlsx", "all_in_one", "01")
+    assert result == "dxf_diff_results_TypeA_ME24-1001-0_ZC00_405_01", result
+
+
 def _run_all():
     tests = [v for k, v in sorted(globals().items()) if k.startswith('test_') and callable(v)]
     failures = []
