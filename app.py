@@ -552,25 +552,17 @@ def render_pair_list():
     else:
         # Type A/B: 流用元のDXFファイルが未アップロードのペア（流用先の図面のみが対象。
         # missing_target/missing_both は方式C専用のステータスのため常に空）。
-        # 同じ流用先に RevUp の差分抽出可能ペアがある場合は、その流用元図番を併記する。
+        # RevUp と競合する流用ペアは build_pairs() の時点で生成されなくなったため
+        # （2026-08-29）、ここに並ぶ流用先が同時に RevUp の complete ペアを持つ
+        # ことはない（RevUpがあれば流用側はそもそも作られない）。
         if missing_pairs:
-            revup_source_by_target = {
-                p['main_drawing']: p['source_drawing']
-                for p in complete_pairs
-                if p.get('relation') == 'RevUp'
-            }
             missing_data = []
             for pair in sorted(missing_pairs, key=lambda p: p['main_drawing'] or ''):
-                revup_source = revup_source_by_target.get(pair['main_drawing'])
-                if revup_source:
-                    status = f'⚠️ 流用元の図面ファイルなし・RevUpあり（{revup_source}）'
-                else:
-                    status = '⚠️ 流用元の図面ファイルなし'
                 missing_data.append({
                     '流用先（新）': pair['main_drawing'],
                     '流用元（旧）': pair['source_drawing'],
                     '関係': pair.get('relation', 'なし'),
-                    'ステータス': status
+                    'ステータス': '⚠️ 流用元の図面ファイルなし'
                 })
 
             with st.expander(f"⚠️ 流用元図番の図面がない図面：{len({p['main_drawing'] for p in missing_pairs})}件", expanded=False):

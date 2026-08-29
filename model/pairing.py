@@ -135,14 +135,17 @@ def build_pairs(source_files, target_files, progress_callback=None):
       1. RevUpパス : find_revup_pairs() で同一ベース図番・リビジョン差のペアを
                      status=complete, relation=RevUp で生成。
       2. 流用パス  : 流用先ファイルの source_drawing_number を source_files から検索。
-                     RevUp で生成済みの同一(流用先,流用元)ペアは重複させない。
                      未生成なら、対応する流用元ファイルがあれば complete、
                      なければ missing_source（relation=流用）。
       3. 孤立パス  : いずれの役割でもペアに登場せず、流用元図番も未記入（または
                      自分自身）の流用先を no_source_defined として追記。
 
-    RevUp で対応済みの流用先でも別の流用元図番を持つ場合は独立した流用ペアを
-    追加するため、同一の流用先図番が双方に登場し得る。
+    流用と RevUp が競合する場合（同一の流用先図番が RevUp パスで既にペア化されて
+    いる場合）は、流用パスでのペア生成をスキップし、RevUp 側のみを採用する
+    （Drawing-genealogy の GraphBuilder._reuse_pairs_to_delete() と同じ方針、
+    2026-08-29 変更。旧仕様では同一の流用先図番が RevUp ペア・流用ペアの双方に
+    登場し得たため、両ファイルが揃っている場合に同じ図面へ2回差分抽出が走る
+    不具合があった）。
 
     Args:
         source_files: 流用元（旧）の図番をキーとしたファイル情報の辞書
@@ -172,13 +175,13 @@ def build_pairs(source_files, target_files, progress_callback=None):
         pairs.append(pair)
     report_progress(0.3, "RevUpペアの解析が完了しました", len(used_target), total_files)
 
-    # 2. 流用 パス
+    # 2. 流用 パス（RevUp と競合する場合は流用ペアを作らず RevUp のみ採用する）
     total_targets = len(target_files)
     processed_targets = 0
     for main_drawing, file_info in target_files.items():
         source_drawing = file_info.get('source_drawing_number')
 
-        if source_drawing and source_drawing != main_drawing:
+        if source_drawing and source_drawing != main_drawing and main_drawing not in used_target:
             key = (main_drawing, source_drawing)
             if key not in pair_keys:
                 source_file_info = source_files.get(source_drawing)

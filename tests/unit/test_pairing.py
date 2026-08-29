@@ -89,17 +89,22 @@ def test_find_revup_cross_groups():
 
 # --- build_pairs (mode A: pool, pool) ---
 
-def test_build_pairs_single_pool_revup_when_source_missing():
+def test_build_pairs_single_pool_revup_wins_over_missing_source():
+    """RevUp と 流用(missing_source) が競合する場合、流用ペアは作られず RevUp のみ残る。"""
     pool = {
         'EE6333-365-61C': _f('EE6333-365-61C', source='EE6331-365-61A'),  # 別系統・未UP
         'EE6333-365-61B': _f('EE6333-365-61B'),
     }
     pairs = build_pairs(pool, pool)
     assert ('EE6333-365-61C', 'EE6333-365-61B') in _keys(pairs, relation=RELATION_REVUP)
-    assert ('EE6333-365-61C', 'EE6331-365-61A') in _keys(pairs, status=STATUS_MISSING_SOURCE)
+    assert ('EE6333-365-61C', 'EE6331-365-61A') not in _keys(pairs, status=STATUS_MISSING_SOURCE)
+    rels = {p['relation'] for p in pairs if p['main_drawing'] == 'EE6333-365-61C'}
+    assert rels == {RELATION_REVUP}
 
 
 def test_build_pairs_single_pool_same_target_twice():
+    """RevUp と 流用(complete) が競合する場合も、流用ペアは作られず RevUp のみ残る
+    （両ファイルが揃っていても同一図面へ二重に差分抽出しないための仕様、2026-08-29）。"""
     pool = {
         'EE6333-365-61C': _f('EE6333-365-61C', source='XX9999-000-01A'),
         'EE6333-365-61B': _f('EE6333-365-61B'),
@@ -107,7 +112,9 @@ def test_build_pairs_single_pool_same_target_twice():
     }
     pairs = build_pairs(pool, pool)
     rels = {p['relation'] for p in pairs if p['main_drawing'] == 'EE6333-365-61C'}
-    assert rels == {RELATION_REVUP, RELATION_DEPENDENCY}
+    assert rels == {RELATION_REVUP}
+    targets_61c = [p for p in pairs if p['main_drawing'] == 'EE6333-365-61C']
+    assert len(targets_61c) == 1
 
 
 def test_build_pairs_single_pool_revup_source_not_orphan():
@@ -125,12 +132,13 @@ def test_build_pairs_single_pool_isolated_orphan():
 
 # --- build_pairs (mode B: source, target) ---
 
-def test_build_pairs_auto_independent_passes():
+def test_build_pairs_auto_revup_wins_over_missing_source():
+    """方式B（auto）でも RevUp と 流用(missing_source) が競合する場合は RevUp のみ残る。"""
     source = {'EE6333-365-61B': _f('EE6333-365-61B')}
     target = {'EE6333-365-61C': _f('EE6333-365-61C', source='EE6331-365-61A')}
     pairs = build_pairs(source, target)
     assert ('EE6333-365-61C', 'EE6333-365-61B') in _keys(pairs, relation=RELATION_REVUP)
-    assert ('EE6333-365-61C', 'EE6331-365-61A') in _keys(pairs, status=STATUS_MISSING_SOURCE)
+    assert ('EE6333-365-61C', 'EE6331-365-61A') not in _keys(pairs, status=STATUS_MISSING_SOURCE)
 
 
 def test_build_pairs_auto_exact_dup_dedup():
@@ -188,14 +196,18 @@ def test_build_pairs_from_list_missing_both():
 # 2026-06: 同じ流用先図番（main_drawing）が複数ステータスのペアに登場するケースで、
 # Step3 の各セクション集計（差分抽出が可能なペア / 流用元図番の図面がない図面 /
 # 変更していない図面 等）の合計が流用先総数と一致しなくなる実バグが見つかった。
-# 実データ（sample-dxf）でも RevUp パスと流用パスの両方が同一の流用先図番に対し
-# 異なるステータスのペアを生成するケースが確認されている。
+# 2026-08-29: 方式A/Bでは RevUp と 流用 が競合する場合に流用ペア自体を作らなくなった
+# （build_pairs()参照）ため、この重複は方式A/Bではもう発生しない。ただし方式C
+# （ペアリストに同一の流用先図番が複数行ある場合）では引き続き発生し得るため、
+# primary_status_by_drawing() 自体のdedup機能は必要。
 
-def test_primary_status_prefers_complete_over_missing_source_revup_case():
-    """方式A/B: 同一の流用先が RevUp(complete) と 流用(missing_source) の両方に登場するケース。"""
+def test_primary_status_single_pair_when_revup_wins():
+    """方式A/B: RevUp と競合する 流用 は build_pairs() 時点で除去されるため、
+    そもそも重複ペアが発生しないことを確認する（primary_status は単純に1件を返す）。"""
     source = {'X002A': _f('X002A')}
     target = {'X002B': _f('X002B', source='Y999')}  # Y999 は未アップロード
     pairs = build_pairs(source, target)
+    assert len([p for p in pairs if p['main_drawing'] == 'X002B']) == 1
     primary = primary_status_by_drawing(pairs)
     assert primary == {'X002B': STATUS_COMPLETE}
 
