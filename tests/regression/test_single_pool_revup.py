@@ -1,11 +1,16 @@
 """
 方式 A（all_in_one）の create_pairs_from_single_pool における
-流用ペア・RevUp ペアの併行検出に関する回帰テスト。
+流用ペア・RevUp ペアの検出優先順位に関する回帰テスト。
 
 背景:
-    流用元図番がプールに完全一致で存在しない場合に missing_source とするだけで、
-    同一ベース図番の別リビジョン（RevUp 相手）がプール内にあっても検出していなかった。
-    流用判定と RevUp 判定を独立して行い、両方のペアを出力するよう修正した。
+    2026-06: 流用元図番がプールに完全一致で存在しない場合に missing_source とする
+    だけで、同一ベース図番の別リビジョン（RevUp 相手）がプール内にあっても検出して
+    いなかった。流用判定と RevUp 判定を独立して行い、両方のペアを出力するよう修正した。
+    2026-08-29: しかし「同一流用先が双方に登場し得る」仕様は、流用元・RevUp相手の
+    両ファイルが揃っている場合に同じ図面へ2回差分抽出が走る不具合の原因になって
+    いた。Drawing-genealogy プロジェクトの「流用とRevUpが競合する場合は流用関係を
+    削除してRevUpだけを採用する」仕様に合わせ、RevUp が検出された流用先について
+    は流用パスでのペア生成自体を行わない（RevUp優先・流用削除）よう変更した。
 
 実行:
     cd DXF-diff-manager
@@ -38,8 +43,9 @@ def _keys(pairs, status=None, relation=None):
     }
 
 
-def test_revup_detected_when_source_missing():
-    """流用元図番がプールに無くても RevUp 相手があれば検出する（本件の主症状）。"""
+def test_revup_wins_over_missing_source():
+    """流用元図番がプールに無くても RevUp 相手があれば検出し、その場合は流用パスの
+    missing_source ペアは作られない（RevUp優先・流用削除）。"""
     pool = {
         # ...61C は流用元として ...61A を記載しているが ...61A はプールに無い
         'EE6333-365-61C': _f('EE6333-365-61C', source='EE6333-365-61A'),
@@ -52,14 +58,15 @@ def test_revup_detected_when_source_missing():
     assert ('EE6333-365-61C', 'EE6333-365-61B') in revup, \
         f"RevUp ペア(61C×61B)が検出されていない: {pairs}"
 
-    # 流用元 ...61A は実在しないので流用判定としては missing_source のまま残る
+    # RevUp と競合するため、流用元 ...61A の missing_source ペアは作られない
     missing = _keys(pairs, status='missing_source')
-    assert ('EE6333-365-61C', 'EE6333-365-61A') in missing, \
-        f"流用 missing_source(61C×61A)が消えている: {pairs}"
+    assert ('EE6333-365-61C', 'EE6333-365-61A') not in missing, \
+        f"RevUp と競合する流用 missing_source(61C×61A)が残ってしまっている: {pairs}"
 
 
-def test_same_target_can_appear_multiple_times():
-    """同じ流用先が流用ペアと RevUp ペアの双方に登場できる。"""
+def test_revup_wins_over_complete_dependency():
+    """RevUp が検出された流用先は、別の流用元ファイルが揃っていて流用が complete に
+    なり得る場合でも、流用ペアを作らず RevUp のみが残る（同一図面への二重差分抽出防止）。"""
     pool = {
         'EE6333-365-61C': _f('EE6333-365-61C', source='XX9999-000-01A'),  # 別系統の流用
         'EE6333-365-61B': _f('EE6333-365-61B', source=None),
@@ -67,9 +74,10 @@ def test_same_target_can_appear_multiple_times():
     }
     pairs = app.create_pairs_from_single_pool(pool)
     targets_61c = [p for p in pairs if p['main_drawing'] == 'EE6333-365-61C']
+    assert len(targets_61c) == 1, f"61C は RevUp1件のみが残るべき（二重登録防止）: {targets_61c}"
     relations = {p['relation'] for p in targets_61c}
-    assert relations == {'RevUp', '流用'}, \
-        f"61C が RevUp と 流用 の両方に登場していない: {targets_61c}"
+    assert relations == {'RevUp'}, \
+        f"61C は RevUp のみが残るべき: {targets_61c}"
 
 
 def test_exact_revup_pair_not_duplicated():

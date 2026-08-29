@@ -1,11 +1,16 @@
 """
 方式 B（auto）の create_pair_list における
-流用ペア・RevUp ペアの併行検出に関する回帰テスト。
+流用ペア・RevUp ペアの検出優先順位に関する回帰テスト。
 
 背景:
-    従来 auto モードは RevUp ペアを最優先で消費し、消費された流用先は流用判定の
-    対象外だった。方式 A と挙動を揃え、流用判定と RevUp 判定を独立して実行し、
-    両方のペアを出力する（同一流用先が双方に登場し得る）よう変更した。
+    2026-06: 従来 auto モードは RevUp ペアを最優先で消費し、消費された流用先は
+    流用判定の対象外だった。方式 A と挙動を揃え、流用判定と RevUp 判定を独立して
+    実行し、両方のペアを出力する（同一流用先が双方に登場し得る）よう変更した。
+    2026-08-29: しかし「同一流用先が双方に登場し得る」仕様は、流用元・RevUp相手の
+    両ファイルが揃っている場合に同じ図面へ2回差分抽出が走る不具合の原因になって
+    いた。Drawing-genealogy プロジェクトの「流用とRevUpが競合する場合は流用関係を
+    削除してRevUpだけを採用する」仕様に合わせ、RevUp が検出された流用先について
+    は流用パスでのペア生成自体を行わない（RevUp優先・流用削除）よう変更した。
 
 実行:
     cd DXF-diff-manager
@@ -51,29 +56,35 @@ def _keys(pairs, status=None, relation=None):
     }
 
 
-def test_revup_detected_independently():
-    """RevUp ペアが流用判定とは独立に検出される。"""
+def test_revup_wins_over_missing_source():
+    """RevUp が検出された流用先は、別系統の流用元が未アップロード(missing_source)でも
+    流用ペアを作らず RevUp のみが残る。"""
     source = {'EE6333-365-61B': _src('EE6333-365-61B')}
     dest = {'EE6333-365-61C': _dst('EE6333-365-61C', source='EE6331-365-61A')}  # 流用元は別系統・未UP
     pairs = app.create_pair_list(source, dest)
 
     assert ('EE6333-365-61C', 'EE6333-365-61B') in _keys(pairs, status='complete', relation='RevUp'), \
         f"RevUp(61C×61B)が検出されていない: {pairs}"
-    # 流用元 ...61A は流用元グループに無いので missing_source が独立して残る
-    assert ('EE6333-365-61C', 'EE6331-365-61A') in _keys(pairs, status='missing_source'), \
-        f"流用 missing_source(61C×61A)が消えている: {pairs}"
+    # 流用元 ...61A は流用元グループに無く、かつ RevUp と競合するため流用ペア自体が作られない
+    assert ('EE6333-365-61C', 'EE6331-365-61A') not in _keys(pairs, status='missing_source'), \
+        f"RevUp と競合する流用 missing_source(61C×61A)が残ってしまっている: {pairs}"
+    rels = {p['relation'] for p in pairs if p['main_drawing'] == 'EE6333-365-61C'}
+    assert rels == {'RevUp'}, f"61C は RevUp のみが残るべき: {pairs}"
 
 
-def test_same_target_appears_in_both():
-    """RevUp で対応済みの流用先でも別の流用元図番があれば両方に登場する。"""
+def test_revup_wins_over_complete_dependency():
+    """RevUp が検出された流用先は、別の流用元ファイルが揃っていて流用が complete に
+    なり得る場合でも、流用ペアを作らず RevUp のみが残る（同一図面への二重差分抽出防止）。"""
     source = {
         'EE6333-365-61B': _src('EE6333-365-61B'),
         'XX9999-000-01A': _src('XX9999-000-01A'),
     }
     dest = {'EE6333-365-61C': _dst('EE6333-365-61C', source='XX9999-000-01A')}
     pairs = app.create_pair_list(source, dest)
-    rels = {p['relation'] for p in pairs if p['main_drawing'] == 'EE6333-365-61C'}
-    assert rels == {'RevUp', '流用'}, f"61C が RevUp と 流用 の両方に登場していない: {pairs}"
+    targets_61c = [p for p in pairs if p['main_drawing'] == 'EE6333-365-61C']
+    assert len(targets_61c) == 1, f"61C は RevUp1件のみが残るべき（二重登録防止）: {pairs}"
+    rels = {p['relation'] for p in targets_61c}
+    assert rels == {'RevUp'}, f"61C は RevUp のみが残るべき: {pairs}"
 
 
 def test_exact_revup_pair_not_duplicated():
