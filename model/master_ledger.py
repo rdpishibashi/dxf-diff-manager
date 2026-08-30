@@ -11,8 +11,9 @@ from datetime import datetime
 import pandas as pd
 
 DRAWING_LIST_SHEET_NAME = "Drawing List"
+MASTER_SHEET_NAME = "Master"  # 図面管理台帳データのシート名（旧名 "Diff List"、2026-08 改名）
 
-# Diff List の「* Entities」列（object dtype: 整数と "n/a" 文字列が混在する）。
+# Master シートの「* Entities」列（object dtype: 整数と "n/a" 文字列が混在する）。
 # update_parent_child_master() のdtype統一・save_master_to_bytes() の列フォーマット
 # 適用の両方で使う共通定義。
 ENTITY_COUNT_COLUMNS = ['Deleted Entities', 'Added Entities', 'Diff Entities',
@@ -57,8 +58,8 @@ def load_parent_child_master(uploaded_file):
     本来のデータ（Child/Parent 列を持つシート）を見つけられず「必須カラムが
     見つかりません」と誤って失敗する（2026-07 実データで確認）。そのため、
     複数シートがある場合は Child/Parent 列を両方持つシートを優先的に探して読む。
-    シート名（'Diff List' 等）はこれまでの改修で変わってきた実績があるため、
-    固定シート名に依存せず列の有無で判定する。該当シートが無ければ、後方互換の
+    シート名（'Diff List' → 'Master'、2026-08改名等）はこれまでの改修で変わって
+    きた実績があるため、固定シート名に依存せず列の有無で判定する。該当シートが無ければ、後方互換の
     ため先頭シートを読み（単一シートの古い台帳・手動作成ファイル等）、従来どおり
     カラム欠落エラーとする。
 
@@ -326,7 +327,7 @@ def update_drawing_list(drawing_list_df, new_entries, shiban, module, side):
     """
     Drawing List に新規の Child Drawing Number のみを追加する。
 
-    Diff List（update_parent_child_master）と異なり、既存行は一切上書きしない
+    Master（update_parent_child_master）と異なり、既存行は一切上書きしない
     ——「新規の Child Drawing Number があれば追加する」という仕様のため、
     同じ Child が再度処理されても既存レコードはそのまま保持する。
 
@@ -379,7 +380,7 @@ def save_master_to_bytes(master_df, pairs=None, mode=None, total_drawings_count=
 
     シート構成:
       1. Summary     : 統計サマリー（エンティティ合計・図形変更率・図面統計・流用率）
-      2. Diff List   : 図面管理台帳データ
+      2. Master      : 図面管理台帳データ（旧名 "Diff List"、2026-08改名）
       3. Drawing List: 差分処理対象となった入力ファイルの記録（Child Drawing Numberでユニーク）
 
     Args:
@@ -459,7 +460,7 @@ def save_master_to_bytes(master_df, pairs=None, mode=None, total_drawings_count=
         pair_count = len([p for p in pairs if p['status'] == 'complete']) if pairs is not None else 0
         reuse_rate = (pair_count / total_drawings) if total_drawings > 0 else 0.0
 
-        # 完全新規図面数: 台帳（Diff List）の Relation='完全新規図面' の行から、
+        # 完全新規図面数: 台帳（Master）の Relation='完全新規図面' の行から、
         # Child のユニーク件数をカウントする（このExcel出力に書き込む master_df
         # 全体＝累積台帳ベースの集計。差分抽出ペア数のような「今回バッチのみ」の
         # 集計とは異なり、台帳全体の完全新規図面数を表す。2026-08 ユーザー指定）。
@@ -488,12 +489,12 @@ def save_master_to_bytes(master_df, pairs=None, mode=None, total_drawings_count=
         summary_ws.write(row, 0, '新規作成率 [%]', label_fmt)
         summary_ws.write(row, 1, brand_new_rate, pct_fmt)
 
-        # --- Diff List シート（Child で昇順ソート） ---
-        diff_list_df = master_df
+        # --- Master シート（Child で昇順ソート） ---
+        master_sheet_df = master_df
         if 'Child' in master_df.columns:
-            diff_list_df = master_df.sort_values('Child', kind='stable', na_position='last')
-        diff_list_df.to_excel(writer, sheet_name='Diff List', index=False)
-        writer.sheets['Diff List'].freeze_panes(1, 0)  # タイトル行を固定
+            master_sheet_df = master_df.sort_values('Child', kind='stable', na_position='last')
+        master_sheet_df.to_excel(writer, sheet_name=MASTER_SHEET_NAME, index=False)
+        writer.sheets[MASTER_SHEET_NAME].freeze_panes(1, 0)  # タイトル行を固定
 
         # 「* Entities」列は整数と "n/a" 文字列が混在する object dtype のため、
         # to_excel() の既定書式のままだと数値セルは右揃え・"n/a" セルは左揃えになり
@@ -501,12 +502,12 @@ def save_master_to_bytes(master_df, pairs=None, mode=None, total_drawings_count=
         # set_column）は to_excel() が既に書き込んだセルにも後から一括適用されるため、
         # 中央揃え＋桁区切りに統一する。
         entity_col_fmt = workbook.add_format({'align': 'center', 'num_format': '#,##0'})
-        diff_list_ws = writer.sheets['Diff List']
-        for col_idx, col_name in enumerate(diff_list_df.columns):
+        master_sheet_ws = writer.sheets[MASTER_SHEET_NAME]
+        for col_idx, col_name in enumerate(master_sheet_df.columns):
             if col_name in ENTITY_COUNT_COLUMNS:
-                diff_list_ws.set_column(col_idx, col_idx, None, entity_col_fmt)
+                master_sheet_ws.set_column(col_idx, col_idx, None, entity_col_fmt)
 
-        # --- Drawing List シート（Diff List の後ろ。Child Drawing Number で昇順ソート） ---
+        # --- Drawing List シート（Master の後ろ。Child Drawing Number で昇順ソート） ---
         dl_df = drawing_list_df if drawing_list_df is not None else create_empty_drawing_list_df()
         if 'Child Drawing Number' in dl_df.columns:
             dl_df = dl_df.sort_values('Child Drawing Number', kind='stable', na_position='last')

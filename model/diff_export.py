@@ -318,7 +318,7 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                 master_df, _ = update_parent_child_master(master_df, brand_new_with_counts)
 
             # Drawing List を更新（Child Drawing Number でユニーク、新規のみ追加）。
-            # Diff List/master_df とは異なり、対象は「差分抽出が成功したペア」に限らず
+            # Master/master_df とは異なり、対象は「差分抽出が成功したペア」に限らず
             # pairs 全件（Type A: プール内の全ファイル、Type B: 流用先のすべて、
             # Type C: ペアリストの全行）——build_pairs()/build_pairs_from_list() は
             # いずれもステータスを問わず main_drawing を1件も欠かさず含むため、
