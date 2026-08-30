@@ -26,6 +26,7 @@ from model.master_ledger import (
     load_drawing_list,
     update_drawing_list,
     DRAWING_LIST_SHEET_NAME,
+    MASTER_SHEET_NAME,
 )
 
 
@@ -154,6 +155,23 @@ def test_load_parent_child_master_finds_data_sheet_when_first_sheet_has_no_child
     assert list(df['Parent']) == ['A1']
 
 
+def test_load_parent_child_master_finds_data_sheet_named_master(tmp_path):
+    """2026-08改名後の現行フォーマット（データシート名 'Master'）も、旧名
+    'Diff List' と同様に列の有無で見つけて読み込める（シート名を問わない設計の確認）。"""
+    path = tmp_path / "master.xlsx"
+    with pd.ExcelWriter(path, engine='xlsxwriter') as writer:
+        pd.DataFrame({'エンティティ統計': ['削除図形 総数'], 'Unnamed: 1': [10]}).to_excel(
+            writer, sheet_name='Summary', index=False)
+        pd.DataFrame({'Child': ['B1'], 'Parent': ['A1']}).to_excel(
+            writer, sheet_name=MASTER_SHEET_NAME, index=False)
+
+    df, error = load_parent_child_master(str(path))
+    assert error is None
+    assert df is not None
+    assert list(df['Child']) == ['B1']
+    assert list(df['Parent']) == ['A1']
+
+
 def test_save_master_to_bytes_round_trip_reloads_correctly(tmp_path):
     """save_master_to_bytes() の出力をそのまま load_parent_child_master() で
     再読み込みできる（エクスポート→再アップロードの往復を保証する）。"""
@@ -247,7 +265,7 @@ def test_save_master_to_bytes_returns_nonempty_excel():
 
 
 def test_save_master_to_bytes_sorts_diff_list_by_child():
-    """Diff List シートは Child 列の昇順（ABC順）でソートされる。"""
+    """Master シートは Child 列の昇順（ABC順）でソートされる。"""
     master_df = create_empty_master_df()
     for i, child in enumerate(['EE3273-608-32B', 'EE3273-608-24B', 'DE5313-008-02A']):
         master_df.loc[i] = {
@@ -258,7 +276,7 @@ def test_save_master_to_bytes_sorts_diff_list_by_child():
         }
 
     data = save_master_to_bytes(master_df, pairs=[], mode='pair_list', total_drawings_count=3)
-    diff_list_df = pd.read_excel(pd.io.common.BytesIO(data), sheet_name='Diff List')
+    diff_list_df = pd.read_excel(pd.io.common.BytesIO(data), sheet_name=MASTER_SHEET_NAME)
     assert list(diff_list_df['Child']) == ['DE5313-008-02A', 'EE3273-608-24B', 'EE3273-608-32B']
     # 元の master_df は変更されない（呼び出し元の順序に副作用を与えない）
     assert list(master_df['Child']) == ['EE3273-608-32B', 'EE3273-608-24B', 'DE5313-008-02A']
@@ -267,7 +285,7 @@ def test_save_master_to_bytes_sorts_diff_list_by_child():
 def test_save_master_to_bytes_reports_brand_new_drawing_count_and_rate():
     """Summaryシートに「完全新規図面数」「新規作成率 [%]」が挿入され、正しく計算される。
 
-    完全新規図面数 = 台帳（Diff List）のRelation='完全新規図面'の行のユニークChild数
+    完全新規図面数 = 台帳（Master）のRelation='完全新規図面'の行のユニークChild数
     （今回バッチのみでなく台帳全体の集計）。新規作成率 = 完全新規図面数 / 図面統計の分母。
     """
     master_df = create_empty_master_df()
@@ -306,14 +324,14 @@ def test_save_master_to_bytes_reports_brand_new_drawing_count_and_rate():
 
 
 def test_save_master_to_bytes_freezes_header_row_for_diff_list_and_drawing_list():
-    """Diff List・Drawing Listのタイトル行（1行目）が固定される。"""
+    """Master・Drawing Listのタイトル行（1行目）が固定される。"""
     import openpyxl
     master_df = create_empty_master_df()
     drawing_list_df = create_empty_drawing_list_df()
     data = save_master_to_bytes(master_df, pairs=[], mode='auto', total_drawings_count=0,
                                  drawing_list_df=drawing_list_df)
     wb = openpyxl.load_workbook(pd.io.common.BytesIO(data))
-    assert wb['Diff List'].freeze_panes == 'A2'
+    assert wb[MASTER_SHEET_NAME].freeze_panes == 'A2'
     assert wb[DRAWING_LIST_SHEET_NAME].freeze_panes == 'A2'
 
 
@@ -337,7 +355,7 @@ def test_save_master_to_bytes_centers_and_formats_entity_columns():
     }
     data = save_master_to_bytes(master_df, pairs=[], mode='auto', total_drawings_count=2)
     wb = openpyxl.load_workbook(pd.io.common.BytesIO(data))
-    ws = wb['Diff List']
+    ws = wb[MASTER_SHEET_NAME]
     header = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
     entity_cols = {'Deleted Entities', 'Added Entities', 'Diff Entities',
                    'Unchanged Entities', 'Total Entities'}
@@ -596,7 +614,7 @@ def test_save_master_to_bytes_writes_drawing_list_sheet_after_diff_list():
     data = save_master_to_bytes(master_df, pairs=[], mode='auto', total_drawings_count=0,
                                  drawing_list_df=drawing_list_df)
     xl = pd.ExcelFile(pd.io.common.BytesIO(data))
-    assert xl.sheet_names == ['Summary', 'Diff List', DRAWING_LIST_SHEET_NAME]
+    assert xl.sheet_names == ['Summary', MASTER_SHEET_NAME, DRAWING_LIST_SHEET_NAME]
     dl = pd.read_excel(xl, sheet_name=DRAWING_LIST_SHEET_NAME)
     assert list(dl['Child Drawing Number']) == ['C1']
 

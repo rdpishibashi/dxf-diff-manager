@@ -20,7 +20,7 @@ import ezdxf
 import pandas as pd
 
 from model.diff_export import create_diff_zip
-from model.master_ledger import create_empty_master_df, create_empty_drawing_list_df
+from model.master_ledger import create_empty_master_df, create_empty_drawing_list_df, MASTER_SHEET_NAME
 
 
 def _make_pair_dxf_files(d, main_drawing, source_drawing,
@@ -240,7 +240,7 @@ def test_create_diff_zip_records_drawing_list_for_successful_pair():
 
 def test_create_diff_zip_records_drawing_list_even_when_pair_processing_fails():
     """失敗した complete ペア（DXF比較失敗）もDrawing Listには記録される
-    （Diff Listは成功ペアのみだが、Drawing Listは成否を問わず全件対象という仕様）。"""
+    （Masterは成功ペアのみだが、Drawing Listは成否を問わず全件対象という仕様）。"""
     with tempfile.TemporaryDirectory() as d:
         pair = {
             'main_drawing': 'NEW-BAD', 'source_drawing': 'OLD-MISSING-FILE',
@@ -328,7 +328,7 @@ def test_create_diff_zip_drawing_list_blank_shiban_when_master_filename_unresolv
 
 
 def test_create_diff_zip_drawing_list_written_to_master_excel():
-    """create_diff_zip() の出力台帳Excelに Drawing List シートが Diff List の後ろに含まれる。"""
+    """create_diff_zip() の出力台帳Excelに Drawing List シートが Master の後ろに含まれる。"""
     with tempfile.TemporaryDirectory() as d:
         pair = _make_pair_dxf_files(d, 'NEW-001', 'OLD-001', 'NEW_ONLY', 'OLD_ONLY')
         zip_data, _, _, _, _, _ = create_diff_zip(
@@ -339,7 +339,7 @@ def test_create_diff_zip_drawing_list_written_to_master_excel():
         with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
             master_bytes = zf.read('AA11-1111-1_ZM00_405.xlsx')
         xl = pd.ExcelFile(io.BytesIO(master_bytes))
-        assert xl.sheet_names == ['Summary', 'Diff List', 'Drawing List']
+        assert xl.sheet_names == ['Summary', MASTER_SHEET_NAME, 'Drawing List']
         dl = pd.read_excel(xl, sheet_name='Drawing List')
         assert list(dl['Child Drawing Number']) == ['NEW-001']
 
