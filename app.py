@@ -575,7 +575,7 @@ def render_preview_dataframe(df, key_prefix):
     display_df = make_dataframe_arrow_compatible(df)
     column_config = {
         col: st.column_config.Column(col, width="small")
-        if col in ("Coordinate X", "Coordinate Y", "Count")
+        if col in ("X", "Y", "Count")
         else st.column_config.Column(col)
         for col in display_df.columns
     }
@@ -1275,7 +1275,9 @@ def render_step3_diff(complete_pairs):
     Args:
         complete_pairs: 差分抽出可能なペアのリスト
     """
-    # オプション設定（2026-09 に config.py へ移行。UI からは変更できない）
+    # オプション設定（2026-09 に config.py へ移行。UI には表示しない——
+    # ユーザーが実行するのはconfig.py側の値であり、Step4画面上での確認は不要という
+    # ユーザー判断。値そのものは create_diff_zip() に渡すため変数としては残す）
     ignore_moved_labels = diff_config.IGNORE_MOVED_LABELS
     ignore_color_only_changes = diff_config.IGNORE_COLOR_ONLY_CHANGES
     tolerance = diff_config.DEFAULT_TOLERANCE
@@ -1284,20 +1286,10 @@ def render_step3_diff(complete_pairs):
     unchanged_color = diff_config.DEFAULT_UNCHANGED_COLOR
     diff_label_patterns = label_filter_config.DIFF_LABEL_PREFIX_PATTERNS
 
-    with st.expander("オプション設定（config.py で変更できます）", expanded=False):
-        st.caption(
-            f"座標マージン: {tolerance} ｜ "
-            f"移動しただけのラベルを除外: {'ON' if ignore_moved_labels else 'OFF'} ｜ "
-            f"色だけが異なる図形は変更なし扱い: {'ON' if ignore_color_only_changes else 'OFF'} ｜ "
-            f"差分抽出するラベルの先頭文字列: "
-            f"{'、'.join(diff_label_patterns) if diff_label_patterns else 'なし（全ラベル）'} ｜ "
-            f"レイヤー色（削除/追加/変更なし）: {deleted_color}/{added_color}/{unchanged_color}"
-        )
-
     # 比較開始ボタン
+    # 「差分抽出可能なペア：N組」は表示しない（Step3の図面ペア・リストと同内容で
+    # 既に確認済みのため、2026-09 ユーザー指摘）。
     if complete_pairs:
-        st.info(f"差分抽出可能なペア: {len(complete_pairs)}組")
-
         has_results = bool(st.session_state.get('results'))
         if st.button("差分抽出開始", key="start_comparison", type="primary", disabled=has_results):
             total_pairs = len(complete_pairs)
@@ -1551,8 +1543,12 @@ def render_step3_diff(complete_pairs):
                 - 座標許容誤差: {settings.get('tolerance', 0.01)}
                 """)
 
-        # 新しい比較を開始するボタン
-        if st.button("🔄 新しい差分抽出を開始", key="restart_button"):
+        # 新しい比較を開始するボタン。
+        # ZIPダウンロード完了（st.session_state.downloaded）後は青色（primary）にし、
+        # 「次に取るべき操作」であることを示す（streamlitスキル§11の動的ボタン色分け
+        # パターン。2026-09 ユーザー指摘: ダウンロード後にこのボタンが白いままだった）。
+        restart_button_type = "primary" if st.session_state.get('downloaded', False) else "secondary"
+        if st.button("🔄 新しい差分抽出を開始", key="restart_button", type=restart_button_type):
             # 一時ファイルのクリーンアップ
             cleanup_temp_files()
 

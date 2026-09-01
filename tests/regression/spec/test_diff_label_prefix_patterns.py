@@ -25,7 +25,7 @@ from model.label_diff import filter_change_rows_by_patterns
 
 
 def _row(old, new):
-    return {'Coordinate X': 0, 'Coordinate Y': 0, 'Old Label': old, 'New Label': new}
+    return {'X': 0, 'Y': 0, 'Old Label': old, 'New Label': new}
 
 
 def test_empty_patterns_returns_all_rows_unchanged():

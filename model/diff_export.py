@@ -14,10 +14,11 @@ from io import BytesIO
 from .compare_dxf import (
     compare_dxf_files_and_generate_dxf, generate_all_added_dxf, PairFileCache,
 )
-from .extract_labels import get_title_and_subtitle
+from .extract_labels import extract_labels, get_title_and_subtitle
 from .label_diff import (
     compute_label_differences,
     filter_change_rows_by_patterns,
+    round_labels_with_coordinates,
     build_diff_labels_workbook,
 )
 from .pairing import get_brand_new_drawing_pairs
@@ -286,21 +287,60 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
 
             pair_with_counts = dict(pair, relation='完全新規図面')
             pair_with_counts['entity_counts'] = {'added_entities': count, 'total_entities': count}
+
+            # ラベル一覧とタイトル/サブタイトルをまとめて抽出する（1回のDXF解析で
+            # 両方まかなう。get_title_and_subtitle() 単独呼び出しと比べ二重解析を
+            # 避けられる）。完全新規図面は比較対象が無いため、diff_labels.xlsx には
+            # New側のみのラベル一覧をシートとして出力する（2026-09 追加。Old側は
+            # 常に空になる仕様）。
+            try:
+                labels, info_new = extract_labels(
+                    file_info['temp_path'],
+                    include_coordinates=True,
+                    extract_title_option=True,
+                    extract_drawing_numbers_option=True,
+                    original_filename=file_info.get('filename'),
+                )
+            except Exception:
+                labels, info_new = [], {}
+
             # 方式C（pair_list）はファイル名のみで図番を識別し DXF 解析を行わない
             # （_extract_by_filename）ため、main_file_info に title/subtitle が
             # 入っていない。complete ペアは差分抽出時に extra_info から取得する
             # 一方、完全新規図面は差分抽出を行わないため、ここで個別に抽出する
             # （2026-06 追加）。方式A/Bは元々 title/subtitle 取得済みのためスキップ。
             if not pair_with_counts.get('title'):
-                try:
-                    title, subtitle = get_title_and_subtitle(
-                        file_info['temp_path'],
-                        original_filename=file_info.get('filename'),
-                    )
-                    pair_with_counts['title'] = title
-                    pair_with_counts['subtitle'] = subtitle
-                except Exception:
-                    pass
+                pair_with_counts['title'] = info_new.get('title')
+                pair_with_counts['subtitle'] = info_new.get('subtitle')
+
+            resolved_title = pair_with_counts.get('title')
+            resolved_subtitle = pair_with_counts.get('subtitle')
+            pair_extracted_info[main_drawing] = {'title': resolved_title, 'subtitle': resolved_subtitle}
+
+            rounded_labels = round_labels_with_coordinates(labels, tolerance)
+            brand_new_change_rows = [
+                {'X': x, 'Y': y, 'Old Label': None, 'New Label': label}
+                for label, x, y in rounded_labels
+            ]
+            brand_new_change_rows = filter_change_rows_by_patterns(brand_new_change_rows, diff_label_patterns)
+            brand_new_change_rows.sort(key=lambda r: r['New Label'] or '')
+
+            diff_label_sheets.append({
+                'sheet_name': main_drawing,
+                'rows': brand_new_change_rows,
+                'old_label_name': 'Old: none',
+                'new_label_name': f'New: {main_drawing}',
+            })
+            summary_data.append({
+                '図番': main_drawing,
+                '流用元図番': 'none',
+                '追加ラベル数': len(brand_new_change_rows),
+                '削除ラベル数': 0,
+                '変更ラベル数': 0,
+                'タイトル': resolved_title,
+                'サブタイトル': resolved_subtitle,
+            })
+
             brand_new_with_counts.append(pair_with_counts)
 
         # 図面管理台帳を結果で更新（エンティティ数を含む）

@@ -12,6 +12,15 @@
     - 台帳を作成する場合、Added Entities = Total Entities として登録される
       （count_entities_in_dxf_file() と同じ定義。model/master_ledger.py 参照）。
 
+受入条件（2026-09、追加ユーザー要求「diff_labels.xlsx には完全新規図面についても
+シートを作成してください。"New" だけになるのは問題ありません。Summaryシートにも
+記載してください」）:
+    - diff_labels.xlsx に完全新規図面のシート（図番名）が作成される。
+    - シートは New 列のみ値が入り、Old 列は常に空。
+    - Summary シートにも完全新規図面の行が追加される（流用元図番="none"、
+      削除ラベル数=0、変更ラベル数=0、追加ラベル数=シートの行数）。
+    - 他の通常ペアと同じ図番ABC順で並ぶ（Summaryの図番欄・シート順とも）。
+
 実行:
     cd DXF-diff-manager
     python -m tests.regression.spec.test_brand_new_drawing_dxf_output
@@ -32,11 +41,19 @@ from model.pairing import build_pairs_from_list
 from model.master_ledger import create_empty_master_df
 
 
-def _build_brand_new_pairs(d, drawing_number='BRANDNEW-001', entity_count=2):
-    """1件の完全新規図面ペア（流用元図番が空白）を作成する。"""
+def _build_brand_new_pairs(d, drawing_number='BRANDNEW-001', entity_count=2, labels=None):
+    """1件の完全新規図面ペア（流用元図番が空白）を作成する。
+
+    labels を渡すと、その文字列をテキストラベルとして配置する（entity_count は
+    無視される）。省略時は 'LABEL0', 'LABEL1', ... を entity_count 件配置する。
+    """
     doc = ezdxf.new()
-    for i in range(entity_count):
-        doc.modelspace().add_text(f'LABEL{i}', dxfattribs={'insert': (i * 10, 0)})
+    if labels is not None:
+        for i, label in enumerate(labels):
+            doc.modelspace().add_text(label, dxfattribs={'insert': (i * 10, 0)})
+    else:
+        for i in range(entity_count):
+            doc.modelspace().add_text(f'LABEL{i}', dxfattribs={'insert': (i * 10, 0)})
     path = os.path.join(d, f'{drawing_number}.dxf')
     doc.saveas(path)
 
@@ -112,6 +129,32 @@ def test_brand_new_drawing_registered_in_master_with_added_equals_total():
         assert row['Added Entities'] == 3
         assert row['Total Entities'] == 3
         assert row['Deleted Entities'] == 'n/a'
+
+
+def test_brand_new_drawing_has_diff_labels_sheet_with_new_only():
+    """diff_labels.xlsx に完全新規図面のシートが作成され、New列のみ値が入る
+    （Old列は常に空）。Summaryシートにも図番・流用元図番="none"・削除ラベル数=0・
+    変更ラベル数=0・追加ラベル数=シート行数で記録される。"""
+    with tempfile.TemporaryDirectory() as d:
+        pairs = _build_brand_new_pairs(d, 'BRANDNEW-004', labels=['LABEL_A', 'LABEL_B'])
+        _, results, diff_labels_excel, _, _ = create_diff_zip(pairs, step1_mode='pair_list')
+
+        assert results[0]['success']
+
+        xl = pd.ExcelFile(io.BytesIO(diff_labels_excel))
+        assert 'BRANDNEW-004' in xl.sheet_names, f"完全新規図面のシートが無い: {xl.sheet_names}"
+
+        sheet_df = pd.read_excel(xl, sheet_name='BRANDNEW-004')
+        assert list(sheet_df.columns) == ['X', 'Y', 'Old: none', 'New: BRANDNEW-004']
+        assert sheet_df['Old: none'].isna().all(), "Old列に値が入っている（Newのみのはず）"
+        assert set(sheet_df['New: BRANDNEW-004']) == {'LABEL_A', 'LABEL_B'}
+
+        summary_df = pd.read_excel(xl, sheet_name='Summary')
+        row = summary_df[summary_df['図番'] == 'BRANDNEW-004'].iloc[0]
+        assert row['流用元図番'] == 'none'
+        assert row['削除ラベル数'] == 0
+        assert row['変更ラベル数'] == 0
+        assert row['追加ラベル数'] == 2
 
 
 def _run_all():
