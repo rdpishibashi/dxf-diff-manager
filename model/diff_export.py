@@ -10,33 +10,32 @@ import gc
 import tempfile
 import zipfile
 from io import BytesIO
-from collections import defaultdict, Counter
 
-from .compare_dxf import compare_dxf_files_and_generate_dxf, count_entities_in_dxf_file, PairFileCache
-from .extract_labels import get_title_and_subtitle
+from .compare_dxf import (
+    compare_dxf_files_and_generate_dxf, generate_all_added_dxf, PairFileCache,
+)
+from .extract_labels import extract_labels, get_title_and_subtitle
 from .label_diff import (
     compute_label_differences,
-    filter_unchanged_by_prefix,
+    filter_change_rows_by_patterns,
+    round_labels_with_coordinates,
     build_diff_labels_workbook,
-    build_unchanged_labels_workbook,
 )
 from .pairing import get_brand_new_drawing_pairs
 from .master_ledger import (
     update_parent_child_master, save_master_to_bytes,
     update_drawing_list, parse_master_filename,
 )
-from config import diff_config
+from config import diff_config, label_filter_config
 
 DIFF_LABELS_FILENAME = "diff_labels.xlsx"
-UNCHANGED_LABELS_FILENAME = "unchanged_labels.xlsx"
 
 
 def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                     deleted_color=None, added_color=None, unchanged_color=None,
-                    prefixes=None, progress_callback=None, on_error=None,
-                    filter_non_parts=False, validate_ref_designators=False,
+                    diff_label_patterns=None, progress_callback=None, on_error=None,
                     ignore_moved_labels=False, ignore_color_only_changes=False,
-                    step1_mode=None, total_drawings_count=None,
+                    step1_mode=None,
                     source_drawing_numbers=None, dest_drawing_numbers=None,
                     drawing_list_df=None):
     """
@@ -50,6 +49,9 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
         deleted_color: 削除エンティティの色（Noneの場合はconfigのデフォルト値を使用）
         added_color: 追加エンティティの色（Noneの場合はconfigのデフォルト値を使用）
         unchanged_color: 変更なしエンティティの色（Noneの場合はconfigのデフォルト値を使用）
+        diff_label_patterns: diff_labels.xlsx の差分行を絞り込む先頭一致の正規表現リスト
+            （Noneの場合は config.label_filter_config.DIFF_LABEL_PREFIX_PATTERNS を使用。
+            filter_change_rows_by_patterns 参照。空リストなら絞り込みなし）
         progress_callback: (current, total, message) を受け取る進捗関数（任意）
         on_error: (message) を受け取るエラー通知関数（任意。streamlit非依存のため
             st.error() を直接呼ばず、呼び出し元から渡してもらう）
@@ -58,11 +60,9 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
             （compute_label_differences 参照。差分DXFのエンティティ比較には影響しない）
         ignore_color_only_changes: True の場合、差分DXFで座標・形状が一致し color
             だけが異なるエンティティを UNCHANGED として扱う
-            （compare_dxf_files_and_generate_dxf/count_entities_in_dxf_file 参照。
+            （compare_dxf_files_and_generate_dxf/generate_all_added_dxf 参照。
             diff_labels.xlsx のラベル比較には影響しない）
-        step1_mode: ペアリング方式（Summaryシートのラベル・分母の算出、完全新規図面の
-            判定に使用）
-        total_drawings_count: Summaryシートの図面統計の分母件数（呼び出し側で算出）
+        step1_mode: ペアリング方式（完全新規図面の判定に使用）
         source_drawing_numbers/dest_drawing_numbers: 完全新規図面判定
             （get_brand_new_drawing_pairs、mode='auto'時のみ使用）に渡す図番集合
         drawing_list_df: Drawing List DataFrame（Noneの場合は空から開始）。
@@ -70,7 +70,7 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
             新規の Child Drawing Number のみが追加される（update_drawing_list 参照）
 
     Returns:
-        tuple: (zip_data, results, diff_labels_excel, unchanged_labels_excel, master_df, drawing_list_df)
+        tuple: (zip_data, results, diff_labels_excel, master_df, drawing_list_df)
     """
     def report_error(message):
         if on_error:
@@ -85,14 +85,12 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
         added_color = diff_config.DEFAULT_ADDED_COLOR
     if unchanged_color is None:
         unchanged_color = diff_config.DEFAULT_UNCHANGED_COLOR
+    if diff_label_patterns is None:
+        diff_label_patterns = label_filter_config.DIFF_LABEL_PREFIX_PATTERNS
 
     results = []
-    prefixes = prefixes or []
     diff_label_sheets = []
-    unchanged_label_sheets = []
     summary_data = []
-    total_counter = Counter()
-    invalid_dict = defaultdict(lambda: {'count': 0, 'files': set()})
     pair_extracted_info = {}  # main_drawing → {title, subtitle} (DXF から抽出)
     label_cache = {}
     zip_buffer = BytesIO()
@@ -123,9 +121,7 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
             temp_output = tempfile.NamedTemporaryFile(delete=False, suffix=".dxf").name
 
             change_rows = []
-            filtered_unchanged = []
             change_label_count = 0
-            unchanged_label_count = 0
 
             extra_info = {'labels_new': [], 'invalid_ref_designators': []}
             try:
@@ -134,18 +130,14 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                     source_file_path,
                     tolerance=tolerance,
                     label_cache=label_cache,
-                    filter_non_parts=filter_non_parts,
-                    validate_ref_designators=validate_ref_designators,
                     ignore_moved_labels=ignore_moved_labels,
                     new_file_original_name=pair.get('main_file_info', {}).get('filename'),
                 )
-                filtered_unchanged = filter_unchanged_by_prefix(unchanged_entries, prefixes)
+                change_rows = filter_change_rows_by_patterns(change_rows, diff_label_patterns)
                 change_label_count = len(change_rows)
-                unchanged_label_count = sum(row.get('Count', 0) for row in filtered_unchanged)
             except Exception as e:
                 report_error(f"ラベル比較中にエラーが発生しました ({main_drawing}): {str(e)}")
                 change_rows = []
-                filtered_unchanged = []
 
             # Summary 行を収集
             added_count = sum(1 for r in change_rows if r['Old Label'] is None)
@@ -164,24 +156,12 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                 'サブタイトル': resolved_subtitle,
             })
 
-            # Total 用ラベル集計
-            if filter_non_parts:
-                for label, _x, _y in extra_info['labels_new']:
-                    total_counter[label] += 1
-
-            # Invalid 集計
-            if validate_ref_designators:
-                for sym in extra_info['invalid_ref_designators']:
-                    invalid_dict[sym]['count'] += 1
-                    invalid_dict[sym]['files'].add(main_drawing)
-
             diff_label_sheets.append({
                 'sheet_name': main_drawing,
                 'rows': change_rows,
                 'old_label_name': f"Old: {source_drawing}",
                 'new_label_name': f"New: {main_drawing}"
             })
-            unchanged_label_sheets.append({'sheet_name': main_drawing, 'rows': filtered_unchanged})
 
             try:
                 if progress_callback:
@@ -216,8 +196,7 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                         'success': True,
                         'entity_counts': entity_counts,
                         'relation': pair.get('relation', 'なし'),
-                        'change_label_count': change_label_count,
-                        'unchanged_label_count': unchanged_label_count
+                        'change_label_count': change_label_count
                     })
                 else:
                     results.append({
@@ -228,8 +207,7 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                         'success': False,
                         'entity_counts': None,
                         'relation': pair.get('relation', 'なし'),
-                        'change_label_count': change_label_count,
-                        'unchanged_label_count': unchanged_label_count
+                        'change_label_count': change_label_count
                     })
 
             except Exception as e:
@@ -243,8 +221,7 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                     'error': str(e),
                     'relation': pair.get('relation', 'なし'),
                     'entity_counts': None,
-                    'change_label_count': change_label_count,
-                    'unchanged_label_count': unchanged_label_count
+                    'change_label_count': change_label_count
                 })
             finally:
                 try:
@@ -254,6 +231,117 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
 
             if progress_callback:
                 progress_callback(index, total_pairs, f"{main_drawing} vs {source_drawing} 処理完了")
+
+        # 完全新規図面（流用元の参照がない図面）のDXFファイル（全要素ADDED）を出力する。
+        # diff抽出（上記の complete_pairs ループ）の対象外のため、ここで単独ファイルから
+        # 生成する。図面管理台帳の作成有無に関わらず出力する（2026-09 変更。以前は
+        # master_df is not None のブロック内でのみエンティティ数を算出していたため、
+        # 「台帳を作成しない」を選んだ場合にDXFが出力されなかった）。
+        # エンティティ数は generate_all_added_dxf() が返す値をそのまま使う
+        # （count_entities_in_dxf_file() と同じ抽出経路・重複排除のため、台帳の
+        # Added/Total Entities の値は変わらない）。
+        brand_new_pairs = get_brand_new_drawing_pairs(
+            pairs, step1_mode,
+            source_drawing_numbers=source_drawing_numbers,
+            dest_drawing_numbers=dest_drawing_numbers,
+        ) if step1_mode else []
+        brand_new_with_counts = []
+        for pair in brand_new_pairs:
+            main_drawing = pair.get('main_drawing')
+            file_info = pair.get('main_file_info')
+            if not file_info or not file_info.get('temp_path'):
+                continue  # ファイル未アップロードのため算出不可
+
+            output_filename = f"{main_drawing}_vs_none.dxf"
+            temp_output = tempfile.NamedTemporaryFile(delete=False, suffix=".dxf").name
+            try:
+                success, count = generate_all_added_dxf(
+                    file_info['temp_path'], temp_output,
+                    tolerance=tolerance,
+                    deleted_color=deleted_color,
+                    added_color=added_color,
+                    unchanged_color=unchanged_color,
+                    ignore_color_only_changes=ignore_color_only_changes,
+                )
+                if not success or count is None:
+                    continue
+                zip_file.write(temp_output, arcname=output_filename)
+            except Exception as e:
+                report_error(f"完全新規図面のDXF作成中にエラーが発生しました ({main_drawing}): {str(e)}")
+                continue
+            finally:
+                try:
+                    os.unlink(temp_output)
+                except Exception:
+                    pass
+
+            results.append({
+                'pair_name': f"{main_drawing} vs none",
+                'main_drawing': main_drawing,
+                'source_drawing': 'none',
+                'output_filename': output_filename,
+                'success': True,
+                'entity_counts': {'added_entities': count, 'total_entities': count},
+                'relation': '完全新規図面',
+            })
+
+            pair_with_counts = dict(pair, relation='完全新規図面')
+            pair_with_counts['entity_counts'] = {'added_entities': count, 'total_entities': count}
+
+            # ラベル一覧とタイトル/サブタイトルをまとめて抽出する（1回のDXF解析で
+            # 両方まかなう。get_title_and_subtitle() 単独呼び出しと比べ二重解析を
+            # 避けられる）。完全新規図面は比較対象が無いため、diff_labels.xlsx には
+            # New側のみのラベル一覧をシートとして出力する（2026-09 追加。Old側は
+            # 常に空になる仕様）。
+            try:
+                labels, info_new = extract_labels(
+                    file_info['temp_path'],
+                    include_coordinates=True,
+                    extract_title_option=True,
+                    extract_drawing_numbers_option=True,
+                    original_filename=file_info.get('filename'),
+                )
+            except Exception:
+                labels, info_new = [], {}
+
+            # 方式C（pair_list）はファイル名のみで図番を識別し DXF 解析を行わない
+            # （_extract_by_filename）ため、main_file_info に title/subtitle が
+            # 入っていない。complete ペアは差分抽出時に extra_info から取得する
+            # 一方、完全新規図面は差分抽出を行わないため、ここで個別に抽出する
+            # （2026-06 追加）。方式A/Bは元々 title/subtitle 取得済みのためスキップ。
+            if not pair_with_counts.get('title'):
+                pair_with_counts['title'] = info_new.get('title')
+                pair_with_counts['subtitle'] = info_new.get('subtitle')
+
+            resolved_title = pair_with_counts.get('title')
+            resolved_subtitle = pair_with_counts.get('subtitle')
+            pair_extracted_info[main_drawing] = {'title': resolved_title, 'subtitle': resolved_subtitle}
+
+            rounded_labels = round_labels_with_coordinates(labels, tolerance)
+            brand_new_change_rows = [
+                {'X': x, 'Y': y, 'Old Label': None, 'New Label': label}
+                for label, x, y in rounded_labels
+            ]
+            brand_new_change_rows = filter_change_rows_by_patterns(brand_new_change_rows, diff_label_patterns)
+            brand_new_change_rows.sort(key=lambda r: r['New Label'] or '')
+
+            diff_label_sheets.append({
+                'sheet_name': main_drawing,
+                'rows': brand_new_change_rows,
+                'old_label_name': 'Old: none',
+                'new_label_name': f'New: {main_drawing}',
+            })
+            summary_data.append({
+                '図番': main_drawing,
+                '流用元図番': 'none',
+                '追加ラベル数': len(brand_new_change_rows),
+                '削除ラベル数': 0,
+                '変更ラベル数': 0,
+                'タイトル': resolved_title,
+                'サブタイトル': resolved_subtitle,
+            })
+
+            brand_new_with_counts.append(pair_with_counts)
 
         # 図面管理台帳を結果で更新（エンティティ数を含む）
         if master_df is not None:
@@ -276,43 +364,6 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
 
             if pairs_with_entity_counts:
                 master_df, _ = update_parent_child_master(master_df, pairs_with_entity_counts)
-
-            # 完全新規図面（流用元の参照がない図面）のエンティティ数を算出して台帳に反映。
-            # diff抽出（上記の complete_pairs ループ）の対象外のため、ここで単独ファイルの
-            # エンティティ数を数えて Added=Total として登録する（2026-06 追加）。
-            brand_new_pairs = get_brand_new_drawing_pairs(
-                pairs, step1_mode,
-                source_drawing_numbers=source_drawing_numbers,
-                dest_drawing_numbers=dest_drawing_numbers,
-            ) if step1_mode else []
-            brand_new_with_counts = []
-            for pair in brand_new_pairs:
-                file_info = pair.get('main_file_info')
-                if not file_info or not file_info.get('temp_path'):
-                    continue  # ファイル未アップロードのため算出不可
-                count = count_entities_in_dxf_file(
-                    file_info['temp_path'], tolerance=tolerance,
-                    ignore_color_only_changes=ignore_color_only_changes)
-                if count is None:
-                    continue
-                pair_with_counts = dict(pair, relation='完全新規図面')
-                pair_with_counts['entity_counts'] = {'added_entities': count, 'total_entities': count}
-                # 方式C（pair_list）はファイル名のみで図番を識別し DXF 解析を行わない
-                # （_extract_by_filename）ため、main_file_info に title/subtitle が
-                # 入っていない。complete ペアは差分抽出時に extra_info から取得する
-                # 一方、完全新規図面は差分抽出を行わないため、ここで個別に抽出する
-                # （2026-06 追加）。方式A/Bは元々 title/subtitle 取得済みのためスキップ。
-                if not pair_with_counts.get('title'):
-                    try:
-                        title, subtitle = get_title_and_subtitle(
-                            file_info['temp_path'],
-                            original_filename=file_info.get('filename'),
-                        )
-                        pair_with_counts['title'] = title
-                        pair_with_counts['subtitle'] = subtitle
-                    except Exception:
-                        pass
-                brand_new_with_counts.append(pair_with_counts)
 
             if brand_new_with_counts:
                 master_df, _ = update_parent_child_master(master_df, brand_new_with_counts)
@@ -365,19 +416,6 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                     drawing_list_df, drawing_list_entries, shiban, module, side
                 )
 
-        # Total データ生成
-        total_data = None
-        if filter_non_parts and total_counter:
-            total_data = [{'ラベル': lbl, '個数': cnt} for lbl, cnt in sorted(total_counter.items())]
-
-        # Invalid データ生成
-        invalid_data = None
-        if validate_ref_designators and invalid_dict:
-            invalid_data = [
-                {'機器符号': sym, '個数': v['count'], 'ファイル名': ', '.join(sorted(v['files']))}
-                for sym, v in sorted(invalid_dict.items())
-            ]
-
         # Summary シートの「図番」欄・ペアシートの並び順を図番のABC順にする。
         # summary_data と diff_label_sheets は上のループで1ペアにつき1件ずつ同じ順序で
         # 追加されているため（同一図番が複数ペアに登場する場合は元の順序を保つ = 安定ソート）、
@@ -390,24 +428,14 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
         diff_labels_excel = build_diff_labels_workbook(
             diff_label_sheets,
             summary_data=summary_data if summary_data else None,
-            total_data=total_data,
-            invalid_data=invalid_data,
         )
-
-        # unchanged_labels.xlsx のシート順も diff_labels.xlsx と同じく図番のABC順に揃える
-        # （2026-07 追加。diff_labels 側だけソートすると同一バッチの2ファイル間で
-        # シート順が食い違い、突き合わせて確認する際に混乱するため）。
-        unchanged_label_sheets = sorted(unchanged_label_sheets, key=lambda s: s.get('sheet_name') or '')
-        unchanged_labels_excel = build_unchanged_labels_workbook(unchanged_label_sheets)
 
         if diff_labels_excel:
             zip_file.writestr(DIFF_LABELS_FILENAME, diff_labels_excel)
-        if unchanged_labels_excel:
-            zip_file.writestr(UNCHANGED_LABELS_FILENAME, unchanged_labels_excel)
 
         if master_df is not None:
             master_excel_data = save_master_to_bytes(
-                master_df, pairs=pairs, mode=step1_mode, total_drawings_count=total_drawings_count,
+                master_df, mode=step1_mode,
                 drawing_list_df=drawing_list_df,
             )
             output_master_filename = master_filename if master_filename else diff_config.MASTER_FILENAME
@@ -418,7 +446,6 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
 
     # メモリ解放: 大きなデータ構造を削除
     del diff_label_sheets
-    del unchanged_label_sheets
     gc.collect()
 
-    return zip_data, results, diff_labels_excel, unchanged_labels_excel, master_df, drawing_list_df
+    return zip_data, results, diff_labels_excel, master_df, drawing_list_df

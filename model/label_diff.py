@@ -2,10 +2,11 @@
 DXF Diff Manager で使用するラベル比較ユーティリティ。
 
 独立した DXF-label-diff プロジェクトと同じロジックを組み込み、
-diff_labels.xlsx / unchanged_labels.xlsx をアプリ内で生成する。
+diff_labels.xlsx をアプリ内で生成する。
 """
 
 import io
+import re
 from collections import Counter, defaultdict
 from typing import List, Dict, Tuple, Optional
 
@@ -166,24 +167,24 @@ def find_label_change_pairs(group_new, group_old):
 
         for i in range(pairable):
             change_rows.append({
-                'Coordinate X': coord[0],
-                'Coordinate Y': coord[1],
+                'X': coord[0],
+                'Y': coord[1],
                 'Old Label': old_only[i],
                 'New Label': new_only[i]
             })
 
         for leftover in old_only[pairable:]:
             change_rows.append({
-                'Coordinate X': coord[0],
-                'Coordinate Y': coord[1],
+                'X': coord[0],
+                'Y': coord[1],
                 'Old Label': leftover,
                 'New Label': None
             })
 
         for leftover in new_only[pairable:]:
             change_rows.append({
-                'Coordinate X': coord[0],
-                'Coordinate Y': coord[1],
+                'X': coord[0],
+                'Y': coord[1],
                 'Old Label': None,
                 'New Label': leftover
             })
@@ -245,9 +246,9 @@ def reclassify_moved_labels(change_rows, unchanged_entries):
             continue
 
         deleted_rows = sorted(deleted_by_label.get(label, []),
-                               key=lambda r: (r['Coordinate X'], r['Coordinate Y']))
+                               key=lambda r: (r['X'], r['Y']))
         added_rows = sorted(added_by_label.get(label, []),
-                             key=lambda r: (r['Coordinate X'], r['Coordinate Y']))
+                             key=lambda r: (r['X'], r['Y']))
         matched = min(len(deleted_rows), len(added_rows))
 
         for i in range(matched):
@@ -255,7 +256,7 @@ def reclassify_moved_labels(change_rows, unchanged_entries):
             moved_entries.append({
                 'label': label,
                 'count': 1,
-                'coordinate': (new_row['Coordinate X'], new_row['Coordinate Y']),
+                'coordinate': (new_row['X'], new_row['Y']),
             })
 
         remaining_rows.extend(deleted_rows[matched:])
@@ -264,29 +265,39 @@ def reclassify_moved_labels(change_rows, unchanged_entries):
     return remaining_rows, unchanged_entries + moved_entries
 
 
-def filter_unchanged_by_prefix(unchanged_entries, prefixes: List[str]):
-    """指定された接頭辞で未変更ラベルを絞り込み、座標ごとに件数を集計する。"""
-    if not prefixes:
-        return []
+def filter_change_rows_by_patterns(change_rows: List[Dict], patterns: List[str]) -> List[Dict]:
+    """差分抽出するラベルの先頭文字列（正規表現）で change_rows を絞り込む。
 
-    aggregated = {}
-    for entry in unchanged_entries:
-        label = entry['label']
-        if any(label.startswith(prefix) for prefix in prefixes):
-            coord = entry['coordinate']
-            key = (label, coord[0], coord[1])
-            aggregated[key] = aggregated.get(key, 0) + entry['count']
+    Old Label・New Label のいずれかがパターンのいずれかに先頭一致すれば、
+    その行を残す（名称変更で片方だけ一致する場合も残る。フィルタ非該当←→該当へ
+    改名されたラベルが「追加のみ」「削除のみ」として誤検出されるのを避けるため、
+    ラベル比較そのもの〈compute_label_differences〉は全ラベルで行い、算出後の
+    change_rows だけをここで絞り込む設計）。
 
-    rows = [
-        {
-            'Label': label,
-            'Count': count,
-            'Coordinate X': x,
-            'Coordinate Y': y
-        }
-        for (label, x, y), count in sorted(aggregated.items(), key=lambda item: (item[0][0], item[0][1], item[0][2]))
-    ]
-    return rows
+    patterns が空リストの場合はフィルタをかけず、change_rows をそのまま返す
+    （config.LabelFilterConfig.DIFF_LABEL_PREFIX_PATTERNS の既定値）。
+
+    Args:
+        change_rows: find_label_change_pairs()/reclassify_moved_labels() の戻り値
+        patterns: 正規表現文字列のリスト（re.match で先頭一致判定）
+
+    Returns:
+        list: 絞り込み後の change_rows
+
+    Raises:
+        re.error: patterns に不正な正規表現が含まれる場合
+    """
+    if not patterns:
+        return change_rows
+
+    compiled = [re.compile(p) for p in patterns]
+
+    def _matches(label):
+        if label is None:
+            return False
+        return any(c.match(label) for c in compiled)
+
+    return [row for row in change_rows if _matches(row['Old Label']) or _matches(row['New Label'])]
 
 
 def build_diff_labels_workbook(
@@ -315,7 +326,7 @@ def build_diff_labels_workbook(
         workbook = writer.book
 
         if not sheets and summary_data is None and total_data is None and invalid_data is None:
-            empty_df = pd.DataFrame(columns=['Coordinate X', 'Coordinate Y', 'Old Label', 'New Label'])
+            empty_df = pd.DataFrame(columns=['X', 'Y', 'Old Label', 'New Label'])
             empty_df.to_excel(writer, sheet_name='NoData', index=False)
             format_sheet(writer, 'NoData', empty_df)
         else:
@@ -355,7 +366,7 @@ def build_diff_labels_workbook(
             # ── ペアシート ──
             for sheet, sheet_name in zip(sheets, pair_sheet_names):
                 rows = sheet.get('rows') or []
-                df = pd.DataFrame(rows, columns=['Coordinate X', 'Coordinate Y', 'Old Label', 'New Label'])
+                df = pd.DataFrame(rows, columns=['X', 'Y', 'Old Label', 'New Label'])
                 old_col = sheet.get('old_label_name', 'Old Label')
                 new_col = sheet.get('new_label_name', 'New Label')
                 df.rename(columns={'Old Label': old_col, 'New Label': new_col}, inplace=True)
@@ -368,26 +379,6 @@ def build_diff_labels_workbook(
                 invalid_df.to_excel(writer, sheet_name='Invalid', index=False)
                 format_sheet(writer, 'Invalid', invalid_df)
 
-    output.seek(0)
-    return output.getvalue()
-
-
-def build_unchanged_labels_workbook(sheets: List[Dict]) -> bytes:
-    """unchanged_labels.xlsx のバイナリデータを生成する。"""
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        if not sheets:
-            empty_df = pd.DataFrame(columns=['Label', 'Count', 'Coordinate X', 'Coordinate Y'])
-            empty_df.to_excel(writer, sheet_name='NoData', index=False)
-            format_sheet(writer, 'NoData', empty_df)
-        else:
-            used_names = set()
-            for sheet in sheets:
-                sheet_name = ensure_unique_sheet_name(sheet.get('sheet_name') or "Sheet", used_names)
-                rows = sheet.get('rows') or []
-                df = pd.DataFrame(rows, columns=['Label', 'Count', 'Coordinate X', 'Coordinate Y'])
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
-                format_sheet(writer, sheet_name, df)
     output.seek(0)
     return output.getvalue()
 
@@ -410,7 +401,7 @@ def format_sheet(writer, sheet_name: str, df: pd.DataFrame):
     worksheet = writer.sheets[sheet_name]
     if not df.empty:
         for col_idx, column in enumerate(df.columns):
-            if column in ('Coordinate X', 'Coordinate Y'):
+            if column in ('X', 'Y'):
                 width = 14
             elif column in ('Old Label', 'New Label', 'Label'):
                 width = 100

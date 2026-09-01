@@ -24,7 +24,6 @@ from model.pairing import (
     drawings_with_status,
     compute_unchanged_drawings,
     get_brand_new_drawing_pairs,
-    compute_total_drawings_count,
     normalize_pair_list_columns,
     RELATION_REVUP,
     RELATION_DEPENDENCY,
@@ -267,27 +266,6 @@ def test_compute_unchanged_drawings_auto_mode_empty_pools_returns_empty():
 def test_compute_unchanged_drawings_all_in_one_mode_returns_empty():
     pairs = build_pairs({'A1A': _f('A1A')}, {'A1A': _f('A1A')})
     assert compute_unchanged_drawings(pairs, 'all_in_one') == set()
-
-
-# --- compute_total_drawings_count ---
-
-def test_compute_total_drawings_count_all_in_one():
-    assert compute_total_drawings_count('all_in_one', all_in_one_count=5, dest_count=99) == 5
-
-
-def test_compute_total_drawings_count_auto():
-    assert compute_total_drawings_count('auto', all_in_one_count=99, dest_count=7) == 7
-
-
-def test_compute_total_drawings_count_pair_list():
-    df = pd.DataFrame({'流用先図番': ['A', 'B', 'C', '']})
-    assert compute_total_drawings_count(
-        'pair_list', pair_list_df=df, uploaded_drawing_numbers={'A', 'B'}
-    ) == 2
-
-
-def test_compute_total_drawings_count_pair_list_no_df():
-    assert compute_total_drawings_count('pair_list', pair_list_df=None) == 0
 
 
 # --- normalize_pair_list_columns ---

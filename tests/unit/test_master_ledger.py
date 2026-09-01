@@ -182,7 +182,7 @@ def test_save_master_to_bytes_round_trip_reloads_correctly(tmp_path):
         'Deleted Entities': 1, 'Added Entities': 2, 'Diff Entities': 3,
         'Unchanged Entities': 4, 'Total Entities': 5,
     }
-    data = save_master_to_bytes(master_df, pairs=[], mode='auto', total_drawings_count=1)
+    data = save_master_to_bytes(master_df, mode='auto')
 
     path = tmp_path / "roundtrip.xlsx"
     path.write_bytes(data)
@@ -260,7 +260,7 @@ def test_load_parent_child_master_no_matching_sheet_returns_error(tmp_path):
 
 def test_save_master_to_bytes_returns_nonempty_excel():
     master_df = create_empty_master_df()
-    data = save_master_to_bytes(master_df, pairs=[], mode='auto', total_drawings_count=0)
+    data = save_master_to_bytes(master_df, mode='auto')
     assert isinstance(data, bytes) and len(data) > 0
 
 
@@ -275,18 +275,19 @@ def test_save_master_to_bytes_sorts_diff_list_by_child():
             'Unchanged Entities': 'n/a', 'Total Entities': 1,
         }
 
-    data = save_master_to_bytes(master_df, pairs=[], mode='pair_list', total_drawings_count=3)
+    data = save_master_to_bytes(master_df, mode='pair_list')
     diff_list_df = pd.read_excel(pd.io.common.BytesIO(data), sheet_name=MASTER_SHEET_NAME)
     assert list(diff_list_df['Child']) == ['DE5313-008-02A', 'EE3273-608-24B', 'EE3273-608-32B']
     # 元の master_df は変更されない（呼び出し元の順序に副作用を与えない）
     assert list(master_df['Child']) == ['EE3273-608-32B', 'EE3273-608-24B', 'DE5313-008-02A']
 
 
-def test_save_master_to_bytes_reports_brand_new_drawing_count_and_rate():
-    """Summaryシートに「完全新規図面数」「新規作成率 [%]」が挿入され、正しく計算される。
-
-    完全新規図面数 = 台帳（Master）のRelation='完全新規図面'の行のユニークChild数
-    （今回バッチのみでなく台帳全体の集計）。新規作成率 = 完全新規図面数 / 図面統計の分母。
+def test_save_master_to_bytes_summary_has_no_drawing_statistics_section():
+    """Summaryシートから「図面統計」欄（見出し＋流用先図面総数〜新規作成率の
+    全行）が削除されている（2026-09）。Ledger-merger 等の下流に「流用先図面総数」
+    のような分母を渡せなくなる仕様変更で、ユーザーが下流影響を承知のうえで
+    全削除を選択した。エンティティ統計（削除/追加/変更/変更なし/総数・図形変更率）
+    は引き続き出力される。
     """
     master_df = create_empty_master_df()
     master_df.loc[0] = {
@@ -301,26 +302,24 @@ def test_save_master_to_bytes_reports_brand_new_drawing_count_and_rate():
         'Deleted Entities': 'n/a', 'Added Entities': 9, 'Diff Entities': 'n/a',
         'Unchanged Entities': 'n/a', 'Total Entities': 9,
     }
-    master_df.loc[2] = {
-        'Child': 'B3', 'Parent': 'none', 'Relation': '完全新規図面',
-        'Title': None, 'Subtitle': None, 'Recorded Date': None, 'Note': None,
-        'Deleted Entities': 'n/a', 'Added Entities': 3, 'Diff Entities': 'n/a',
-        'Unchanged Entities': 'n/a', 'Total Entities': 3,
-    }
-    data = save_master_to_bytes(master_df, pairs=[{'status': 'complete'}], mode='auto',
-                                 total_drawings_count=4)
+    data = save_master_to_bytes(master_df, mode='auto')
     xl = pd.ExcelFile(pd.io.common.BytesIO(data))
     summary_df = pd.read_excel(xl, sheet_name='Summary', header=None)
-    rows = {r[0]: r[1] for r in summary_df.itertuples(index=False) if pd.notna(r[0])}
-
-    assert rows['完全新規図面数'] == 2
-    assert rows['差分抽出ペア数'] == 1
-    # 完全新規図面数（差分抽出ペア数の直下）・新規作成率（流用率の直下）の並び順を確認
     labels = summary_df[0].dropna().tolist()
-    assert labels.index('完全新規図面数') == labels.index('差分抽出ペア数') + 1
-    assert labels.index('新規作成率 [%]') == labels.index('流用率 [%]') + 1
-    # 新規作成率 = 2/4 = 50.00%
-    assert abs(rows['新規作成率 [%]'] - 0.5) < 1e-9
+
+    removed_labels = (
+        '図面統計', '流用先図面総数', 'アップロード図面総数',
+        '差分抽出ペア数', '完全新規図面数', '流用率 [%]', '新規作成率 [%]',
+    )
+    for label in removed_labels:
+        assert label not in labels, f"「図面統計」削除後も残っているラベル: {label}"
+
+    remaining_labels = (
+        'エンティティ統計', '削除図形 総数', '追加図形 総数',
+        '変更（追加+削除）図形 総数', '変更なし図形 総数', '図形変更率 [%]',
+    )
+    for label in remaining_labels:
+        assert label in labels, f"エンティティ統計のラベルが失われている: {label}"
 
 
 def test_save_master_to_bytes_freezes_header_row_for_diff_list_and_drawing_list():
@@ -328,8 +327,7 @@ def test_save_master_to_bytes_freezes_header_row_for_diff_list_and_drawing_list(
     import openpyxl
     master_df = create_empty_master_df()
     drawing_list_df = create_empty_drawing_list_df()
-    data = save_master_to_bytes(master_df, pairs=[], mode='auto', total_drawings_count=0,
-                                 drawing_list_df=drawing_list_df)
+    data = save_master_to_bytes(master_df, mode='auto', drawing_list_df=drawing_list_df)
     wb = openpyxl.load_workbook(pd.io.common.BytesIO(data))
     assert wb[MASTER_SHEET_NAME].freeze_panes == 'A2'
     assert wb[DRAWING_LIST_SHEET_NAME].freeze_panes == 'A2'
@@ -353,7 +351,7 @@ def test_save_master_to_bytes_centers_and_formats_entity_columns():
         'Deleted Entities': 'n/a', 'Added Entities': 9999, 'Diff Entities': 'n/a',
         'Unchanged Entities': 'n/a', 'Total Entities': 9999,
     }
-    data = save_master_to_bytes(master_df, pairs=[], mode='auto', total_drawings_count=2)
+    data = save_master_to_bytes(master_df, mode='auto')
     wb = openpyxl.load_workbook(pd.io.common.BytesIO(data))
     ws = wb[MASTER_SHEET_NAME]
     header = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
@@ -381,7 +379,7 @@ def test_save_master_to_bytes_handles_na_entity_strings():
         'Deleted Entities': 'n/a', 'Added Entities': 10, 'Diff Entities': 'n/a',
         'Unchanged Entities': 'n/a', 'Total Entities': 10,
     }
-    data = save_master_to_bytes(master_df, pairs=[], mode='pair_list', total_drawings_count=1)
+    data = save_master_to_bytes(master_df, mode='pair_list')
     assert isinstance(data, bytes) and len(data) > 0
 
 
@@ -611,8 +609,7 @@ def test_save_master_to_bytes_writes_drawing_list_sheet_after_diff_list():
         'Child Drawing Number': 'C1', 'Parent Drawing Number': 'P1',
         'Title': 'T', 'Subtitle': 'S', 'Recorded Date': None,
     }
-    data = save_master_to_bytes(master_df, pairs=[], mode='auto', total_drawings_count=0,
-                                 drawing_list_df=drawing_list_df)
+    data = save_master_to_bytes(master_df, mode='auto', drawing_list_df=drawing_list_df)
     xl = pd.ExcelFile(pd.io.common.BytesIO(data))
     assert xl.sheet_names == ['Summary', MASTER_SHEET_NAME, DRAWING_LIST_SHEET_NAME]
     dl = pd.read_excel(xl, sheet_name=DRAWING_LIST_SHEET_NAME)
@@ -622,7 +619,7 @@ def test_save_master_to_bytes_writes_drawing_list_sheet_after_diff_list():
 def test_save_master_to_bytes_drawing_list_defaults_to_empty_when_omitted():
     """drawing_list_df を渡さない既存呼び出し元（後方互換）でも空のDrawing Listシートが出力される。"""
     master_df = create_empty_master_df()
-    data = save_master_to_bytes(master_df, pairs=[], mode='auto', total_drawings_count=0)
+    data = save_master_to_bytes(master_df, mode='auto')
     xl = pd.ExcelFile(pd.io.common.BytesIO(data))
     assert DRAWING_LIST_SHEET_NAME in xl.sheet_names
     dl = pd.read_excel(xl, sheet_name=DRAWING_LIST_SHEET_NAME)
@@ -639,8 +636,7 @@ def test_save_master_to_bytes_sorts_drawing_list_by_child_drawing_number():
             'Child Drawing Number': child, 'Parent Drawing Number': 'none',
             'Title': None, 'Subtitle': None, 'Recorded Date': None,
         }
-    data = save_master_to_bytes(master_df, pairs=[], mode='auto', total_drawings_count=0,
-                                 drawing_list_df=drawing_list_df)
+    data = save_master_to_bytes(master_df, mode='auto', drawing_list_df=drawing_list_df)
     dl = pd.read_excel(pd.io.common.BytesIO(data), sheet_name=DRAWING_LIST_SHEET_NAME)
     assert list(dl['Child Drawing Number']) == ['DE5313-008-02A', 'EE3273-608-24B', 'EE3273-608-32B']
 
