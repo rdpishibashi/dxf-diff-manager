@@ -10,7 +10,9 @@ from datetime import datetime
 
 import pandas as pd
 
-DRAWING_LIST_SHEET_NAME = "Drawing List"
+DRAWING_LIST_SHEET_NAME = "Package List"  # 旧名 "Drawing List"（2026-09 改名）
+# 旧名で出力された既存台帳を再アップロードしても読めるよう、後方互換の探索候補として保持する。
+LEGACY_DRAWING_LIST_SHEET_NAMES = ("Drawing List",)
 MASTER_SHEET_NAME = "Master"  # 図面管理台帳データのシート名（旧名 "Diff List"、2026-08 改名）
 
 # Master シートの「* Entities」列（object dtype: 整数と "n/a" 文字列が混在する）。
@@ -278,7 +280,7 @@ def create_empty_master_df():
 
 
 def create_empty_drawing_list_df():
-    """空の Drawing List DataFrame を作成"""
+    """空の Package List DataFrame を作成"""
     return pd.DataFrame({
         'Sashiban': pd.Series(dtype='object'),
         'Module': pd.Series(dtype='object'),
@@ -293,10 +295,12 @@ def create_empty_drawing_list_df():
 
 def load_drawing_list(uploaded_file):
     """
-    台帳ファイルから 'Drawing List' シートを読み込む。
+    台帳ファイルから 'Package List' シートを読み込む。
 
-    シートが存在しない場合（旧形式の台帳、本機能導入前に作成された台帳等）は
-    エラーではなく空の DataFrame を返す。
+    シート名は "Drawing List" → "Package List" にリネームされた（2026-09）。
+    現行名で見つからない場合は旧名（LEGACY_DRAWING_LIST_SHEET_NAMES）でも探し、
+    既存台帳の再アップロードを引き続き受け付ける。どちらも無い場合（旧形式の台帳、
+    本機能導入前に作成された台帳等）はエラーではなく空の DataFrame を返す。
 
     Args:
         uploaded_file: アップロードされたExcelファイル（ファイルパスやファイルオブジェクト）
@@ -306,12 +310,18 @@ def load_drawing_list(uploaded_file):
     """
     try:
         excel_file = pd.ExcelFile(uploaded_file)
-        if DRAWING_LIST_SHEET_NAME in excel_file.sheet_names:
+        target_sheet = None
+        for candidate in (DRAWING_LIST_SHEET_NAME, *LEGACY_DRAWING_LIST_SHEET_NAMES):
+            if candidate in excel_file.sheet_names:
+                target_sheet = candidate
+                break
+
+        if target_sheet is not None:
             # Sashiban/Module/Side や図番が数字だけ（例: サイド "405"）の場合、
             # dtype指定なしで読むと pandas が列全体を int64 と誤推測し、
             # セル自体は文字列として保存されているにもかかわらず読み込み後に
             # 数値化されてしまう（2026-08 実データ確認）。明示的に str 指定する。
-            df = pd.read_excel(excel_file, sheet_name=DRAWING_LIST_SHEET_NAME, dtype={
+            df = pd.read_excel(excel_file, sheet_name=target_sheet, dtype={
                 'Sashiban': str, 'Module': str, 'Side': str,
                 'Child Drawing Number': str, 'Parent Drawing Number': str,
             })
@@ -319,20 +329,20 @@ def load_drawing_list(uploaded_file):
         return create_empty_drawing_list_df(), None
     except Exception as e:
         return create_empty_drawing_list_df(), (
-            f"Drawing List シートの読み込み中にエラーが発生しました: {str(e)}"
+            f"Package List シートの読み込み中にエラーが発生しました: {str(e)}"
         )
 
 
 def update_drawing_list(drawing_list_df, new_entries, shiban, module, side):
     """
-    Drawing List に新規の Child Drawing Number のみを追加する。
+    Package List に新規の Child Drawing Number のみを追加する。
 
     Master（update_parent_child_master）と異なり、既存行は一切上書きしない
     ——「新規の Child Drawing Number があれば追加する」という仕様のため、
     同じ Child が再度処理されても既存レコードはそのまま保持する。
 
     Args:
-        drawing_list_df: 既存の Drawing List DataFrame（None可）
+        drawing_list_df: 既存の Package List DataFrame（None可）
         new_entries: [{'main_drawing', 'source_drawing', 'title', 'subtitle'}, ...]
                      （update_parent_child_master の new_pairs と同じキー）
         shiban/module/side: 台帳ファイル名から得た指番/モジュール/サイド（Noneなら空欄記録）
@@ -374,31 +384,29 @@ def update_drawing_list(drawing_list_df, new_entries, shiban, module, side):
     return updated, added_count
 
 
-def save_master_to_bytes(master_df, pairs=None, mode=None, total_drawings_count=None, drawing_list_df=None):
+def save_master_to_bytes(master_df, mode=None, drawing_list_df=None):
     """
     図面管理台帳DataFrameをExcelバイトデータに変換
 
     シート構成:
-      1. Summary     : 統計サマリー（エンティティ合計・図形変更率・図面統計・流用率）
+      1. Summary     : 統計サマリー（エンティティ合計・図形変更率）
       2. Master      : 図面管理台帳データ（旧名 "Diff List"、2026-08改名）
-      3. Drawing List: 差分処理対象となった入力ファイルの記録（Child Drawing Numberでユニーク）
+      3. Package List: 差分処理対象となった入力ファイルの記録（Child Drawing Numberでユニーク。
+                       旧名 "Drawing List"、2026-09改名）
 
     Args:
         master_df: 図面管理台帳DataFrame
-        pairs: ペア情報リスト（差分抽出ペア数の計算に使用。Noneの場合は 0 で埋める）
         mode: ペアリング方式（'all_in_one'(Type A) / 'auto'(Type B) / 'pair_list'(Type C)）。
-              Type A は「アップロード図面総数」、Type B/C は「流用先図面総数」を分母に使う。
-        total_drawings_count: 図面統計の分母件数（呼び出し側で mode に応じて算出する）
-        drawing_list_df: Drawing List DataFrame（Noneの場合は空シートを出力）
+              Type A は「アップロード図面 図形総数」、Type B/C は「流用先図面 図形総数」の
+              ラベルに使う（エンティティ統計の Total Entities 行のみ）。
+        drawing_list_df: Package List DataFrame（Noneの場合は空シートを出力）
 
     Returns:
         bytes: Excelファイルのバイトデータ
     """
     if mode == 'all_in_one':
-        total_drawings_label = 'アップロード図面総数'
         total_entities_label = 'アップロード図面 図形総数'
     else:
-        total_drawings_label = '流用先図面総数'
         total_entities_label = '流用先図面 図形総数'
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -450,44 +458,6 @@ def save_master_to_bytes(master_df, pairs=None, mode=None, total_drawings_count=
 
         summary_ws.write(row, 0, '図形変更率 [%]', label_fmt)
         summary_ws.write(row, 1, change_rate, pct_fmt)
-        row += 2  # 空行を挟む
-
-        # ── 図面統計 ──
-        summary_ws.write(row, 0, '図面統計', bold)
-        row += 1
-
-        total_drawings = total_drawings_count if total_drawings_count is not None else 0
-        pair_count = len([p for p in pairs if p['status'] == 'complete']) if pairs is not None else 0
-        reuse_rate = (pair_count / total_drawings) if total_drawings > 0 else 0.0
-
-        # 完全新規図面数: 台帳（Master）の Relation='完全新規図面' の行から、
-        # Child のユニーク件数をカウントする（このExcel出力に書き込む master_df
-        # 全体＝累積台帳ベースの集計。差分抽出ペア数のような「今回バッチのみ」の
-        # 集計とは異なり、台帳全体の完全新規図面数を表す。2026-08 ユーザー指定）。
-        brand_new_count = 0
-        if 'Relation' in master_df.columns and 'Child' in master_df.columns:
-            brand_new_mask = master_df['Relation'] == '完全新規図面'
-            brand_new_count = master_df.loc[brand_new_mask, 'Child'].nunique()
-        brand_new_rate = (brand_new_count / total_drawings) if total_drawings > 0 else 0.0
-
-        summary_ws.write(row, 0, total_drawings_label, label_fmt)
-        summary_ws.write(row, 1, total_drawings, value_fmt)
-        row += 1
-
-        summary_ws.write(row, 0, '差分抽出ペア数', label_fmt)
-        summary_ws.write(row, 1, pair_count, value_fmt)
-        row += 1
-
-        summary_ws.write(row, 0, '完全新規図面数', label_fmt)
-        summary_ws.write(row, 1, brand_new_count, value_fmt)
-        row += 1
-
-        summary_ws.write(row, 0, '流用率 [%]', label_fmt)
-        summary_ws.write(row, 1, reuse_rate, pct_fmt)
-        row += 1
-
-        summary_ws.write(row, 0, '新規作成率 [%]', label_fmt)
-        summary_ws.write(row, 1, brand_new_rate, pct_fmt)
 
         # --- Master シート（Child で昇順ソート） ---
         master_sheet_df = master_df
@@ -507,7 +477,7 @@ def save_master_to_bytes(master_df, pairs=None, mode=None, total_drawings_count=
             if col_name in ENTITY_COUNT_COLUMNS:
                 master_sheet_ws.set_column(col_idx, col_idx, None, entity_col_fmt)
 
-        # --- Drawing List シート（Master の後ろ。Child Drawing Number で昇順ソート） ---
+        # --- Package List シート（Master の後ろ。Child Drawing Number で昇順ソート） ---
         dl_df = drawing_list_df if drawing_list_df is not None else create_empty_drawing_list_df()
         if 'Child Drawing Number' in dl_df.columns:
             dl_df = dl_df.sort_values('Child Drawing Number', kind='stable', na_position='last')

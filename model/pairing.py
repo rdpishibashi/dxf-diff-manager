@@ -405,28 +405,6 @@ def get_brand_new_drawing_pairs(all_pairs, mode, source_drawing_numbers=None, de
     return [p for p in no_source_pairs if p['main_drawing'] not in unchanged_drawings]
 
 
-def compute_total_drawings_count(mode, all_in_one_count=0, dest_count=0,
-                                  pair_list_df=None, uploaded_drawing_numbers=None):
-    """Summaryシート「図面統計」の分母件数を、ペアリング方式に応じて算出する。
-
-    - Type A（all_in_one）: アップロードした全DXFファイル件数（アップロード図面総数）
-    - Type B（auto）      : 流用先（新）DXFファイル件数（流用先図面総数）
-    - Type C（pair_list） : ペアリスト中の流用先図番のうち、実際にDXFファイルが
-                            アップロード済みのもののユニーク件数（流用先図面総数）
-    """
-    if mode == 'all_in_one':
-        return all_in_one_count
-    elif mode == 'auto':
-        return dest_count
-    elif mode == 'pair_list':
-        if pair_list_df is None:
-            return 0
-        targets = {str(v).strip() for v in pair_list_df['流用先図番'] if str(v).strip()}
-        uploaded = uploaded_drawing_numbers or set()
-        return len(targets & uploaded)
-    return 0
-
-
 def normalize_pair_list_columns(df):
     """
     ペアリストDataFrameのカラム名・値を正規化する（読み込み元のExcel/CSV I/Oは

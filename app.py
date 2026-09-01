@@ -31,18 +31,16 @@ from model.master_ledger import (
     load_drawing_list,
     parse_master_filename,
 )
-from model.diff_export import create_diff_zip, DIFF_LABELS_FILENAME, UNCHANGED_LABELS_FILENAME
+from model.diff_export import create_diff_zip, DIFF_LABELS_FILENAME
 
 # 設定をインポート
-from config import ui_config, diff_config, help_text
+from config import ui_config, diff_config, label_filter_config, help_text
 
 st.set_page_config(
     page_title="DXF Diff Manager",
     page_icon="📊",
     layout="wide",
 )
-
-PREFIX_CONFIG_PATH = Path(current_dir) / "prefix_config.txt"
 
 # 図面管理台帳の新規作成時に使用する入力フォーマット
 SHIBAN_PATTERN = re.compile(r'^[A-Z]{2}\d{2}-\d{4}-\d$')   # 例: AA11-1111-1
@@ -53,31 +51,36 @@ SIDE_PATTERN = re.compile(r'^[A-Z0-9]{3}$')                # 例: XXX（英大�
 PAIRING_TYPE_LETTERS = {'all_in_one': 'A', 'auto': 'B', 'pair_list': 'C'}
 
 
-def compute_default_zip_basename(master_file_name, step1_mode, revision):
+def compute_default_zip_basename(master_file_name, step1_mode):
     """ZIPダウンロードファイル名（拡張子なし）のデフォルト値を組み立てる。
 
     指番/モジュール/サイドが master_file_name から逆算できる場合は
-    "dxf_diff_results_Type{A/B/C}_{指番}_{モジュール}_{サイド}_{リビジョン}"
+    "dxf_diff_results_Type{A/B/C}_{指番}_{モジュール}_{サイド}"
     （"Type{A/B/C}" は画面表示の「Type A/B/C」と一致させる）、できない場合
     （台帳を作成していない、または命名規則に一致しない台帳をアップロードした場合）は
     従来通り "dxf_diff_results" のみを返す。
 
+    末尾のリビジョン識別子（旧: 常時付与していた "_01"）は 2026-09 に廃止した。
+    同じ指番-モジュール-サイドで繰り返し実行する際に個別に出力を保存したい場合は、
+    ユーザーが「ファイル名を確定」前に手動で "_01" 等を追記する運用に変更している
+    （Step5 のキャプション参照）。
+
     指番/モジュール/サイドの逆算（"{指番}_{モジュール}_{サイド}.xlsx" の命名規則）は
-    model.master_ledger.parse_master_filename() に委譲する（Drawing List の
+    model.master_ledger.parse_master_filename() に委譲する（Package List の
     Sashiban/Module/Side 記録と同じロジックを共有するため、2026-08 に一本化）。
     """
     letter = PAIRING_TYPE_LETTERS.get(step1_mode, 'A')
     shiban, module, side = parse_master_filename(master_file_name)
     if shiban is None:
         return "dxf_diff_results"
-    return f"dxf_diff_results_Type{letter}_{shiban}_{module}_{side}_{revision}"
+    return f"dxf_diff_results_Type{letter}_{shiban}_{module}_{side}"
 
 
 def read_zip_member(zip_data, member_name):
     """zip_data（bytes）からメンバーを読み出す。存在しない場合は None。
 
-    diff_labels.xlsx / unchanged_labels.xlsx を session_state に二重保持しないため、
-    プレビュー表示時に zip_data から都度読み出す用途で使う。
+    diff_labels.xlsx を session_state に二重保持しないため、プレビュー表示時に
+    zip_data から都度読み出す用途で使う。
     """
     if not zip_data:
         return None
@@ -88,17 +91,6 @@ def read_zip_member(zip_data, member_name):
     except Exception:
         pass
     return None
-
-
-def load_default_prefixes():
-    if PREFIX_CONFIG_PATH.exists():
-        with open(PREFIX_CONFIG_PATH, 'r', encoding='utf-8') as f:
-            lines = [line.rstrip('\n') for line in f]
-        return [line for line in lines if line.strip()]
-    return []
-
-
-DEFAULT_PREFIXES = load_default_prefixes()
 
 
 def cleanup_temp_files():
@@ -115,11 +107,6 @@ def cleanup_temp_files():
                         os.unlink(temp_path)
                     except Exception:
                         pass  # エラーは無視
-
-
-def get_prefix_list_from_state():
-    text_value = st.session_state.get('prefix_text_input', "")
-    return [line.strip() for line in text_value.splitlines() if line.strip()]
 
 
 def extract_source_number_from_dest_file(uploaded_file):
@@ -315,9 +302,6 @@ def initialize_session_state():
     if 'dest_upload_summary' not in st.session_state:
         st.session_state.dest_upload_summary = None
 
-    if 'prefix_text_input' not in st.session_state:
-        st.session_state.prefix_text_input = "\n".join(DEFAULT_PREFIXES)
-
     if 'drawing_info_cache' not in st.session_state:
         st.session_state.drawing_info_cache = {}
 
@@ -403,21 +387,6 @@ def update_master_if_needed(pairs, mode=None):
     return added_count
 
 
-def compute_total_drawings_count(mode):
-    """Summaryシート「図面統計」の分母件数を算出する（model.pairing の薄い呼び出し）。
-
-    実体は streamlit 非依存の `model.pairing.compute_total_drawings_count()`。
-    本関数は session_state から必要な値を取り出して渡すだけの Driver 層アダプタ。
-    """
-    return pairing.compute_total_drawings_count(
-        mode,
-        all_in_one_count=len(st.session_state.all_in_one_files_dict),
-        dest_count=len(st.session_state.dest_files_dict),
-        pair_list_df=st.session_state.pair_list_df,
-        uploaded_drawing_numbers=set(st.session_state.all_files_dict.keys()),
-    )
-
-
 def compute_unchanged_drawings(all_pairs, mode):
     """「変更していない図面」対象図番集合を算出する（model.pairing の薄い呼び出し）。
 
@@ -497,8 +466,7 @@ def render_pair_list():
     # main_drawing のユニーク数を使っており、同じ図面が複数の流用元と比較される
     # 場合（RevUp と流用の双方で complete になる等）に表の行数より少ない件数が
     # 表示され、実データで「テーブルは5行なのに4件と表示される」と誤解を招いた
-    # ため、ユーザー判断でテーブル行数優先に変更。Summary シートの「差分抽出
-    # ペア数」（save_master_to_bytes 内 pair_count）と同じ集計方法に統一される。
+    # ため、ユーザー判断でテーブル行数優先に変更。
     # トレードオフ: 同一図面が複数関係で complete になる場合、本セクションの
     # 件数と他セクション（未アップロード・変更なし・完全新規図面）の件数を
     # 合計しても流用先総数と厳密には一致しなくなる（複数関係を持つ図面が
@@ -1307,94 +1275,24 @@ def render_step3_diff(complete_pairs):
     Args:
         complete_pairs: 差分抽出可能なペアのリスト
     """
-    # オプション設定
-    with st.expander("オプション設定", expanded=False):
-        col1, col2 = st.columns(2)
+    # オプション設定（2026-09 に config.py へ移行。UI からは変更できない）
+    ignore_moved_labels = diff_config.IGNORE_MOVED_LABELS
+    ignore_color_only_changes = diff_config.IGNORE_COLOR_ONLY_CHANGES
+    tolerance = diff_config.DEFAULT_TOLERANCE
+    deleted_color = diff_config.DEFAULT_DELETED_COLOR
+    added_color = diff_config.DEFAULT_ADDED_COLOR
+    unchanged_color = diff_config.DEFAULT_UNCHANGED_COLOR
+    diff_label_patterns = label_filter_config.DIFF_LABEL_PREFIX_PATTERNS
 
-        with col1:
-            ignore_moved_labels = st.checkbox(
-                "**移動しただけのラベルを差分から除外**",
-                value=False,
-                help="回路ブロックをまるごと別の位置に移動すると、座標単位の比較では"
-                     "「削除＋追加」として検出されます。同一ラベルの削除件数と追加件数が"
-                     "一致する分は、座標が異なっていても diff_labels.xlsx の変更候補から"
-                     "除外し、変更なしとして扱います（差分DXFのエンティティ比較には影響しません）。"
-                     "「☆」を含むラベルは対象外（常に変更候補として残ります）。"
-                     "\n\n注意: 座標を見ず件数だけで判定するため、たまたま同じラベル名の部品が"
-                     "別の場所で削除・別の無関係な場所に追加された場合も「移動」とみなされ、"
-                     "見た目上区別できなくなります。"
-            )
-
-            st.write("")
-            ignore_color_only_changes = st.checkbox(
-                "**色だけが異なる図形は変更なし扱いにする**",
-                value=False,
-                help="座標・形状（線の始点終点、円の中心・半径、文字内容等）が完全に一致し、"
-                     "色（color）だけが異なる図形要素を、差分DXFで UNCHANGED（変更なし）として"
-                     "扱います。改訂箇所を色分けマーキングした図面などで、同じ図形が色の違いだけで"
-                     "DELETED＋ADDEDの組として大量に検出される場合に使用します"
-                     "（diff_labels.xlsx のラベル比較には影響しません）。"
-                     "\n\n注意: 色の変更自体が意図的な改訂マーキングである場合、この機能を"
-                     "有効にするとその色変更が差分として検出されなくなります。"
-            )
-
-            st.write("")
-            validate_ref_designators = st.checkbox(
-                "**機器符号妥当性チェック**",
-                value=False,
-                help="機器符号パターンに一致するラベルのみを抽出し（Total シート追加）、標準フォーマット非適合の機器符号を Invalid シートに出力します。"
-            )
-            filter_non_parts = validate_ref_designators
-
-            st.write("")
-            tolerance = st.number_input(
-                "**差分検出の際の座標マージン**",
-                min_value=1e-8,
-                max_value=1.0,
-                value=diff_config.DEFAULT_TOLERANCE,
-                step=0.01,
-                format="%.2f",
-                help="同じ図形と判定する座標の許容誤差です。大きくするほど位置ずれを無視します。",
-            )
-
-            prefix_text = st.text_area(
-                "**未変更ラベルの中から抽出したい先頭文字列**（1行1件）",
-                value=st.session_state.prefix_text_input,
-                height=150,
-                help="prefix_config.txt に定義された初期値を基に編集できます。空行は無視されます。",
-                key=f"prefix_text_area_{st.session_state.uploader_key}"
-            )
-            st.session_state.prefix_text_input = prefix_text
-            prefix_list = get_prefix_list_from_state()
-
-        with col2:
-            st.write("**レイヤー色設定**")
-
-            # デフォルト値のインデックスを取得
-            deleted_default_index = next(i for i, (val, _) in enumerate(diff_config.COLOR_OPTIONS) if val == diff_config.DEFAULT_DELETED_COLOR)
-            added_default_index = next(i for i, (val, _) in enumerate(diff_config.COLOR_OPTIONS) if val == diff_config.DEFAULT_ADDED_COLOR)
-            unchanged_default_index = next(i for i, (val, _) in enumerate(diff_config.COLOR_OPTIONS) if val == diff_config.DEFAULT_UNCHANGED_COLOR)
-
-            deleted_color = st.selectbox(
-                "削除図形の色（流用元図面のみ）",
-                options=diff_config.COLOR_OPTIONS,
-                index=deleted_default_index,
-                format_func=lambda x: x[1]
-            )[0]
-
-            added_color = st.selectbox(
-                "追加図形の色（新図面のみ）",
-                options=diff_config.COLOR_OPTIONS,
-                index=added_default_index,
-                format_func=lambda x: x[1]
-            )[0]
-
-            unchanged_color = st.selectbox(
-                "変更なし図形の色",
-                options=diff_config.COLOR_OPTIONS,
-                index=unchanged_default_index,
-                format_func=lambda x: x[1]
-            )[0]
+    with st.expander("オプション設定（config.py で変更できます）", expanded=False):
+        st.caption(
+            f"座標マージン: {tolerance} ｜ "
+            f"移動しただけのラベルを除外: {'ON' if ignore_moved_labels else 'OFF'} ｜ "
+            f"色だけが異なる図形は変更なし扱い: {'ON' if ignore_color_only_changes else 'OFF'} ｜ "
+            f"差分抽出するラベルの先頭文字列: "
+            f"{'、'.join(diff_label_patterns) if diff_label_patterns else 'なし（全ラベル）'} ｜ "
+            f"レイヤー色（削除/追加/変更なし）: {deleted_color}/{added_color}/{unchanged_color}"
+        )
 
     # 比較開始ボタン
     if complete_pairs:
@@ -1412,7 +1310,7 @@ def render_step3_diff(complete_pairs):
 
             try:
                 step1_mode = st.session_state.step1_mode
-                zip_data, results, diff_labels_excel, unchanged_labels_excel, updated_master, updated_drawing_list = create_diff_zip(
+                zip_data, results, diff_labels_excel, updated_master, updated_drawing_list = create_diff_zip(
                     st.session_state.pairs,
                     master_df=st.session_state.master_df,
                     master_filename=st.session_state.master_file_name,
@@ -1420,34 +1318,29 @@ def render_step3_diff(complete_pairs):
                     deleted_color=deleted_color,
                     added_color=added_color,
                     unchanged_color=unchanged_color,
-                    prefixes=prefix_list,
+                    diff_label_patterns=diff_label_patterns,
                     progress_callback=diff_progress,
                     on_error=st.error,
-                    filter_non_parts=filter_non_parts,
-                    validate_ref_designators=validate_ref_designators,
                     ignore_moved_labels=ignore_moved_labels,
                     ignore_color_only_changes=ignore_color_only_changes,
                     step1_mode=step1_mode,
-                    total_drawings_count=compute_total_drawings_count(step1_mode),
                     source_drawing_numbers=set(st.session_state.source_files_dict.keys()),
                     dest_drawing_numbers=set(st.session_state.dest_files_dict.keys()),
                     drawing_list_df=st.session_state.drawing_list_df,
                 )
 
                 # セッション状態に保存
-                # diff_labels.xlsx / unchanged_labels.xlsx は zip_data の中にも同内容が
-                # 含まれるため、二重に保持しない。プレビュー表示時に zip から読み出す
-                # （has_* フラグのみ保持し、実体のbytesはここでは持たない）。
+                # diff_labels.xlsx は zip_data の中にも同内容が含まれるため、
+                # 二重に保持しない。プレビュー表示時に zip から読み出す
+                # （has_diff_labels フラグのみ保持し、実体のbytesはここでは持たない）。
                 st.session_state.zip_data = zip_data
                 st.session_state.results = results
                 st.session_state.has_diff_labels = bool(diff_labels_excel)
-                st.session_state.has_unchanged_labels = bool(unchanged_labels_excel)
                 st.session_state.processing_settings = {
                     'tolerance': tolerance,
                     'deleted_color': deleted_color,
                     'added_color': added_color,
                     'unchanged_color': unchanged_color,
-                    'validate_ref_designators': validate_ref_designators,
                 }
                 if updated_master is not None:
                     st.session_state.master_df = updated_master
@@ -1510,7 +1403,6 @@ def render_step3_diff(complete_pairs):
                 row['追加図形数'] = '-'
                 row['総図形数'] = '-'
             row['変更ラベル数'] = result.get('change_label_count', '-')
-            row['未変更抽出ラベル数'] = result.get('unchanged_label_count', '-')
 
             row['ステータス'] = status
             result_data.append(row)
@@ -1518,11 +1410,9 @@ def render_step3_diff(complete_pairs):
         st.dataframe(result_data, width='stretch', hide_index=True)
 
         # プレビューセクション
-        # diff_labels.xlsx / unchanged_labels.xlsx は zip_data 内から都度読み出す（二重保持しない）
+        # diff_labels.xlsx は zip_data 内から都度読み出す（二重保持しない）
         has_diff_labels = st.session_state.get('has_diff_labels', False)
-        has_unchanged_labels = st.session_state.get('has_unchanged_labels', False)
-        preview_available = has_diff_labels or has_unchanged_labels or \
-                            st.session_state.master_df is not None
+        preview_available = has_diff_labels or st.session_state.master_df is not None
 
         if preview_available:
             st.subheader("出力内容プレビュー")
@@ -1532,8 +1422,6 @@ def render_step3_diff(complete_pairs):
                 preview_items.append("図面管理台帳")
             if has_diff_labels:
                 preview_items.append("diff_labels.xlsx")
-            if has_unchanged_labels:
-                preview_items.append("unchanged_labels.xlsx")
             if preview_items:
                 st.caption("表示可能: " + ", ".join(preview_items))
 
@@ -1563,18 +1451,6 @@ def render_step3_diff(complete_pairs):
                         )
                         render_preview_dataframe(diff_xl.parse(sheet_name), "diff_preview")
 
-            if has_unchanged_labels:
-                with st.expander("unchanged_labels.xlsx プレビュー", expanded=False):
-                    unchanged_bytes = read_zip_member(st.session_state.zip_data, UNCHANGED_LABELS_FILENAME)
-                    if unchanged_bytes:
-                        unchanged_xl = pd.ExcelFile(BytesIO(unchanged_bytes))
-                        sheet_name = st.selectbox(
-                            "シートを選択（unchanged_labels）",
-                            unchanged_xl.sheet_names,
-                            key="unchanged_labels_preview_sheet"
-                        )
-                        render_preview_dataframe(unchanged_xl.parse(sheet_name), "unchanged_preview")
-
         # ダウンロードボタン
         if successful_count > 0:
             st.subheader("Step 5: 差分抽出ファイルのダウンロード")
@@ -1597,7 +1473,7 @@ def render_step3_diff(complete_pairs):
             # zip_basename_confirmed は「未確定」を表す番人として None を使う
             # （確定後は文字列になる）。
             default_zip_basename = compute_default_zip_basename(
-                st.session_state.master_file_name, st.session_state.step1_mode, "01"
+                st.session_state.master_file_name, st.session_state.step1_mode
             )
             not_yet_initialized = 'zip_basename_input' not in st.session_state
             not_user_edited = st.session_state.get('zip_basename_input') == st.session_state.get('zip_basename_last_default')
@@ -1614,11 +1490,10 @@ def render_step3_diff(complete_pairs):
             )
 
             st.caption(
-                "末尾の数字はレビジョンです。デフォルトは「01」です。"
-                "同じ指番・モジュール・サイドで複数回差分抽出する場合は、"
-                "レビジョン番号を手動で変更してください。"
-                "デフォルトのままダウンロードする場合も、"
-                "先に「ファイル名を確定」を押してください。"
+                "ファイル名を変更してもしなくても、ファイル名を確定 ボタンを押してください。"
+                "同じ 指番-モジュール-サイド で繰り返し実行する際に、"
+                "個別に出力を保存しておきたい場合は、"
+                '"_01" などの識別子をファイル名の最後に追加してください。'
             )
 
             # st.download_button はクリック時にサーバーへ再接続してファイル名を
@@ -1669,11 +1544,10 @@ def render_step3_diff(complete_pairs):
             # オプション設定の情報を表示
             st.info(f"""
                 **生成されたファイルについて：**
-                - ADDED: 新図面にのみ存在する要素（追加された図形）
+                - ADDED: 新図面にのみ存在する要素（追加された図形。完全新規図面は全要素）
                 - DELETED: 旧図面にのみ存在する要素（削除された図形）
                 - UNCHANGED: 両方の図面に存在し変更がない図形
                 - diff_labels.xlsx: 各図面の変更ラベル一覧（シート名は新図面の図番）
-                - unchanged_labels.xlsx: 指定の先頭文字列に一致する未変更ラベル一覧
                 - 座標許容誤差: {settings.get('tolerance', 0.01)}
                 """)
 
@@ -1696,7 +1570,7 @@ def render_step3_diff(complete_pairs):
                         'all_in_one_upload_failures', 'all_in_one_upload_summary',
                         'results', 'zip_data', 'processing_settings',
                         'master_df', 'drawing_list_df', 'master_file_name', 'added_relationships_count',
-                        'has_diff_labels', 'has_unchanged_labels',
+                        'has_diff_labels',
                         'diff_preview_expanded',
                         'downloaded']:
                 if key in st.session_state:

@@ -1328,3 +1328,62 @@ def count_entities_in_dxf_file(file_path: str, tolerance: float = 0.05,
         logger.error(f"DXF entity count error: {e}")
         gc.collect()
         return None
+
+
+def generate_all_added_dxf(file_path: str, output_file: str, tolerance: float = 0.05,
+                           deleted_color: int = 6, added_color: int = 4,
+                           unchanged_color: int = 7,
+                           ignore_color_only_changes: bool = False) -> Tuple[bool, Optional[int]]:
+    """
+    単一のDXFファイル（比較対象なし）から、全エンティティを ADDED として
+    出力する差分DXFファイルを作成する。
+
+    完全新規図面（流用元の参照を持たない図面）を差分DXFと同じ見た目
+    （3レイヤー構成: DELETED/ADDED/UNCHANGED）で出力するために使う。
+    DELETED・UNCHANGED レイヤーは定義のみ行い、中身は空になる。
+    エンティティ数の算出は count_entities_in_dxf_file() と同じ抽出経路・
+    シグネチャ単位の重複排除を使うため、台帳の Added/Total Entities と
+    同じ値になる（値の整合性は count_entities_in_dxf_file() 参照）。
+
+    Args:
+        file_path: 入力DXFファイルパス
+        output_file: 出力DXFファイルパス
+        tolerance: 座標許容誤差
+        deleted_color/added_color/unchanged_color: レイヤー色（AutoCADカラーインデックス）
+        ignore_color_only_changes: SignatureGenerator の ignore_color に渡す
+            （count_entities_in_dxf_file() と同じ定義を保つため揃える）
+
+    Returns:
+        Tuple[bool, Optional[int]]: (成功フラグ, エンティティ数。失敗時は None)
+    """
+    try:
+        tolerance_config = ToleranceConfig(tolerance)
+        transformer = CoordinateTransformer(tolerance_config, debug=False)
+        expander = EntityExpander(transformer, debug=False, global_offset=None)
+        signature_generator = SignatureGenerator(transformer, debug=False,
+                                                 ignore_color=ignore_color_only_changes)
+        diff_analyzer = DiffAnalyzer(signature_generator, debug=False)
+        layer_config = LayerConfig(deleted_color, added_color, unchanged_color)
+        output_generator = OutputGenerator(transformer, layer_config, debug=False)
+
+        doc = ezdxf.readfile(file_path)
+        entities, _, _, linetypes = diff_analyzer.extract_entities_from_doc(doc, "A", expander)
+        del doc
+
+        added_hashes = set(entities.keys())
+        count = len(added_hashes)
+
+        success = output_generator.create_diff_dxf(
+            {}, entities, set(), added_hashes, set(), output_file,
+            linetype_patterns_a=None, linetype_patterns_b=linetypes)
+
+        del entities
+        del added_hashes
+        gc.collect()
+
+        return success, count if success else None
+
+    except Exception as e:
+        logger.error(f"DXF all-added generation error: {e}")
+        gc.collect()
+        return False, None
