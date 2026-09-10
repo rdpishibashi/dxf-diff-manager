@@ -13,6 +13,7 @@ import os
 import gc
 
 from .extract_labels import clean_mtext_format_codes
+from .common_utils import is_invisible
 
 # 高精度計算設定
 getcontext().prec = 50
@@ -407,8 +408,12 @@ class EntityExpander:
             entity_type = entity.dxftype()
 
             if entity_type == 'INSERT':
-                # INSERT 自身が off/frozen レイヤーにあれば、その参照全体が表示されない
-                if not self._is_layer_visible(getattr(entity.dxf, 'layer', '0')):
+                # INSERT 自身が off/frozen レイヤーにあれば、その参照全体が表示されない。
+                # invisible属性（非表示設定）が立っている場合も同様に、中身ごと
+                # 丸ごと除外する（is_invisibleのdocstring参照。virtual_entities()と
+                # 異なりこちらは自前展開のため、INSERT自身のチェックを明示的に行う
+                # 必要がある）。
+                if not self._is_layer_visible(getattr(entity.dxf, 'layer', '0')) or is_invisible(entity):
                     continue
                 try:
                     transform_matrix = self.transformer.create_transformation_matrix(entity)
@@ -417,8 +422,8 @@ class EntityExpander:
                     logger.warning(f"Error expanding INSERT {entity.dxf.name}: {e}")
 
             elif entity_type != 'ATTDEF':
-                # 直接エンティティ（off/frozen レイヤーなら表示されないので除外）
-                if not self._is_layer_visible(getattr(entity.dxf, 'layer', '0')):
+                # 直接エンティティ（off/frozen レイヤー・invisible属性なら表示されないので除外）
+                if not self._is_layer_visible(getattr(entity.dxf, 'layer', '0')) or is_invisible(entity):
                     continue
                 identity_matrix = np.eye(4)
                 absolute_entity = self.transform_entity_to_absolute(entity, identity_matrix)
@@ -452,8 +457,10 @@ class EntityExpander:
             # ブロック定義内エンティティが明示的な off/frozen レイヤー上にある場合、
             # 参照元 INSERT のレイヤーに関わらず図面に表示されないため除外する。
             # レイヤー '0' は INSERT のレイヤーを継承する（呼び出し前に INSERT 側の
-            # 可視性は確認済みなので表示扱いでよい）。
-            if not self._is_layer_visible(getattr(block_entity.dxf, 'layer', '0')):
+            # 可視性は確認済みなので表示扱いでよい）。invisible属性についても同様に
+            # ここで除外する（ネストしたINSERT自身がinvisibleな場合もこのチェックで
+            # 再帰展開ごと止まる）。
+            if not self._is_layer_visible(getattr(block_entity.dxf, 'layer', '0')) or is_invisible(block_entity):
                 continue
 
             if block_entity.dxftype() == 'INSERT':
@@ -480,6 +487,8 @@ class EntityExpander:
         # ATTRIB処理
         if hasattr(insert_entity, 'attribs'):
             for attrib in insert_entity.attribs:
+                if is_invisible(attrib):
+                    continue
                 identity_matrix = np.eye(4)
                 absolute_attrib = self.transform_entity_to_absolute(attrib, identity_matrix)
                 if absolute_attrib:
