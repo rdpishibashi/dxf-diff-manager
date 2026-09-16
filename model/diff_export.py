@@ -21,6 +21,7 @@ from .label_diff import (
     round_labels_with_coordinates,
     build_diff_labels_workbook,
 )
+from .ref_designator_judge import is_ref_designator_label
 from .pairing import get_brand_new_drawing_pairs
 from .master_ledger import (
     update_parent_child_master, save_master_to_bytes,
@@ -31,13 +32,37 @@ from config import diff_config, label_filter_config
 DIFF_LABELS_FILENAME = "diff_labels.xlsx"
 
 
+def _annotate_ref_designator_candidates(change_rows):
+    """change_rows の各行に「機器符号候補」キー（'Y' または None）を付与し、
+    'Y' の行数を返す。
+
+    Old Label・New Label のいずれかが機器符号候補パターンに一致すれば 'Y'
+    （完全新規図面のシートは Old Label が常に None のため、実質 New Label
+    のみでの判定になる）。判定ロジックは `ref_designator_judge.py`
+    （DXF-extract-labels からの移植、NFKC正規化込み）に委譲する。
+
+    change_rows を破壊的に変更し、同じリストを返す（呼び出し元の利便性のため）。
+    """
+    count = 0
+    for row in change_rows:
+        old_label, new_label = row.get('Old Label'), row.get('New Label')
+        is_candidate = (
+            (old_label is not None and is_ref_designator_label(old_label)) or
+            (new_label is not None and is_ref_designator_label(new_label))
+        )
+        row['機器符号候補'] = 'Y' if is_candidate else None
+        if is_candidate:
+            count += 1
+    return count
+
+
 def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                     deleted_color=None, added_color=None, unchanged_color=None,
                     diff_label_patterns=None, progress_callback=None, on_error=None,
                     ignore_moved_labels=False, ignore_color_only_changes=False,
                     step1_mode=None,
                     source_drawing_numbers=None, dest_drawing_numbers=None,
-                    drawing_list_df=None):
+                    drawing_list_df=None, label_only=False):
     """
     ペアリストに基づいて差分DXFファイルを作成し、ZIPアーカイブを生成
 
@@ -68,6 +93,11 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
         drawing_list_df: Drawing List DataFrame（Noneの場合は空から開始）。
             master_df と異なり、既存の Child Drawing Number は上書きされず、
             新規の Child Drawing Number のみが追加される（update_drawing_list 参照）
+        label_only: True の場合、diff_labels.xlsx のラベル比較を座標を使わず
+            ラベル文字列だけで行う（compute_label_differences の label_only 参照）。
+            差分DXF（図形のADDED/DELETED/UNCHANGED判定）には影響しない。
+            True の場合、ignore_moved_labels は無視される（座標を見ないラベルのみ
+            比較は移動の吸収を最初から内包しているため）。
 
     Returns:
         tuple: (zip_data, results, diff_labels_excel, master_df, drawing_list_df)
@@ -132,12 +162,15 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                     label_cache=label_cache,
                     ignore_moved_labels=ignore_moved_labels,
                     new_file_original_name=pair.get('main_file_info', {}).get('filename'),
+                    label_only=label_only,
                 )
                 change_rows = filter_change_rows_by_patterns(change_rows, diff_label_patterns)
                 change_label_count = len(change_rows)
             except Exception as e:
                 report_error(f"ラベル比較中にエラーが発生しました ({main_drawing}): {str(e)}")
                 change_rows = []
+
+            ref_designator_count = _annotate_ref_designator_candidates(change_rows)
 
             # Summary 行を収集
             added_count = sum(1 for r in change_rows if r['Old Label'] is None)
@@ -152,6 +185,7 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                 '追加ラベル数': added_count,
                 '削除ラベル数': deleted_count,
                 '変更ラベル数': changed_count,
+                '機器符号候補数': ref_designator_count,
                 'タイトル': resolved_title,
                 'サブタイトル': resolved_subtitle,
             })
@@ -317,13 +351,21 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
             resolved_subtitle = pair_with_counts.get('subtitle')
             pair_extracted_info[main_drawing] = {'title': resolved_title, 'subtitle': resolved_subtitle}
 
-            rounded_labels = round_labels_with_coordinates(labels, tolerance)
-            brand_new_change_rows = [
-                {'X': x, 'Y': y, 'Old Label': None, 'New Label': label}
-                for label, x, y in rounded_labels
-            ]
+            if label_only:
+                # ラベルのみ比較モードでは座標を使わない（D2: X/Yは空欄のまま）。
+                brand_new_change_rows = [
+                    {'X': None, 'Y': None, 'Old Label': None, 'New Label': label}
+                    for label, _x, _y in labels
+                ]
+            else:
+                rounded_labels = round_labels_with_coordinates(labels, tolerance)
+                brand_new_change_rows = [
+                    {'X': x, 'Y': y, 'Old Label': None, 'New Label': label}
+                    for label, x, y in rounded_labels
+                ]
             brand_new_change_rows = filter_change_rows_by_patterns(brand_new_change_rows, diff_label_patterns)
             brand_new_change_rows.sort(key=lambda r: r['New Label'] or '')
+            brand_new_ref_designator_count = _annotate_ref_designator_candidates(brand_new_change_rows)
 
             diff_label_sheets.append({
                 'sheet_name': main_drawing,
@@ -337,6 +379,7 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                 '追加ラベル数': len(brand_new_change_rows),
                 '削除ラベル数': 0,
                 '変更ラベル数': 0,
+                '機器符号候補数': brand_new_ref_designator_count,
                 'タイトル': resolved_title,
                 'サブタイトル': resolved_subtitle,
             })
@@ -428,6 +471,7 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
         diff_labels_excel = build_diff_labels_workbook(
             diff_label_sheets,
             summary_data=summary_data if summary_data else None,
+            include_ref_designator_column=True,
         )
 
         if diff_labels_excel:
