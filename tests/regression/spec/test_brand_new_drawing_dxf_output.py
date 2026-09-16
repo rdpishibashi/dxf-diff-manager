@@ -21,6 +21,11 @@
       削除ラベル数=0、変更ラベル数=0、追加ラベル数=シートの行数）。
     - 他の通常ペアと同じ図番ABC順で並ぶ（Summaryの図番欄・シート順とも）。
 
+受入条件（2026-09-16、追加ユーザー要求「機器符号候補列を追加」）:
+    - ペアシートの先頭列に「機器符号候補」列が追加される（完全新規図面のシートも
+      対象。Old列が常に空のため実質 New Label のみで判定される）。
+    - Summary シートに「機器符号候補数」列が追加される。
+
 実行:
     cd DXF-diff-manager
     python -m tests.regression.spec.test_brand_new_drawing_dxf_output
@@ -134,9 +139,12 @@ def test_brand_new_drawing_registered_in_master_with_added_equals_total():
 def test_brand_new_drawing_has_diff_labels_sheet_with_new_only():
     """diff_labels.xlsx に完全新規図面のシートが作成され、New列のみ値が入る
     （Old列は常に空）。Summaryシートにも図番・流用元図番="none"・削除ラベル数=0・
-    変更ラベル数=0・追加ラベル数=シート行数で記録される。"""
+    変更ラベル数=0・追加ラベル数=シート行数で記録される。
+    機器符号候補列（ペアシート先頭・Summaryの「機器符号候補数」）も出力される
+    （2026-09-16。'R10' は機器符号候補パターンに一致し、'LABEL_A' は
+    アンダースコアを含むためどの候補パターンにも一致しない）。"""
     with tempfile.TemporaryDirectory() as d:
-        pairs = _build_brand_new_pairs(d, 'BRANDNEW-004', labels=['LABEL_A', 'LABEL_B'])
+        pairs = _build_brand_new_pairs(d, 'BRANDNEW-004', labels=['LABEL_A', 'R10'])
         _, results, diff_labels_excel, _, _ = create_diff_zip(pairs, step1_mode='pair_list')
 
         assert results[0]['success']
@@ -145,9 +153,14 @@ def test_brand_new_drawing_has_diff_labels_sheet_with_new_only():
         assert 'BRANDNEW-004' in xl.sheet_names, f"完全新規図面のシートが無い: {xl.sheet_names}"
 
         sheet_df = pd.read_excel(xl, sheet_name='BRANDNEW-004')
-        assert list(sheet_df.columns) == ['X', 'Y', 'Old: none', 'New: BRANDNEW-004']
+        assert list(sheet_df.columns) == ['機器符号候補', 'X', 'Y', 'Old: none', 'New: BRANDNEW-004']
         assert sheet_df['Old: none'].isna().all(), "Old列に値が入っている（Newのみのはず）"
-        assert set(sheet_df['New: BRANDNEW-004']) == {'LABEL_A', 'LABEL_B'}
+        assert set(sheet_df['New: BRANDNEW-004']) == {'LABEL_A', 'R10'}
+
+        r10_row = sheet_df[sheet_df['New: BRANDNEW-004'] == 'R10'].iloc[0]
+        assert r10_row['機器符号候補'] == 'Y'
+        label_a_row = sheet_df[sheet_df['New: BRANDNEW-004'] == 'LABEL_A'].iloc[0]
+        assert pd.isna(label_a_row['機器符号候補'])
 
         summary_df = pd.read_excel(xl, sheet_name='Summary')
         row = summary_df[summary_df['図番'] == 'BRANDNEW-004'].iloc[0]
@@ -155,6 +168,7 @@ def test_brand_new_drawing_has_diff_labels_sheet_with_new_only():
         assert row['削除ラベル数'] == 0
         assert row['変更ラベル数'] == 0
         assert row['追加ラベル数'] == 2
+        assert row['機器符号候補数'] == 1
 
 
 def _run_all():

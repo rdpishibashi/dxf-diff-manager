@@ -20,6 +20,7 @@ import ezdxf
 import pandas as pd
 
 from model.diff_export import create_diff_zip
+from model.pairing import build_pairs_from_list
 from model.master_ledger import (
     create_empty_master_df, create_empty_drawing_list_df,
     MASTER_SHEET_NAME, DRAWING_LIST_SHEET_NAME,
@@ -378,6 +379,115 @@ def test_create_diff_zip_drawing_list_written_to_master_excel():
         assert xl.sheet_names == ['Summary', MASTER_SHEET_NAME, DRAWING_LIST_SHEET_NAME]
         dl = pd.read_excel(xl, sheet_name=DRAWING_LIST_SHEET_NAME)
         assert list(dl['Child Drawing Number']) == ['NEW-001']
+
+
+def test_label_only_end_to_end_ignores_coordinates_and_absorbs_moves():
+    """create_diff_zip(label_only=True): 移動しただけのR10は変更なし扱いになり
+    （ignore_moved_labelsを渡さなくても）、C5・XYZは追加のみとして残る。
+    X/Y列は常にNaN（D2: ラベルのみ比較モードでは座標を出力しない）。"""
+    with tempfile.TemporaryDirectory() as d:
+        pairs = _make_pattern_combination_pairs(d)
+        _, results, diff_labels_excel, _, _ = create_diff_zip(pairs, label_only=True)
+        assert results[0]['success']
+        sheet_df = pd.read_excel(io.BytesIO(diff_labels_excel), sheet_name='NEW-001')
+
+        remaining_new = set(sheet_df['New: NEW-001'].dropna())
+        remaining_old = set(sheet_df['Old: OLD-001'].dropna())
+        assert remaining_old == set(), "移動しただけのR10がOld側に残っている"
+        assert remaining_new == {'C5', 'XYZ'}, f"追加ラベルが正しく残っていない: {remaining_new}"
+        assert sheet_df['X'].isna().all() and sheet_df['Y'].isna().all(), \
+            "ラベルのみ比較モードでX/Y列が空欄になっていない"
+
+        summary_df = pd.read_excel(io.BytesIO(diff_labels_excel), sheet_name='Summary')
+        row = summary_df[summary_df['図番'] == 'NEW-001'].iloc[0]
+        assert row['変更ラベル数'] == 0  # ラベルのみ比較では名称変更ペアは発生しない
+
+
+def test_label_only_ignores_ignore_moved_labels_flag():
+    """label_only=True の場合、ignore_moved_labels=True/False いずれを渡しても
+    結果は同じ（座標を見ないラベルのみ比較は移動の吸収を最初から内包しており、
+    reclassify_moved_labels は呼ばれない）。"""
+    with tempfile.TemporaryDirectory() as d:
+        pairs = _make_pattern_combination_pairs(d)
+        _, _, excel_with_flag, _, _ = create_diff_zip(
+            pairs, label_only=True, ignore_moved_labels=True)
+        _, _, excel_without_flag, _, _ = create_diff_zip(
+            pairs, label_only=True, ignore_moved_labels=False)
+
+        df_with = pd.read_excel(io.BytesIO(excel_with_flag), sheet_name='NEW-001')
+        df_without = pd.read_excel(io.BytesIO(excel_without_flag), sheet_name='NEW-001')
+        assert set(df_with['New: NEW-001'].dropna()) == set(df_without['New: NEW-001'].dropna())
+        assert set(df_with['Old: OLD-001'].dropna()) == set(df_without['Old: OLD-001'].dropna())
+
+
+def test_label_only_combined_with_diff_label_patterns():
+    """label_only=True でも diff_label_patterns の絞り込みは通常モードと同様、
+    差分算出後に適用される。"""
+    with tempfile.TemporaryDirectory() as d:
+        pairs = _make_pattern_combination_pairs(d)
+        _, results, diff_labels_excel, _, _ = create_diff_zip(
+            pairs, label_only=True, diff_label_patterns=['C'],
+        )
+        assert results[0]['success']
+        sheet_df = pd.read_excel(io.BytesIO(diff_labels_excel), sheet_name='NEW-001')
+        assert list(sheet_df['New: NEW-001'].dropna()) == ['C5'], \
+            f"ラベルのみ比較モードでもパターンフィルタが効いていない: {sheet_df}"
+
+
+def test_label_only_brand_new_drawing_has_empty_coordinates():
+    """完全新規図面（流用元なし）でも label_only=True の場合はX/Y列が常に空欄になる。"""
+    with tempfile.TemporaryDirectory() as d:
+        doc = ezdxf.new()
+        doc.modelspace().add_text('R10', dxfattribs={'insert': (0, 0)})
+        path = os.path.join(d, 'BRANDNEW-LBL.dxf')
+        doc.saveas(path)
+        all_files_dict = {'BRANDNEW-LBL': {'temp_path': path, 'title': None, 'subtitle': None,
+                                            'filename': 'BRANDNEW-LBL.dxf'}}
+        pair_df = pd.DataFrame({'流用元図番': [''], '流用先図番': ['BRANDNEW-LBL']})
+        pairs = build_pairs_from_list(pair_df, all_files_dict)
+
+        _, results, diff_labels_excel, _, _ = create_diff_zip(
+            pairs, step1_mode='pair_list', label_only=True,
+        )
+        assert results[0]['success']
+        sheet_df = pd.read_excel(io.BytesIO(diff_labels_excel), sheet_name='BRANDNEW-LBL')
+        assert sheet_df['X'].isna().all() and sheet_df['Y'].isna().all()
+        assert list(sheet_df['New: BRANDNEW-LBL']) == ['R10']
+
+
+def test_summary_ref_designator_count_for_normal_pair():
+    """通常ペアの diff_labels.xlsx Summary に「機器符号候補数」列が出力され、
+    機器符号候補パターンに一致する行数と一致する。"""
+    with tempfile.TemporaryDirectory() as d:
+        old_doc = ezdxf.new()
+        new_doc = ezdxf.new()
+        # R10(候補) と タイトル(非候補) を新図面のみに追加
+        new_doc.modelspace().add_text('R10', dxfattribs={'insert': (0, 0)})
+        new_doc.modelspace().add_text('タイトル', dxfattribs={'insert': (10, 10)})
+        old_path = os.path.join(d, 'OLD-RD.dxf')
+        new_path = os.path.join(d, 'NEW-RD.dxf')
+        old_doc.saveas(old_path)
+        new_doc.saveas(new_path)
+
+        pair = {
+            'main_drawing': 'NEW-RD', 'source_drawing': 'OLD-RD',
+            'main_file_info': {'temp_path': new_path, 'title': None, 'subtitle': None},
+            'source_file_info': {'temp_path': old_path},
+            'status': 'complete', 'relation': 'RevUp', 'title': None, 'subtitle': None,
+        }
+        _, results, diff_labels_excel, _, _ = create_diff_zip([pair])
+        assert results[0]['success']
+
+        sheet_df = pd.read_excel(io.BytesIO(diff_labels_excel), sheet_name='NEW-RD')
+        assert list(sheet_df.columns)[0] == '機器符号候補'
+        r10_row = sheet_df[sheet_df['New: NEW-RD'] == 'R10'].iloc[0]
+        assert r10_row['機器符号候補'] == 'Y'
+        title_row = sheet_df[sheet_df['New: NEW-RD'] == 'タイトル'].iloc[0]
+        assert pd.isna(title_row['機器符号候補'])
+
+        summary_df = pd.read_excel(io.BytesIO(diff_labels_excel), sheet_name='Summary')
+        row = summary_df[summary_df['図番'] == 'NEW-RD'].iloc[0]
+        assert row['機器符号候補数'] == 1
 
 
 def _run_all():

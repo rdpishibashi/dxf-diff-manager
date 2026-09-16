@@ -13,7 +13,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from model.common_utils import is_drawing_number_filename
+import ezdxf
+
+from model.common_utils import is_drawing_number_filename, is_invisible
 
 
 # --- is_drawing_number_filename ---
@@ -56,6 +58,76 @@ def test_rejects_wrong_digit_counts():
     assert not is_drawing_number_filename('EE123-567-89A.dxf')    # 数字4桁の部分が3桁
     assert not is_drawing_number_filename('EE1234-56-89A.dxf')    # 数字3桁の部分が2桁
     assert not is_drawing_number_filename('EE1234-567-8A.dxf')    # 末尾数字2桁の部分が1桁
+
+
+# --- is_invisible ---
+
+def test_visible_entity_on_normal_layer_is_not_invisible():
+    """通常レイヤー上の、invisible属性が立っていないエンティティは非表示ではない。"""
+    doc = ezdxf.new()
+    msp = doc.modelspace()
+    e = msp.add_text('X', dxfattribs={'layer': '0'})
+    assert is_invisible(e) is False
+
+
+def test_entity_with_invisible_attribute_is_invisible():
+    """エンティティ自身のinvisible属性（グループコード60）が立っていれば非表示。"""
+    doc = ezdxf.new()
+    msp = doc.modelspace()
+    e = msp.add_text('X', dxfattribs={'invisible': 1})
+    assert is_invisible(e) is True
+
+
+def test_entity_on_off_layer_is_invisible():
+    """エンティティ自身のinvisible属性が立っていなくても、所属レイヤーがオフなら
+    非表示（2026-09-16、レイヤー単位の非表示状態チェックを追加）。"""
+    doc = ezdxf.new()
+    doc.layers.add('HIDDEN_LAYER')
+    doc.layers.get('HIDDEN_LAYER').off()
+    msp = doc.modelspace()
+    e = msp.add_text('X', dxfattribs={'layer': 'HIDDEN_LAYER'})
+    assert is_invisible(e) is True
+
+
+def test_entity_on_frozen_layer_is_invisible():
+    """所属レイヤーがフリーズされている場合も非表示として扱う。"""
+    doc = ezdxf.new()
+    doc.layers.add('FROZEN_LAYER')
+    doc.layers.get('FROZEN_LAYER').freeze()
+    msp = doc.modelspace()
+    e = msp.add_text('X', dxfattribs={'layer': 'FROZEN_LAYER'})
+    assert is_invisible(e) is True
+
+
+def test_virtual_entity_from_insert_on_off_layer_is_invisible():
+    """INSERTをvirtual_entities()で展開した仮想エンティティも、展開後の
+    レイヤー参照でオフ/フリーズ状態を正しく判定できる（実データ
+    EE3273-039-90B.dxfで確認した「旧タイトルブロック一式が専用レイヤーごと
+    オフ/フリーズされている」ケースの再現）。"""
+    doc = ezdxf.new()
+    doc.layers.add('OLD_TITLEBLOCK')
+    doc.layers.get('OLD_TITLEBLOCK').off()
+    doc.layers.get('OLD_TITLEBLOCK').freeze()
+
+    block = doc.blocks.new('OLD_TB_BLOCK')
+    block.add_text('EE0000-000-00A', dxfattribs={'layer': 'OLD_TITLEBLOCK'})
+
+    msp = doc.modelspace()
+    insert = msp.add_blockref('OLD_TB_BLOCK', insert=(0, 0))
+    virtuals = list(insert.virtual_entities())
+    assert len(virtuals) == 1
+    assert is_invisible(virtuals[0]) is True
+
+
+def test_missing_layer_or_doc_falls_back_to_not_invisible():
+    """レイヤーテーブルに存在しない・.docが取得できない等の異常系は、
+    誤って全除外にならないよう「非表示ではない」側にフォールバックする。"""
+    doc = ezdxf.new()
+    msp = doc.modelspace()
+    e = msp.add_text('X', dxfattribs={'layer': '0'})
+    # レイヤー名を、レイヤーテーブルに存在しない名前に強制的に書き換える
+    e.dxf.layer = 'NO_SUCH_LAYER_IN_TABLE'
+    assert is_invisible(e) is False
 
 
 def _run_all():
