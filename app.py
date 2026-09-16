@@ -594,9 +594,26 @@ def render_help_section():
         st.info("\n".join(help_text.USAGE_STEPS))
 
 
+def _is_hidden_upload_path(filename):
+    """アップロードされたファイル名が不可視ファイル（`.` で始まる）かどうかを判定する。
+
+    フォルダをまとめてドラッグ&ドロップした場合、`UploadedFile.name` に
+    相対パス（例: `sub/.DS_Store`）が含まれることがあるため、`/`・`\\` で
+    区切った全セグメントを見る（`.DS_Store` 本体に加え、`.git/config` の
+    ような不可視フォルダ配下も併せて除外できる）。
+
+    `.` 始まりのファイルはそもそも `is_drawing_number_filename()` の図番
+    フォーマットに一致しないため、この判定を追加しても実際の読み込み結果
+    （processed 件数）には影響しない——「入力N件中」の N（表示件数）の定義
+    からノイズを除くためだけの判定（2026-09-16 ユーザー要求）。
+    """
+    segments = re.split(r'[/\\]', filename)
+    return any(seg.startswith('.') for seg in segments if seg)
+
+
 def process_all_uploaded_files(groups):
     """
-    複数グループのアップロードDXFファイルを単一の進捗バーで処理する
+    複数グループのアップロードDXFファイルを処理する
 
     Args:
         groups: 処理グループのリスト。各要素は dict:
@@ -614,58 +631,69 @@ def process_all_uploaded_files(groups):
     # 全グループの合計ファイル数を算出
     # フォルダを丸ごとドラッグ&ドロップした場合、ブラウザがサブフォルダも含めて
     # 再帰的に全ファイルを展開してアップロードする（Streamlitの標準動作）。
-    # その中から図番フォーマットに一致するファイル名の.dxfのみを対象にし、
-    # 一致しないものはサイレントにスキップする（エラー扱いにしない。個別に
-    # ファイルを選んでアップロードする場合も同じ判定が適用される——
+    # その中から図番フォーマットに一致するファイル名の.dxfのみを対象にする。
+    # 不可視ファイル（`.` 始まり、例: .DS_Store）は入力件数のカウント・
+    # スキップ一覧のどちらからも除外し（ノイズのため）、それ以外の不一致ファイルは
+    # 「スキップされたファイル」として一覧に記録する（エラー扱いにはしない。
+    # 個別にファイルを選んでアップロードする場合も同じ判定が適用される——
     # file_uploaderにはフォルダドロップと個別選択を区別する手段が無いため）。
     all_items = []
-    total_input_counts = {}  # gid -> アップロード欄に入力された総ファイル数（フィルタ前）
+    total_input_counts = {}   # gid -> 不可視ファイルを除いた入力件数
+    skipped_by_group = {}     # gid -> 図番フォーマット不一致でスキップしたファイル名のリスト
     for g in groups:
-        if g['uploaded_files']:
-            total_input_counts[id(g)] = len(g['uploaded_files'])
-            for f in g['uploaded_files']:
-                if is_drawing_number_filename(f.name):
-                    all_items.append((f, g))
+        gid = id(g)
+        total_input_counts[gid] = 0
+        skipped_by_group[gid] = []
+        for f in (g['uploaded_files'] or []):
+            if _is_hidden_upload_path(f.name):
+                continue
+            total_input_counts[gid] += 1
+            if is_drawing_number_filename(f.name):
+                all_items.append((f, g))
+            else:
+                skipped_by_group[gid].append(f.name)
 
-    if not all_items:
+    if not any(g['uploaded_files'] for g in groups):
         return False
 
-    total_files = len(all_items)
-    start_time = time.time()
-    progress_placeholder = st.empty()
-    progress_bar = progress_placeholder.progress(0.0, text="ファイルを処理中...")
+    # グループごとの集計用（一致ファイルが0件のグループも含めて全グループ分を用意する。
+    # 以前は一致ファイルがあるグループだけを初期化しており、Type B(auto)で片方の
+    # グループの一致が0件の場合に KeyError で落ちる不具合があった）。
+    group_results = {id(g): {'processed': 0, 'failed': []} for g in groups}
 
-    # グループごとの集計用
-    group_results = {id(g): {'processed': 0, 'failed': []} for _, g in all_items}
+    if all_items:
+        total_files = len(all_items)
+        start_time = time.time()
+        status_placeholder = st.empty()
+        with st.spinner("ファイルを処理中..."):
+            for idx, (uploaded_file, group) in enumerate(all_items, start=1):
+                extractor = group['extractor']
+                file_info = extractor(uploaded_file)
+                gid = id(group)
+                if file_info:
+                    main_drawing = file_info['main_drawing_number']
+                    # 同じ図番への再アップロードで上書きする場合、古い一時ファイルが孤立しないよう削除する
+                    old_info = group['files_dict'].get(main_drawing)
+                    if old_info:
+                        old_path = old_info.get('temp_path')
+                        if old_path and old_path != file_info.get('temp_path') and os.path.exists(old_path):
+                            try:
+                                os.unlink(old_path)
+                            except Exception:
+                                pass
+                    group['files_dict'][main_drawing] = file_info
+                    group_results[gid]['processed'] += 1
+                else:
+                    group_results[gid]['failed'].append(uploaded_file.name)
 
-    for idx, (uploaded_file, group) in enumerate(all_items, start=1):
-        extractor = group['extractor']
-        file_info = extractor(uploaded_file)
-        gid = id(group)
-        if file_info:
-            main_drawing = file_info['main_drawing_number']
-            # 同じ図番への再アップロードで上書きする場合、古い一時ファイルが孤立しないよう削除する
-            old_info = group['files_dict'].get(main_drawing)
-            if old_info:
-                old_path = old_info.get('temp_path')
-                if old_path and old_path != file_info.get('temp_path') and os.path.exists(old_path):
-                    try:
-                        os.unlink(old_path)
-                    except Exception:
-                        pass
-            group['files_dict'][main_drawing] = file_info
-            group_results[gid]['processed'] += 1
-        else:
-            group_results[gid]['failed'].append(uploaded_file.name)
-
-        elapsed = time.time() - start_time
-        progress_bar.progress(
-            min(idx / total_files, 1.0),
-            text=f"{idx}/{total_files}件の図番を抽出中...（経過 {elapsed:.1f} 秒）"
-        )
-
-    progress_placeholder.empty()
-    elapsed_total = time.time() - start_time
+                elapsed = time.time() - start_time
+                status_placeholder.text(
+                    f"{idx}/{total_files}件の図番を抽出中...（経過 {elapsed:.1f} 秒）"
+                )
+            status_placeholder.empty()
+        elapsed_total = time.time() - start_time
+    else:
+        elapsed_total = 0.0
 
     # グループごとにsession_stateを更新
     processed_any = False
@@ -684,6 +712,7 @@ def process_all_uploaded_files(groups):
             'failed': len(res['failed']),
             'elapsed': elapsed_total,
             'total_input': total_input_counts.get(gid, res['processed'] + len(res['failed'])),
+            'skipped': skipped_by_group.get(gid, []),
         }
 
     return processed_any
@@ -702,21 +731,44 @@ def render_upload_status(summary_key, failures_key, label):
     # 2026-08）のため、入力欄に渡されるファイルはDXFに限らない（xlsx等が混ざり
     # 得る）。「DXFファイル読み込み」と表現すると入力全体がDXFであるかのように
     # 誤解されるため、「入力ファイル読み込み」とし、入力総数のうち実際に
-    # DXFファイルとして読み込まれた件数を分けて示す。
+    # DXFファイルとして読み込まれた件数を分けて示す。入力件数（total_input）は
+    # 不可視ファイル（`.DS_Store` 等）を最初から除いた件数（_is_hidden_upload_path
+    # 参照、2026-09-16 ユーザー要求）。
     upload_summary = st.session_state.get(summary_key)
     if upload_summary:
         processed = upload_summary.get('processed', 0)
         failed = upload_summary.get('failed', 0)
         elapsed = upload_summary.get('elapsed', 0.0)
         total_input = upload_summary.get('total_input', processed + failed)
+        skipped = upload_summary.get('skipped', [])
         if processed > 0:
             st.success(
                 f"直近の入力ファイル読み込み: 入力{total_input}件中、"
                 f"DXFファイルとして{processed}件を読み込みました"
-                f"（経過 {elapsed:.1f} 秒, 失敗 {failed}件）"
+                f"（経過 {elapsed:.1f} 秒, 失敗 {failed}件, スキップ {len(skipped)}件）"
             )
         elif failed > 0:
             st.warning(f"直近の入力ファイル読み込みは失敗しました（経過 {elapsed:.1f} 秒）")
+        elif total_input == 0:
+            # 入力されたファイルが不可視ファイル（.DS_Store等）のみだった場合。
+            # 「0件中0件」という無意味な表示を避け、状況を明示する。
+            st.info("入力されたファイルはすべて不可視ファイルでした（処理対象なし）。")
+        elif skipped:
+            # 図番フォーマットに一致するファイルが1件もなかった場合
+            # （processed=0・failed=0だが入力自体はある）。以前はここで何の
+            # フィードバックも出さず、入力が丸ごと消えたように見えていた。
+            st.warning(
+                f"直近の入力ファイル読み込み: 入力{total_input}件のうち、"
+                f"図番フォーマットに一致するDXFファイルが見つかりませんでした。"
+            )
+
+        if skipped:
+            with st.expander(
+                f"図番フォーマットに一致せずスキップした{label}ファイル（{len(skipped)}件）",
+                expanded=False,
+            ):
+                for name in skipped:
+                    st.write(f"- {name}")
 
     if st.session_state.get(failures_key):
         with st.expander(f"アップロードできなかった{label}ファイル", expanded=False):
@@ -1227,25 +1279,24 @@ def render_step2_pairing(source_count, dest_count):
             )
         else:  # auto
             pairing_start = time.time()
-            progress_placeholder = st.empty()
-            progress_bar = progress_placeholder.progress(0.0, text="図面ペア・リスト作成を開始...")
+            status_placeholder = st.empty()
+            with st.spinner("図面ペア・リスト作成中..."):
+                def pairing_progress(progress, message, count, total):
+                    elapsed = time.time() - pairing_start
+                    text = message
+                    if total and count is not None:
+                        text += f" {count}/{total}件"
+                    text += f"（経過 {elapsed:.1f} 秒）"
+                    status_placeholder.text(text)
 
-            def pairing_progress(progress, message, count, total):
-                elapsed = time.time() - pairing_start
-                text = message
-                if total and count is not None:
-                    text += f" {count}/{total}件"
-                text += f"（経過 {elapsed:.1f} 秒）"
-                progress_bar.progress(min(max(progress, 0.0), 1.0), text=text)
-
-            try:
-                st.session_state.pairs = create_pair_list(
-                    st.session_state.source_files_dict,
-                    st.session_state.dest_files_dict,
-                    progress_callback=pairing_progress
-                )
-            finally:
-                progress_placeholder.empty()
+                try:
+                    st.session_state.pairs = create_pair_list(
+                        st.session_state.source_files_dict,
+                        st.session_state.dest_files_dict,
+                        progress_callback=pairing_progress
+                    )
+                finally:
+                    status_placeholder.empty()
 
         st.session_state.pairs_dirty = False
         added_count = update_master_if_needed(st.session_state.pairs, mode=mode)
@@ -1286,6 +1337,22 @@ def render_step3_diff(complete_pairs):
     unchanged_color = diff_config.DEFAULT_UNCHANGED_COLOR
     diff_label_patterns = label_filter_config.DIFF_LABEL_PREFIX_PATTERNS
 
+    # ラベルのみ比較オプション（2026-09-16 ユーザー要求により、この1項目のみ
+    # config.py ではなく Step4 の UI に置く。他のオプション同様 config.py 化する
+    # 方針からは外れるが、ユーザーの明示的な選択）。diff_labels.xlsx のラベル
+    # 比較のみに影響し、差分DXF（図形のADDED/DELETED判定）には影響しない。
+    label_only = st.checkbox(
+        "ラベルのみで比較する（座標を無視）",
+        value=False,
+        key="label_only_diff",
+        help=(
+            "ONにすると、diff_labels.xlsx のラベル比較で座標を使わず、ラベル文字列の"
+            "個数だけで新旧を比較します。回路ブロックの移動を自動的に「変更なし」扱い"
+            "できますが、同一座標での「名称変更」は検出できなくなり、全ての差分が"
+            "追加のみ／削除のみとして出力されます（X/Y列は常に空欄になります）。"
+        ),
+    )
+
     # 比較開始ボタン
     # 「差分抽出可能なペア：N組」は表示しない（Step3の図面ペア・リストと同内容で
     # 既に確認済みのため、2026-09 ユーザー指摘）。
@@ -1293,61 +1360,60 @@ def render_step3_diff(complete_pairs):
         has_results = bool(st.session_state.get('results'))
         if st.button("差分抽出開始", key="start_comparison", type="primary", disabled=has_results):
             total_pairs = len(complete_pairs)
-            progress_placeholder = st.empty()
-            progress_bar = progress_placeholder.progress(0.0, text="差分抽出を開始しています...")
+            status_placeholder = st.empty()
+            with st.spinner("差分抽出中..."):
+                def diff_progress(current, total, message):
+                    status_placeholder.text(f"{message}（{current}/{total}組）")
 
-            def diff_progress(current, total, message):
-                progress = current / total if total else 1.0
-                progress_bar.progress(min(progress, 1.0), text=f"{message}（{current}/{total}組）")
+                try:
+                    step1_mode = st.session_state.step1_mode
+                    zip_data, results, diff_labels_excel, updated_master, updated_drawing_list = create_diff_zip(
+                        st.session_state.pairs,
+                        master_df=st.session_state.master_df,
+                        master_filename=st.session_state.master_file_name,
+                        tolerance=tolerance,
+                        deleted_color=deleted_color,
+                        added_color=added_color,
+                        unchanged_color=unchanged_color,
+                        diff_label_patterns=diff_label_patterns,
+                        progress_callback=diff_progress,
+                        on_error=st.error,
+                        ignore_moved_labels=ignore_moved_labels,
+                        ignore_color_only_changes=ignore_color_only_changes,
+                        step1_mode=step1_mode,
+                        source_drawing_numbers=set(st.session_state.source_files_dict.keys()),
+                        dest_drawing_numbers=set(st.session_state.dest_files_dict.keys()),
+                        drawing_list_df=st.session_state.drawing_list_df,
+                        label_only=label_only,
+                    )
 
-            try:
-                step1_mode = st.session_state.step1_mode
-                zip_data, results, diff_labels_excel, updated_master, updated_drawing_list = create_diff_zip(
-                    st.session_state.pairs,
-                    master_df=st.session_state.master_df,
-                    master_filename=st.session_state.master_file_name,
-                    tolerance=tolerance,
-                    deleted_color=deleted_color,
-                    added_color=added_color,
-                    unchanged_color=unchanged_color,
-                    diff_label_patterns=diff_label_patterns,
-                    progress_callback=diff_progress,
-                    on_error=st.error,
-                    ignore_moved_labels=ignore_moved_labels,
-                    ignore_color_only_changes=ignore_color_only_changes,
-                    step1_mode=step1_mode,
-                    source_drawing_numbers=set(st.session_state.source_files_dict.keys()),
-                    dest_drawing_numbers=set(st.session_state.dest_files_dict.keys()),
-                    drawing_list_df=st.session_state.drawing_list_df,
-                )
+                    # セッション状態に保存
+                    # diff_labels.xlsx は zip_data の中にも同内容が含まれるため、
+                    # 二重に保持しない。プレビュー表示時に zip から読み出す
+                    # （has_diff_labels フラグのみ保持し、実体のbytesはここでは持たない）。
+                    st.session_state.zip_data = zip_data
+                    st.session_state.results = results
+                    st.session_state.has_diff_labels = bool(diff_labels_excel)
+                    st.session_state.processing_settings = {
+                        'tolerance': tolerance,
+                        'deleted_color': deleted_color,
+                        'added_color': added_color,
+                        'unchanged_color': unchanged_color,
+                    }
+                    if updated_master is not None:
+                        st.session_state.master_df = updated_master
+                    if updated_drawing_list is not None:
+                        st.session_state.drawing_list_df = updated_drawing_list
 
-                # セッション状態に保存
-                # diff_labels.xlsx は zip_data の中にも同内容が含まれるため、
-                # 二重に保持しない。プレビュー表示時に zip から読み出す
-                # （has_diff_labels フラグのみ保持し、実体のbytesはここでは持たない）。
-                st.session_state.zip_data = zip_data
-                st.session_state.results = results
-                st.session_state.has_diff_labels = bool(diff_labels_excel)
-                st.session_state.processing_settings = {
-                    'tolerance': tolerance,
-                    'deleted_color': deleted_color,
-                    'added_color': added_color,
-                    'unchanged_color': unchanged_color,
-                }
-                if updated_master is not None:
-                    st.session_state.master_df = updated_master
-                if updated_drawing_list is not None:
-                    st.session_state.drawing_list_df = updated_drawing_list
+                    # メモリ解放
+                    gc.collect()
 
-                # メモリ解放
-                gc.collect()
-
-            except Exception as e:
-                st.error(f"エラーが発生しました: {str(e)}")
-                st.error(traceback.format_exc())
-                gc.collect()
-            finally:
-                progress_placeholder.empty()
+                except Exception as e:
+                    st.error(f"エラーが発生しました: {str(e)}")
+                    st.error(traceback.format_exc())
+                    gc.collect()
+                finally:
+                    status_placeholder.empty()
 
             st.rerun()
     else:
