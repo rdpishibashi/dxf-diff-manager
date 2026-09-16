@@ -1465,7 +1465,18 @@ def render_step3_diff(complete_pairs):
             row['ステータス'] = status
             result_data.append(row)
 
-        st.dataframe(result_data, width='stretch', hide_index=True)
+        # 削除図形数・追加図形数・総図形数・変更ラベル数は、完全新規図面の行では
+        # 比較対象が無いため '-' 文字列、通常ペアの行では整数という混在object列に
+        # なる（完全新規図面はentity_counts自体にdeleted_entitiesキーが無いため）。
+        # 図面管理台帳のDeleted Entities等と同じ混在パターンのため、同じ
+        # make_dataframe_arrow_compatible() でArrow変換エラーを予防する
+        # （2026-09-16、実データ確認で発覚: pyarrowが先頭値からint型と推測し、
+        # 後続の'-'で変換失敗するログが出ていた。表示のみの問題でStreamlitが
+        # 自動フォールバックするため機能自体は壊れていなかったが、ログを汚していた）。
+        st.dataframe(
+            make_dataframe_arrow_compatible(pd.DataFrame(result_data)),
+            width='stretch', hide_index=True,
+        )
 
         # プレビューセクション
         # diff_labels.xlsx は zip_data 内から都度読み出す（二重保持しない）
