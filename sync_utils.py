@@ -48,6 +48,13 @@ def utils_subdir(project_dir: Path) -> str:
 # 対象から除外した（同プロジェクトに utils/label_diff.py が存在しなくなったため。
 # 詳細はDXF-visual-diffのTECHNICAL.md参照）。本スクリプト自体の実行は他の理由
 # （compare_dxf.py 等の意図的な差分）により禁止中——Tools/CLAUDE.md参照。
+#
+# offset_detector.py も意図的にここへ追加していない（2026-09-18新設）。
+# label_diff.py と同じ理由——本スクリプト自体が実行禁止のため、UTILS_FILES に
+# 載せると将来誤って実行された際に意図しない上書きを招きうる。offset_detector.py
+# は compare_dxf.py と異なり両プロジェクトで byte-identical に保つ方針だが、
+# 同期の保証は tests/regression/spec/test_offset_detector_identical_to_visual_diff.py
+# （ガードテスト）が担う。
 UTILS_FILES = [
     "common_utils.py",
     "compare_dxf.py",
