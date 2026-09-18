@@ -37,8 +37,8 @@ def _diff_counts(doc_old, doc_new, ignore_color=False):
     tol = ToleranceConfig(0.01)
     tr = CoordinateTransformer(tol, debug=False)
     da = DiffAnalyzer(SignatureGenerator(tr, debug=False, ignore_color=ignore_color), debug=False)
-    ea, _, _, _ = da.extract_entities_from_doc(doc_old, "A", EntityExpander(tr))
-    eb, _, _, _ = da.extract_entities_from_doc(doc_new, "B", EntityExpander(tr))
+    ea, _, _, _ = da.extract_entities_from_doc(doc_old, "OLD", EntityExpander(tr))
+    eb, _, _, _ = da.extract_entities_from_doc(doc_new, "NEW", EntityExpander(tr))
     sa, sb = set(ea), set(eb)
     return len(sa - sb), len(sb - sa), len(sa & sb)
 
@@ -167,33 +167,36 @@ def test_mtext_genuinely_different_text_is_detected():
     assert added == 1
 
 
-# --- compare_dxf_files_and_generate_dxf: file_a/file_b と DELETED/ADDED の対応 ---
+# --- compare_dxf_files_and_generate_dxf: file_old/file_new と OLD_DELETED/NEW_ADDED の対応 ---
 
-def test_file_a_only_is_deleted_file_b_only_is_added():
-    """compare_dxf_files_and_generate_dxf() は file_a のみに存在するエンティティを
-    DELETED、file_b のみに存在するエンティティを ADDED として出力する契約を保証する。
+def test_file_old_only_is_deleted_file_new_only_is_added():
+    """compare_dxf_files_and_generate_dxf() は file_old のみに存在するエンティティを
+    OLD_DELETED、file_new のみに存在するエンティティを NEW_ADDED として出力する契約を
+    保証する。
 
     呼び出し元（model/diff_export.py）がこの契約と逆の順で新旧ファイルを渡すと、
-    ADDED/DELETED レイヤーの内容が入れ替わる不具合が実際に発生した（実データ
+    NEW_ADDED/OLD_DELETED レイヤーの内容が入れ替わる不具合が実際に発生した（実データ
     EE4144-613-49D_vs_49C で確認: ADDED レイヤーに旧図面自身のテキスト
     'EE4144-613-49C' が、DELETED レイヤーに新図面自身のテキスト 'EE4144-613-49D' が
-    混入していた）。file_a=旧、file_b=新で呼ぶことが正しい契約であることを固定する。
+    混入していた）。file_old=旧、file_new=新で呼ぶことが正しい契約であることを固定する
+    （2026-09-18、オフセット補正機能の組み込みに伴いA/B→OLD/NEW命名統一。レイヤー名も
+    DELETED/ADDED→OLD_DELETED/NEW_ADDEDへ変更）。
     """
     import tempfile
 
-    doc_a = ezdxf.new()  # 旧ファイル役
-    doc_a.modelspace().add_text('ONLY_IN_A', dxfattribs={'insert': (0, 0)})
-    doc_b = ezdxf.new()  # 新ファイル役
-    doc_b.modelspace().add_text('ONLY_IN_B', dxfattribs={'insert': (100, 100)})
+    doc_old = ezdxf.new()  # 旧ファイル役
+    doc_old.modelspace().add_text('ONLY_IN_OLD', dxfattribs={'insert': (0, 0)})
+    doc_new = ezdxf.new()  # 新ファイル役
+    doc_new.modelspace().add_text('ONLY_IN_NEW', dxfattribs={'insert': (100, 100)})
 
     with tempfile.TemporaryDirectory() as d:
-        path_a = os.path.join(d, 'a.dxf')
-        path_b = os.path.join(d, 'b.dxf')
+        path_old = os.path.join(d, 'old.dxf')
+        path_new = os.path.join(d, 'new.dxf')
         out_path = os.path.join(d, 'out.dxf')
-        doc_a.saveas(path_a)
-        doc_b.saveas(path_b)
+        doc_old.saveas(path_old)
+        doc_new.saveas(path_new)
 
-        ok, counts = compare_dxf_files_and_generate_dxf(path_a, path_b, out_path)
+        ok, counts = compare_dxf_files_and_generate_dxf(path_old, path_new, out_path)
         assert ok
         assert counts['deleted_entities'] == 1
         assert counts['added_entities'] == 1
@@ -204,10 +207,8 @@ def test_file_a_only_is_deleted_file_b_only_is_added():
             if e.dxftype() == 'TEXT':
                 by_layer[getattr(e.dxf, 'layer', '')] = e.dxf.text
 
-        # 2026-09-18、オフセット補正機能の組み込みに伴いレイヤー名がOLD/NEW接頭辞付きに
-        # 変更された（DELETED→OLD_DELETED、ADDED→NEW_ADDED）。
-        assert by_layer.get('OLD_DELETED') == 'ONLY_IN_A'
-        assert by_layer.get('NEW_ADDED') == 'ONLY_IN_B'
+        assert by_layer.get('OLD_DELETED') == 'ONLY_IN_OLD'
+        assert by_layer.get('NEW_ADDED') == 'ONLY_IN_NEW'
 
 
 # --- ignore_color_only_changes: 座標・形状が一致し color だけ異なる場合の扱い ---
