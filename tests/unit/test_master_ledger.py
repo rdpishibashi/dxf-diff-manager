@@ -34,9 +34,12 @@ from model.master_ledger import (
 
 def test_create_empty_master_df_has_required_columns():
     df = create_empty_master_df()
+    # 2026-09-18、オフセット補正機能の組み込みに伴い 'Unchanged Offset Entities'
+    # を末尾（'Total Entities' の直後）に追加。
     assert list(df.columns) == [
         'Child', 'Parent', 'Relation', 'Title', 'Subtitle', 'Recorded Date', 'Note',
         'Deleted Entities', 'Added Entities', 'Diff Entities', 'Unchanged Entities', 'Total Entities',
+        'Unchanged Offset Entities',
     ]
     assert len(df) == 0
 
@@ -59,6 +62,64 @@ def test_update_parent_child_master_adds_new_record():
     assert row['Parent'] == 'A1'
     assert row['Deleted Entities'] == 1
     assert row['Total Entities'] == 5
+
+
+def test_update_parent_child_master_records_unchanged_offset_entities():
+    """entity_counts の unchanged_offset_entities（NEW側のオフセット一致件数）が
+    Master の 'Unchanged Offset Entities' 列にそのまま記録され、'Unchanged
+    Entities' 列は「純粋一致 + オフセット一致」の合計値になる（2026-09-18新設。
+    compare_dxf.py の entity_counts['unchanged_entities'] はオフセット無しの
+    純粋一致のみを表すため、台帳側でオフセット一致分を合算する）。"""
+    master_df = create_empty_master_df()
+    pair = {
+        'main_drawing': 'B2', 'source_drawing': 'A2', 'relation': '流用',
+        'title': 'T', 'subtitle': 'S',
+        'entity_counts': {
+            'deleted_entities': 0, 'added_entities': 0,
+            'diff_entities': 0, 'unchanged_entities': 1, 'total_entities': 4,
+            'unchanged_offset_entities': 3,
+        },
+    }
+    updated, added_count = update_parent_child_master(master_df, [pair])
+    assert added_count == 1
+    row = updated[updated['Child'] == 'B2'].iloc[0]
+    assert row['Unchanged Offset Entities'] == 3
+    assert row['Unchanged Entities'] == 4  # 純粋一致1 + オフセット一致3 の合計値
+    assert row['Total Entities'] == 4
+
+
+def test_update_parent_child_master_missing_offset_key_defaults_to_zero():
+    """entity_counts に unchanged_offset_entities キーが無い場合（オフセット補正
+    機能追加前のデータ・機能OFF時等）は 0 として記録される（'n/a' にはしない
+    ——比較自体は行われているため、完全新規図面の 'n/a' とは意味が異なる）。"""
+    master_df = create_empty_master_df()
+    pair = {
+        'main_drawing': 'B3', 'source_drawing': 'A3', 'relation': '流用',
+        'title': 'T', 'subtitle': 'S',
+        'entity_counts': {
+            'deleted_entities': 1, 'added_entities': 2,
+            'diff_entities': 3, 'unchanged_entities': 4, 'total_entities': 5,
+        },
+    }
+    updated, _ = update_parent_child_master(master_df, [pair])
+    row = updated[updated['Child'] == 'B3'].iloc[0]
+    assert row['Unchanged Offset Entities'] == 0
+
+
+def test_update_parent_child_master_brand_new_unchanged_offset_entities_is_na():
+    """完全新規図面（流用元なし）は比較対象が無くオフセット一致も発生し得ないため、
+    他のDeleted/Diff/Unchanged Entitiesと同様に 'Unchanged Offset Entities' も
+    'n/a' 文字列になる。"""
+    master_df = create_empty_master_df()
+    pair = {
+        'main_drawing': 'BRANDNEW-X', 'source_drawing': None, 'relation': '完全新規図面',
+        'title': 'T', 'subtitle': 'S',
+        'entity_counts': {'added_entities': 5, 'total_entities': 5},
+    }
+    updated, _ = update_parent_child_master(master_df, [pair])
+    row = updated[updated['Child'] == 'BRANDNEW-X'].iloc[0]
+    assert row['Unchanged Offset Entities'] == 'n/a'
+    assert row['Deleted Entities'] == 'n/a'
 
 
 def test_update_parent_child_master_skips_pair_without_child():
@@ -316,10 +377,40 @@ def test_save_master_to_bytes_summary_has_no_drawing_statistics_section():
 
     remaining_labels = (
         'エンティティ統計', '削除図形 総数', '追加図形 総数',
-        '変更（追加+削除）図形 総数', '変更なし図形 総数', '図形変更率 [%]',
+        '変更（追加+削除）図形 総数', '変更なし図形 総数',
+        '変更なし（オフセット一致）図形 総数',  # 2026-09-18新設
+        '図形変更率 [%]',
     )
     for label in remaining_labels:
         assert label in labels, f"エンティティ統計のラベルが失われている: {label}"
+
+
+def test_save_master_to_bytes_summary_unchanged_offset_entities_row_value():
+    """Summaryシートの「変更なし（オフセット一致）図形 総数」行が、Master の
+    'Unchanged Offset Entities' 列の合計値になる（2026-09-18新設）。
+    「変更なし図形 総数」の直後・総図形数の直前に配置される。"""
+    master_df = create_empty_master_df()
+    master_df.loc[0] = {
+        'Child': 'B1', 'Parent': 'A1', 'Relation': '流用',
+        'Title': None, 'Subtitle': None, 'Recorded Date': None, 'Note': None,
+        'Deleted Entities': 0, 'Added Entities': 0, 'Diff Entities': 0,
+        'Unchanged Entities': 7, 'Total Entities': 7, 'Unchanged Offset Entities': 3,
+    }
+    master_df.loc[1] = {
+        'Child': 'B2', 'Parent': 'A2', 'Relation': '流用',
+        'Title': None, 'Subtitle': None, 'Recorded Date': None, 'Note': None,
+        'Deleted Entities': 1, 'Added Entities': 1, 'Diff Entities': 2,
+        'Unchanged Entities': 4, 'Total Entities': 6, 'Unchanged Offset Entities': 2,
+    }
+    data = save_master_to_bytes(master_df, mode='auto')
+    xl = pd.ExcelFile(pd.io.common.BytesIO(data))
+    summary_df = pd.read_excel(xl, sheet_name='Summary', header=None)
+    labels = summary_df[0].tolist()
+    idx = labels.index('変更なし（オフセット一致）図形 総数')
+    assert summary_df.iloc[idx, 1] == 5  # 3 + 2
+    # 直前が「変更なし図形 総数」、直後が総図形数の行であることを確認
+    assert labels[idx - 1] == '変更なし図形 総数'
+    assert labels[idx + 1] in ('流用先図面 図形総数', 'アップロード図面 図形総数')
 
 
 def test_save_master_to_bytes_freezes_header_row_for_diff_list_and_drawing_list():
@@ -343,20 +434,21 @@ def test_save_master_to_bytes_centers_and_formats_entity_columns():
         'Child': 'B1', 'Parent': 'A1', 'Relation': '流用',
         'Title': None, 'Subtitle': None, 'Recorded Date': None, 'Note': None,
         'Deleted Entities': 1234, 'Added Entities': 5678, 'Diff Entities': 6912,
-        'Unchanged Entities': 100, 'Total Entities': 7012,
+        'Unchanged Entities': 100, 'Total Entities': 7012, 'Unchanged Offset Entities': 42,
     }
     master_df.loc[1] = {
         'Child': 'B2', 'Parent': 'none', 'Relation': '完全新規図面',
         'Title': None, 'Subtitle': None, 'Recorded Date': None, 'Note': None,
         'Deleted Entities': 'n/a', 'Added Entities': 9999, 'Diff Entities': 'n/a',
-        'Unchanged Entities': 'n/a', 'Total Entities': 9999,
+        'Unchanged Entities': 'n/a', 'Total Entities': 9999, 'Unchanged Offset Entities': 'n/a',
     }
     data = save_master_to_bytes(master_df, mode='auto')
     wb = openpyxl.load_workbook(pd.io.common.BytesIO(data))
     ws = wb[MASTER_SHEET_NAME]
     header = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
+    # 2026-09-18、'Unchanged Offset Entities' もENTITY_COUNT_COLUMNSに含まれるため対象に追加
     entity_cols = {'Deleted Entities', 'Added Entities', 'Diff Entities',
-                   'Unchanged Entities', 'Total Entities'}
+                   'Unchanged Entities', 'Total Entities', 'Unchanged Offset Entities'}
     for row in ws.iter_rows(min_row=2, max_row=3):
         for cell in row:
             col_name = header[cell.column - 1]
@@ -487,9 +579,12 @@ def test_parse_master_filename_rejects_suffix_without_separator():
 
 def test_create_empty_drawing_list_df_has_required_columns():
     df = create_empty_drawing_list_df()
+    # 2026-09-18、オフセット補正機能の組み込みに伴い 'Unchanged Offset Entities'
+    # を 'Subtitle' の後・'Recorded Date' の前に追加。
     assert list(df.columns) == [
         'Sashiban', 'Module', 'Side', 'Child Drawing Number',
-        'Parent Drawing Number', 'Title', 'Subtitle', 'Recorded Date',
+        'Parent Drawing Number', 'Title', 'Subtitle',
+        'Unchanged Offset Entities', 'Recorded Date',
     ]
     assert len(df) == 0
 
@@ -540,6 +635,44 @@ def test_update_drawing_list_adds_new_child():
     assert row['Side'] == '405'
     assert row['Title'] == 'T'
     assert row['Subtitle'] == 'S'
+
+
+def test_update_drawing_list_records_unchanged_offset_entities():
+    """'unchanged_offset_entities' キーを持つ entry を渡すと、Package List の
+    'Unchanged Offset Entities' 列に記録される（2026-09-18新設）。"""
+    df = create_empty_drawing_list_df()
+    entries = [{'main_drawing': 'C1', 'source_drawing': 'P1', 'title': 'T', 'subtitle': 'S',
+                'unchanged_offset_entities': 7}]
+    updated, added_count = update_drawing_list(df, entries, 'AA11-1111-1', 'ZM00', '405')
+    assert added_count == 1
+    assert updated.iloc[0]['Unchanged Offset Entities'] == 7
+
+
+def test_update_drawing_list_missing_offset_key_leaves_column_blank():
+    """entry に 'unchanged_offset_entities' キーが無い場合（完全新規図面等）は
+    列自体は作られるが値は空欄になる（エラーにはしない）。"""
+    df = create_empty_drawing_list_df()
+    entries = [{'main_drawing': 'C1', 'source_drawing': None, 'title': None, 'subtitle': None}]
+    updated, _ = update_drawing_list(df, entries, 'AA11-1111-1', 'ZM00', '405')
+    assert pd.isna(updated.iloc[0]['Unchanged Offset Entities'])
+
+
+def test_update_drawing_list_adds_column_to_legacy_table_without_it():
+    """列導入前にアップロードされた旧形式の Package List（'Unchanged Offset
+    Entities' 列を持たない）に対しても、新規追加時に列ごと作成される
+    （値が黙って失われない）。"""
+    df = pd.DataFrame({
+        'Sashiban': pd.Series(dtype='object'), 'Module': pd.Series(dtype='object'),
+        'Side': pd.Series(dtype='object'), 'Child Drawing Number': pd.Series(dtype='object'),
+        'Parent Drawing Number': pd.Series(dtype='object'), 'Title': pd.Series(dtype='object'),
+        'Subtitle': pd.Series(dtype='object'), 'Recorded Date': pd.Series(dtype='object'),
+    })
+    entries = [{'main_drawing': 'C1', 'source_drawing': 'P1', 'title': 'T', 'subtitle': 'S',
+                'unchanged_offset_entities': 9}]
+    updated, added_count = update_drawing_list(df, entries, 'AA11-1111-1', 'ZM00', '405')
+    assert added_count == 1
+    assert 'Unchanged Offset Entities' in updated.columns
+    assert updated.iloc[0]['Unchanged Offset Entities'] == 9
 
 
 def test_update_drawing_list_no_parent_recorded_as_none():

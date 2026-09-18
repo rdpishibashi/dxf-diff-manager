@@ -18,8 +18,14 @@ MASTER_SHEET_NAME = "Master"  # 図面管理台帳データのシート名（旧
 # Master シートの「* Entities」列（object dtype: 整数と "n/a" 文字列が混在する）。
 # update_parent_child_master() のdtype統一・save_master_to_bytes() の列フォーマット
 # 適用の両方で使う共通定義。
+# Unchanged Offset Entities（2026-09-18新設）: オフセット補正で一致したNEW側の
+# 件数（compare_dxf.py の entity_counts['unchanged_offset_entities']）。
+# Total Entities の直後（末尾）に配置——Unchanged Entities は「純粋一致 +
+# オフセット一致」の合計値であり、この列で内訳（オフセット一致分）を追跡できる
+# （純粋な変更なし件数 = Unchanged Entities - Unchanged Offset Entities）。
 ENTITY_COUNT_COLUMNS = ['Deleted Entities', 'Added Entities', 'Diff Entities',
-                        'Unchanged Entities', 'Total Entities']
+                        'Unchanged Entities', 'Total Entities',
+                        'Unchanged Offset Entities']
 
 # render_step0_master() が作成する台帳ファイル名（"{指番}_{モジュール}_{サイド}.xlsx"）
 # から指番/モジュール/サイドを逆算するためのパターン。既存台帳をアップロードした場合も
@@ -187,15 +193,27 @@ def update_parent_child_master(master_df, new_pairs):
                 updated_df.loc[mask, 'Deleted Entities'] = 'n/a'
                 updated_df.loc[mask, 'Diff Entities'] = 'n/a'
                 updated_df.loc[mask, 'Unchanged Entities'] = 'n/a'
+                # 完全新規図面は比較対象が無いためオフセット一致も発生し得ない
+                # （他のDeleted/Diff/Unchangedと同じ扱いで"n/a"にする）。
+                updated_df.loc[mask, 'Unchanged Offset Entities'] = 'n/a'
                 if entity_counts:
                     updated_df.loc[mask, 'Added Entities'] = entity_counts.get('added_entities')
                     updated_df.loc[mask, 'Total Entities'] = entity_counts.get('total_entities')
             elif entity_counts:
+                # 台帳の Unchanged Entities は「純粋一致 + NEW側オフセット一致」の
+                # 合計値とする（2026-09-18、集計規則）。compare_dxf.py の
+                # entity_counts['unchanged_entities'] はオフセット無しの純粋一致
+                # 件数のみであり、そのままでは Total = Deleted+Added+Unchanged の
+                # 関係が崩れる（total_entities は既にオフセット一致分を含むため）。
+                # 純粋な変更なし件数は Unchanged Entities - Unchanged Offset
+                # Entities で追跡できる。
+                offset_entities = entity_counts.get('unchanged_offset_entities', 0)
                 updated_df.loc[mask, 'Deleted Entities'] = entity_counts.get('deleted_entities')
                 updated_df.loc[mask, 'Added Entities'] = entity_counts.get('added_entities')
                 updated_df.loc[mask, 'Diff Entities'] = entity_counts.get('diff_entities')
-                updated_df.loc[mask, 'Unchanged Entities'] = entity_counts.get('unchanged_entities')
+                updated_df.loc[mask, 'Unchanged Entities'] = entity_counts.get('unchanged_entities', 0) + offset_entities
                 updated_df.loc[mask, 'Total Entities'] = entity_counts.get('total_entities')
+                updated_df.loc[mask, 'Unchanged Offset Entities'] = offset_entities
         else:
             # 新しいレコードを追加
             new_record = {
@@ -212,15 +230,19 @@ def update_parent_child_master(master_df, new_pairs):
                 new_record['Deleted Entities'] = 'n/a'
                 new_record['Diff Entities'] = 'n/a'
                 new_record['Unchanged Entities'] = 'n/a'
+                new_record['Unchanged Offset Entities'] = 'n/a'
                 if entity_counts:
                     new_record['Added Entities'] = entity_counts.get('added_entities')
                     new_record['Total Entities'] = entity_counts.get('total_entities')
             elif entity_counts:
+                # updated_df 側（既存レコード更新パス）と同じ集計規則。
+                offset_entities = entity_counts.get('unchanged_offset_entities', 0)
                 new_record['Deleted Entities'] = entity_counts.get('deleted_entities')
                 new_record['Added Entities'] = entity_counts.get('added_entities')
                 new_record['Diff Entities'] = entity_counts.get('diff_entities')
-                new_record['Unchanged Entities'] = entity_counts.get('unchanged_entities')
+                new_record['Unchanged Entities'] = entity_counts.get('unchanged_entities', 0) + offset_entities
                 new_record['Total Entities'] = entity_counts.get('total_entities')
+                new_record['Unchanged Offset Entities'] = offset_entities
 
             new_records.append(new_record)
             added_count += 1
@@ -276,6 +298,7 @@ def create_empty_master_df():
         'Diff Entities': pd.Series(dtype='object'),
         'Unchanged Entities': pd.Series(dtype='object'),
         'Total Entities': pd.Series(dtype='object'),
+        'Unchanged Offset Entities': pd.Series(dtype='object'),
     })
 
 
@@ -289,6 +312,10 @@ def create_empty_drawing_list_df():
         'Parent Drawing Number': pd.Series(dtype='object'),
         'Title': pd.Series(dtype='object'),
         'Subtitle': pd.Series(dtype='object'),
+        # 2026-09-18新設。Master の同名列と異なり、Package List は「既存行を
+        # 一切上書きしない」仕様（update_drawing_list参照）のため、新規追加時に
+        # diff_export.py から渡された値のみが入る。既存行の値は空欄のまま。
+        'Unchanged Offset Entities': pd.Series(dtype='object'),
         'Recorded Date': pd.Series(dtype='object'),
     })
 
@@ -343,8 +370,12 @@ def update_drawing_list(drawing_list_df, new_entries, shiban, module, side):
 
     Args:
         drawing_list_df: 既存の Package List DataFrame（None可）
-        new_entries: [{'main_drawing', 'source_drawing', 'title', 'subtitle'}, ...]
-                     （update_parent_child_master の new_pairs と同じキー）
+        new_entries: [{'main_drawing', 'source_drawing', 'title', 'subtitle',
+                     'unchanged_offset_entities'}, ...]
+                     （update_parent_child_master の new_pairs とほぼ同じキー。
+                     'unchanged_offset_entities' は2026-09-18新設・任意——
+                     diff_export.py が entity_counts から拾えた場合のみ渡す。
+                     省略時はこの列は空欄のまま記録される）
         shiban/module/side: 台帳ファイル名から得た指番/モジュール/サイド（Noneなら空欄記録）
 
     Returns:
@@ -369,12 +400,22 @@ def update_drawing_list(drawing_list_df, new_entries, shiban, module, side):
             'Side': side or '',
             'Child Drawing Number': child,
             'Parent Drawing Number': parent,
+            'Unchanged Offset Entities': entry.get('unchanged_offset_entities'),
             'Title': entry.get('title'),
             'Subtitle': entry.get('subtitle'),
             'Recorded Date': datetime.now(),
         })
 
     added_count = len(new_records)
+    # 旧形式の台帳（Unchanged Offset Entities 列導入前にアップロードされたもの）を
+    # 再アップロードした場合に列が無いことがある。列が無いまま .loc で辞書代入すると
+    # 対応する列が無いキーはpandasが黙って捨てる（後述のvalueが失われる）ため、
+    # update_parent_child_master() と同じ「無ければ追加してから代入」を行う。
+    for record in new_records:
+        for key in record.keys():
+            if key not in updated.columns:
+                updated[key] = pd.Series(dtype='object')
+
     # pd.concat は既存側が空（0行）の場合に FutureWarning
     # （"empty or all-NA entries" の dtype 除外に関する警告）を出すため、
     # update_parent_child_master() と同じ「1行ずつ .loc で追加」方式にする。
@@ -436,6 +477,10 @@ def save_master_to_bytes(master_df, mode=None, drawing_list_df=None):
             ('Added Entities',     '追加図形 総数'),
             ('Diff Entities',      '変更（追加+削除）図形 総数'),
             ('Unchanged Entities', '変更なし図形 総数'),
+            # 2026-09-18新設。Unchanged Entities（純粋一致+オフセット一致の合計）の
+            # 内訳のうち、オフセット補正で初めて一致した分だけを別行で示す
+            # （純粋な変更なし件数は 変更なし図形 総数 - この行 で追跡できる）。
+            ('Unchanged Offset Entities', '変更なし（オフセット一致）図形 総数'),
             ('Total Entities',     total_entities_label),
         ]
         entity_sums = {}

@@ -142,10 +142,28 @@ def test_offset_detection_enabled_reclassifies_moved_block_as_unchanged_offset()
         assert counts['total_old_entities'] == counts['deleted_entities'] + counts['unchanged_entities'] + counts['unchanged_offset_old_entities']
 
 
-# 図面管理台帳（Master）の Unchanged Offset Entities 列への反映は、この時点では
-# まだ未実装（master_ledger.py 側の対応は別途行う）。
-# → tests/unit/test_master_ledger.py::test_unchanged_offset_entities_column 参照
-# （_build_moved_block_pair と同じ合成データパターンを使って検証する）。
+def test_offset_detection_reflected_in_master_ledger():
+    """create_diff_zip() のエンドツーエンド経路で、図面管理台帳（Master）の
+    Unchanged Offset Entities 列に NEW側のオフセット一致件数が記録される
+    （model/master_ledger.py の単体テストは tests/unit/test_master_ledger.py
+    ::test_update_parent_child_master_records_unchanged_offset_entities 参照。
+    こちらは create_diff_zip → compare_dxf_files_and_generate_dxf →
+    update_parent_child_master の実際の配線を通しで確認する）。"""
+    from model.master_ledger import create_empty_master_df
+
+    with tempfile.TemporaryDirectory() as d:
+        pairs = _build_moved_block_pair(d, main_drawing='NEW-OFS2', source_drawing='OLD-OFS2')
+        _, results, _, master_df, _ = create_diff_zip(
+            pairs, master_df=create_empty_master_df(),
+            offset_detection=_low_threshold_config(),
+        )
+        assert results[0]['success']
+        row = master_df[master_df['Child'] == 'NEW-OFS2'].iloc[0]
+        assert row['Unchanged Offset Entities'] == 3
+        assert row['Unchanged Entities'] == 4  # 純粋一致1 + オフセット一致3
+        assert row['Deleted Entities'] == 0
+        assert row['Added Entities'] == 0
+        assert row['Total Entities'] == 4      # Deleted0 + Added0 + Unchanged4
 
 
 if __name__ == '__main__':

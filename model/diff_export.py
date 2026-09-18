@@ -444,6 +444,16 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
             # pairs をそのまま走査すれば各方式の「Step2でアップロードした対象すべて」
             # を過不足なくカバーできる（model/pairing.py 参照）。
             shiban, module, side = parse_master_filename(master_filename)
+            # main_drawing → entity_counts のルックアップ（2026-09-18新設。
+            # Unchanged Offset Entities 列を Package List にも記録するため。
+            # results は通常ペア・完全新規図面の両方を含み、いずれも
+            # 'entity_counts' キーを持つ（完全新規図面には
+            # unchanged_offset_entities キー自体が無いため .get() は None を返し、
+            # その場合は空欄のまま記録される——比較対象が無いため妥当な扱い）。
+            entity_counts_by_child = {
+                r['main_drawing']: r.get('entity_counts')
+                for r in results if r.get('success') and r.get('entity_counts')
+            }
             drawing_list_entries = []
             seen_children = set()
             for pair in pairs:
@@ -472,11 +482,16 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                         except Exception:
                             pass
 
+                child_entity_counts = entity_counts_by_child.get(child)
                 drawing_list_entries.append({
                     'main_drawing': child,
                     'source_drawing': pair.get('source_drawing'),
                     'title': title,
                     'subtitle': subtitle,
+                    'unchanged_offset_entities': (
+                        child_entity_counts.get('unchanged_offset_entities')
+                        if child_entity_counts else None
+                    ),
                 })
 
             if drawing_list_entries:
