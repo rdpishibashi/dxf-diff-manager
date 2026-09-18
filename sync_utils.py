@@ -43,11 +43,15 @@ def utils_subdir(project_dir: Path) -> str:
     return SUBDIR_BY_PROJECT[project_dir]
 
 # Utils files to sync
+#
+# label_diff.py は2026-09-18、DXF-visual-diffがラベル比較機能自体を廃止したため
+# 対象から除外した（同プロジェクトに utils/label_diff.py が存在しなくなったため。
+# 詳細はDXF-visual-diffのTECHNICAL.md参照）。本スクリプト自体の実行は他の理由
+# （compare_dxf.py 等の意図的な差分）により禁止中——Tools/CLAUDE.md参照。
 UTILS_FILES = [
     "common_utils.py",
     "compare_dxf.py",
     "extract_labels.py",
-    "label_diff.py",
 ]
 
 class Color:
