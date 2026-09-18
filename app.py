@@ -32,6 +32,7 @@ from model.master_ledger import (
     parse_master_filename,
 )
 from model.diff_export import create_diff_zip, DIFF_LABELS_FILENAME
+from model.offset_detector import OffsetDetectionConfig
 
 # 設定をインポート
 from config import ui_config, diff_config, label_filter_config, help_text
@@ -1335,6 +1336,8 @@ def render_step3_diff(complete_pairs):
     deleted_color = diff_config.DEFAULT_DELETED_COLOR
     added_color = diff_config.DEFAULT_ADDED_COLOR
     unchanged_color = diff_config.DEFAULT_UNCHANGED_COLOR
+    unchanged_offset_old_color = diff_config.DEFAULT_UNCHANGED_OFFSET_OLD_COLOR
+    unchanged_offset_new_color = diff_config.DEFAULT_UNCHANGED_OFFSET_NEW_COLOR
     diff_label_patterns = label_filter_config.DIFF_LABEL_PREFIX_PATTERNS
 
     # ラベルのみ比較オプション（2026-09-16 ユーザー要求により、この1項目のみ
@@ -1352,6 +1355,37 @@ def render_step3_diff(complete_pairs):
             "追加のみ／削除のみとして出力されます（X/Y列は常に空欄になります）。"
         ),
     )
+
+    # オフセット補正オプション（2026-09-18新設、DXF-visual-diffから移植。
+    # 「ラベルのみで比較する」と同じ理由でconfig.pyではなくStep4のUIに置く——
+    # ユーザーがペアごとに有効/無効を切り替えられるようにするため。既定ON。
+    # しきい値（AUTO_OFFSET_*）自体はconfig.pyで管理する）。
+    offset_compensation_enabled = st.checkbox(
+        "オフセット補正を行う",
+        value=True,
+        key="offset_compensation_diff",
+        help=(
+            "ONにすると、変更がなく平行移動した一定の図形グループを「変化なし」と"
+            "判断します。回路ブロックがまるごと別の位置に移動した場合、座標単位の"
+            "比較では「削除＋追加」として検出されますが、この機能を有効にすると"
+            "自動検出したオフセット（移動量）で一致する図形を OLD_UNCHANGED_OFFSET/"
+            "NEW_UNCHANGED_OFFSET レイヤーに分類し、図面管理台帳の Unchanged Offset "
+            "Entities 列にも記録します（diff_labels.xlsx のラベル比較には影響しません）。"
+            "検出には1ペアあたり数秒の追加時間がかかることがあります。"
+        ),
+    )
+    offset_detection = None
+    if offset_compensation_enabled:
+        offset_detection = OffsetDetectionConfig(
+            min_matches=diff_config.AUTO_OFFSET_MIN_MATCHES,
+            min_distinct_shapes=diff_config.AUTO_OFFSET_MIN_DISTINCT_SHAPES,
+            max_offsets=diff_config.AUTO_OFFSET_MAX_OFFSETS,
+            max_candidates=diff_config.AUTO_OFFSET_MAX_CANDIDATES,
+            max_instances_per_shape=diff_config.AUTO_OFFSET_MAX_INSTANCES_PER_SHAPE,
+            compact_min_matches=diff_config.AUTO_OFFSET_COMPACT_MIN_MATCHES,
+            compact_min_distinct_shapes=diff_config.AUTO_OFFSET_COMPACT_MIN_DISTINCT_SHAPES,
+            compact_max_span=diff_config.AUTO_OFFSET_COMPACT_MAX_SPAN,
+        )
 
     # 比較開始ボタン
     # 「差分抽出可能なペア：N組」は表示しない（Step3の図面ペア・リストと同内容で
@@ -1375,6 +1409,8 @@ def render_step3_diff(complete_pairs):
                         deleted_color=deleted_color,
                         added_color=added_color,
                         unchanged_color=unchanged_color,
+                        unchanged_offset_old_color=unchanged_offset_old_color,
+                        unchanged_offset_new_color=unchanged_offset_new_color,
                         diff_label_patterns=diff_label_patterns,
                         progress_callback=diff_progress,
                         on_error=st.error,
@@ -1385,6 +1421,7 @@ def render_step3_diff(complete_pairs):
                         dest_drawing_numbers=set(st.session_state.dest_files_dict.keys()),
                         drawing_list_df=st.session_state.drawing_list_df,
                         label_only=label_only,
+                        offset_detection=offset_detection,
                     )
 
                     # セッション状態に保存
@@ -1399,6 +1436,9 @@ def render_step3_diff(complete_pairs):
                         'deleted_color': deleted_color,
                         'added_color': added_color,
                         'unchanged_color': unchanged_color,
+                        'unchanged_offset_old_color': unchanged_offset_old_color,
+                        'unchanged_offset_new_color': unchanged_offset_new_color,
+                        'offset_compensation_enabled': offset_compensation_enabled,
                     }
                     if updated_master is not None:
                         st.session_state.master_df = updated_master
@@ -1455,10 +1495,16 @@ def render_step3_diff(complete_pairs):
             if entity_counts:
                 row['削除図形数'] = entity_counts.get('deleted_entities', '-')
                 row['追加図形数'] = entity_counts.get('added_entities', '-')
+                # オフセット一致図形数（2026-09-18新設。オフセット補正が無効、または
+                # 検出0件のペアでは0または未使用のキーになるため .get() で読む。
+                # 完全新規図面はentity_countsにこのキー自体が無いため'-'のまま）
+                offset_entities = entity_counts.get('unchanged_offset_entities')
+                row['オフセット一致図形数'] = offset_entities if offset_entities else '-'
                 row['総図形数'] = entity_counts.get('total_entities', '-')
             else:
                 row['削除図形数'] = '-'
                 row['追加図形数'] = '-'
+                row['オフセット一致図形数'] = '-'
                 row['総図形数'] = '-'
             row['変更ラベル数'] = result.get('change_label_count', '-')
 
@@ -1477,6 +1523,32 @@ def render_step3_diff(complete_pairs):
             make_dataframe_arrow_compatible(pd.DataFrame(result_data)),
             width='stretch', hide_index=True,
         )
+
+        # 検出されたオフセットの一覧（2026-09-18新設、DXF-visual-diffのUIパターンを
+        # 移植。オフセット補正が有効で、かつ1件以上検出されたペアがある場合のみ表示）
+        pairs_with_offsets = [
+            r for r in sorted(results, key=lambda r: r['main_drawing'] or '')
+            if r.get('entity_counts') and r['entity_counts'].get('detected_offsets')
+        ]
+        if pairs_with_offsets:
+            with st.expander(
+                f"🔍 検出されたオフセット（{len(pairs_with_offsets)}ペア）", expanded=False
+            ):
+                for result in pairs_with_offsets:
+                    entity_counts = result['entity_counts']
+                    detected_offsets = entity_counts['detected_offsets']
+                    rejected_count = entity_counts.get('rejected_offset_candidates', 0)
+                    st.caption(f"**{result['main_drawing']} vs {result['source_drawing']}**（{len(detected_offsets)}個）")
+                    for d in detected_offsets:
+                        dx, dy = d['offset']
+                        compact_note = "（コンパクト救済）" if d.get('compact') else ""
+                        st.caption(
+                            f"　({dx:.2f}, {dy:.2f}) ｜ 一致: {d['matches']}件 ｜ "
+                            f"形状の種類: {d['shapes']}種類 ｜ "
+                            f"広がり: {d.get('span', 0.0):.1f}{compact_note}"
+                        )
+                    if rejected_count > 0:
+                        st.caption(f"　※ しきい値未満で不採用の候補: {rejected_count}個")
 
         # プレビューセクション
         # diff_labels.xlsx は zip_data 内から都度読み出す（二重保持しない）
@@ -1611,13 +1683,24 @@ def render_step3_diff(complete_pairs):
                 st.caption(f"ダウンロードされるファイル名: **{st.session_state.zip_basename_confirmed}.zip**")
 
             # オプション設定の情報を表示
+            offset_note = (
+                "有効（変更がなく平行移動した図形グループを「変化なし」と判定）"
+                if settings.get('offset_compensation_enabled') else "無効"
+            )
             st.info(f"""
-                **生成されたファイルについて：**
-                - ADDED: 新図面にのみ存在する要素（追加された図形。完全新規図面は全要素）
-                - DELETED: 旧図面にのみ存在する要素（削除された図形）
+                **生成されたファイルについて（7レイヤー構成）：**
+                開いた直後は「NEW_ALL」「OLD_ALL」の2枚だけが表示され、詳細カテゴリ層
+                （NEW_ADDED/OLD_DELETED/UNCHANGED/OLD_UNCHANGED_OFFSET/
+                NEW_UNCHANGED_OFFSET）は既定で非表示です。必要に応じて手動でONにしてください。
+                - NEW_ADDED: 流用先図面にのみ存在する要素（追加された図形。完全新規図面は全要素）
+                - OLD_DELETED: 流用元図面にのみ存在する要素（削除された図形）
                 - UNCHANGED: 両方の図面に存在し変更がない図形
+                - OLD_UNCHANGED_OFFSET / NEW_UNCHANGED_OFFSET: オフセット補正で一致した図形
+                （それぞれ流用元・流用先の座標で描画。検出内容は「🔍 検出されたオフセット」から確認できます）
+                - OLD_ALL / NEW_ALL: 上記のうちそれぞれの図面の再現に必要なものを1枚に複製した合成レイヤー
                 - diff_labels.xlsx: 各図面の変更ラベル一覧（シート名は新図面の図番）
                 - 座標許容誤差: {settings.get('tolerance', 0.01)}
+                - オフセット補正: {offset_note}
                 """)
 
         # 新しい比較を開始するボタン。

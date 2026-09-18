@@ -58,11 +58,12 @@ def _annotate_ref_designator_candidates(change_rows):
 
 def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                     deleted_color=None, added_color=None, unchanged_color=None,
+                    unchanged_offset_old_color=None, unchanged_offset_new_color=None,
                     diff_label_patterns=None, progress_callback=None, on_error=None,
                     ignore_moved_labels=False, ignore_color_only_changes=False,
                     step1_mode=None,
                     source_drawing_numbers=None, dest_drawing_numbers=None,
-                    drawing_list_df=None, label_only=False):
+                    drawing_list_df=None, label_only=False, offset_detection=None):
     """
     ペアリストに基づいて差分DXFファイルを作成し、ZIPアーカイブを生成
 
@@ -71,9 +72,13 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
         master_df: 図面管理台帳DataFrame（Noneでない場合はZIPに含める）
         master_filename: 図面管理台帳のファイル名（Noneの場合はconfigのデフォルト名を使用）
         tolerance: 座標許容誤差（Noneの場合はconfigのデフォルト値を使用）
-        deleted_color: 削除エンティティの色（Noneの場合はconfigのデフォルト値を使用）
-        added_color: 追加エンティティの色（Noneの場合はconfigのデフォルト値を使用）
+        deleted_color: OLD_DELETEDエンティティの色（Noneの場合はconfigのデフォルト値を使用）
+        added_color: NEW_ADDEDエンティティの色（Noneの場合はconfigのデフォルト値を使用）
         unchanged_color: 変更なしエンティティの色（Noneの場合はconfigのデフォルト値を使用）
+        unchanged_offset_old_color: OLD_UNCHANGED_OFFSETエンティティの色
+            （Noneの場合はconfigのデフォルト値を使用）
+        unchanged_offset_new_color: NEW_UNCHANGED_OFFSETエンティティの色
+            （Noneの場合はconfigのデフォルト値を使用）
         diff_label_patterns: diff_labels.xlsx の差分行を絞り込む先頭一致の正規表現リスト
             （Noneの場合は config.label_filter_config.DIFF_LABEL_PREFIX_PATTERNS を使用。
             filter_change_rows_by_patterns 参照。空リストなら絞り込みなし）
@@ -95,9 +100,16 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
             新規の Child Drawing Number のみが追加される（update_drawing_list 参照）
         label_only: True の場合、diff_labels.xlsx のラベル比較を座標を使わず
             ラベル文字列だけで行う（compute_label_differences の label_only 参照）。
-            差分DXF（図形のADDED/DELETED/UNCHANGED判定）には影響しない。
+            差分DXF（図形のNEW_ADDED/OLD_DELETED/UNCHANGED判定）には影響しない。
             True の場合、ignore_moved_labels は無視される（座標を見ないラベルのみ
             比較は移動の吸収を最初から内包しているため）。
+        offset_detection: 差分DXFのオフセット補正（変更がなく平行移動した一定の
+            図形グループを「変化なし」と判定する機能）の自動検出設定
+            （`utils.offset_detector.OffsetDetectionConfig`。None なら無効。
+            Step4「オフセット補正を行う」チェックボックスから渡される。
+            2026-09-18新設、DXF-visual-diffから移植）。
+            compare_dxf_files_and_generate_dxf() にそのまま渡す——完全新規図面
+            （generate_all_added_dxf()）は比較対象が無いため対象外。
 
     Returns:
         tuple: (zip_data, results, diff_labels_excel, master_df, drawing_list_df)
@@ -115,6 +127,10 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
         added_color = diff_config.DEFAULT_ADDED_COLOR
     if unchanged_color is None:
         unchanged_color = diff_config.DEFAULT_UNCHANGED_COLOR
+    if unchanged_offset_old_color is None:
+        unchanged_offset_old_color = diff_config.DEFAULT_UNCHANGED_OFFSET_OLD_COLOR
+    if unchanged_offset_new_color is None:
+        unchanged_offset_new_color = diff_config.DEFAULT_UNCHANGED_OFFSET_NEW_COLOR
     if diff_label_patterns is None:
         diff_label_patterns = label_filter_config.DIFF_LABEL_PREFIX_PATTERNS
 
@@ -129,7 +145,11 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
 
     # 同じファイルが複数ペアの基準/比較対象として再利用される場合（RevUp/流用
     # チェーンで同じ親図面が複数の子の流用元になる等）の再解析を避けるキャッシュ。
-    # offset_b は常に None（このバッチ全体で固定値）なのでキーに含めて一致させる。
+    # 2026-09-18、和集合型オフセット補正の組み込みに伴い、OLD側・NEW側とも
+    # EntityExpander の展開は常に生座標（global_offset=None）で行われるように
+    # なったため、キャッシュキーは両側とも (file_path, None) で揃える
+    # （オフセット値が違ってもエンティティ展開結果は変わらないため、
+    # offset_new の値でキャッシュを分ける必要がない）。
     pair_cache_keys = (
         [(p['main_file_info']['temp_path'], None) for p in complete_pairs] +
         [(p['source_file_info']['temp_path'], None) for p in complete_pairs]
@@ -201,23 +221,26 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                 if progress_callback:
                     progress_callback(index - 1, total_pairs, f"{main_drawing} vs {source_drawing} 処理中")
 
-                # DXF比較処理。compare_dxf_files_and_generate_dxf() は file_a のみに
-                # 存在するエンティティを DELETED、file_b のみに存在するエンティティを
-                # ADDED として出力する（標準的な diff の慣習: file_a=旧基準、file_b=新
-                # 比較対象）。そのため流用元図番（旧）を file_a、図番（新）を file_b に
-                # 渡す（2026-07 修正: 以前は新旧が逆で ADDED/DELETED レイヤーの内容が
-                # 入れ替わっていた不具合があった）。
+                # DXF比較処理。compare_dxf_files_and_generate_dxf() は file_old のみに
+                # 存在するエンティティを OLD_DELETED、file_new のみに存在するエンティティを
+                # NEW_ADDED として出力する（標準的な diff の慣習: file_old=旧基準、
+                # file_new=新比較対象）。そのため流用元図番（旧）を file_old、図番（新）を
+                # file_new に渡す（2026-07 修正: 以前は新旧が逆で ADDED/DELETED レイヤーの
+                # 内容が入れ替わっていた不具合があった）。
                 success, entity_counts = compare_dxf_files_and_generate_dxf(
-                    source_file_path,      # 基準ファイルA (旧) → DELETED の判定基準
-                    main_file_path,        # 比較対象ファイルB (新) → ADDED の判定基準
+                    source_file_path,      # 基準ファイルOLD (旧) → OLD_DELETED の判定基準
+                    main_file_path,        # 比較対象ファイルNEW (新) → NEW_ADDED の判定基準
                     temp_output,
                     tolerance=tolerance,
                     deleted_color=deleted_color,
                     added_color=added_color,
                     unchanged_color=unchanged_color,
-                    offset_b=None,
+                    unchanged_offset_old_color=unchanged_offset_old_color,
+                    unchanged_offset_new_color=unchanged_offset_new_color,
+                    offset_new=None,
                     pair_cache=pair_cache,
                     ignore_color_only_changes=ignore_color_only_changes,
+                    offset_detection=offset_detection,
                 )
 
                 if success:
@@ -295,6 +318,8 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                     deleted_color=deleted_color,
                     added_color=added_color,
                     unchanged_color=unchanged_color,
+                    unchanged_offset_old_color=unchanged_offset_old_color,
+                    unchanged_offset_new_color=unchanged_offset_new_color,
                     ignore_color_only_changes=ignore_color_only_changes,
                 )
                 if not success or count is None:
@@ -419,6 +444,16 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
             # pairs をそのまま走査すれば各方式の「Step2でアップロードした対象すべて」
             # を過不足なくカバーできる（model/pairing.py 参照）。
             shiban, module, side = parse_master_filename(master_filename)
+            # main_drawing → entity_counts のルックアップ（2026-09-18新設。
+            # Unchanged Offset Entities 列を Package List にも記録するため。
+            # results は通常ペア・完全新規図面の両方を含み、いずれも
+            # 'entity_counts' キーを持つ（完全新規図面には
+            # unchanged_offset_entities キー自体が無いため .get() は None を返し、
+            # その場合は空欄のまま記録される——比較対象が無いため妥当な扱い）。
+            entity_counts_by_child = {
+                r['main_drawing']: r.get('entity_counts')
+                for r in results if r.get('success') and r.get('entity_counts')
+            }
             drawing_list_entries = []
             seen_children = set()
             for pair in pairs:
@@ -447,11 +482,16 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                         except Exception:
                             pass
 
+                child_entity_counts = entity_counts_by_child.get(child)
                 drawing_list_entries.append({
                     'main_drawing': child,
                     'source_drawing': pair.get('source_drawing'),
                     'title': title,
                     'subtitle': subtitle,
+                    'unchanged_offset_entities': (
+                        child_entity_counts.get('unchanged_offset_entities')
+                        if child_entity_counts else None
+                    ),
                 })
 
             if drawing_list_entries:
