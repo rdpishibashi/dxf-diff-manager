@@ -204,8 +204,10 @@ def test_file_a_only_is_deleted_file_b_only_is_added():
             if e.dxftype() == 'TEXT':
                 by_layer[getattr(e.dxf, 'layer', '')] = e.dxf.text
 
-        assert by_layer.get('DELETED') == 'ONLY_IN_A'
-        assert by_layer.get('ADDED') == 'ONLY_IN_B'
+        # 2026-09-18、オフセット補正機能の組み込みに伴いレイヤー名がOLD/NEW接頭辞付きに
+        # 変更された（DELETED→OLD_DELETED、ADDED→NEW_ADDED）。
+        assert by_layer.get('OLD_DELETED') == 'ONLY_IN_A'
+        assert by_layer.get('NEW_ADDED') == 'ONLY_IN_B'
 
 
 # --- ignore_color_only_changes: 座標・形状が一致し color だけ異なる場合の扱い ---
@@ -320,6 +322,105 @@ def test_count_entities_in_dxf_file_respects_ignore_color_only_changes():
 
         count_ignored = count_entities_in_dxf_file(path, ignore_color_only_changes=True)
         assert count_ignored == 1  # color を無視すると同一エンティティとして1つに集約
+
+
+# --- オフセット補正（offset_new）との組み合わせ（2026-09-18、dev-workflowの ---
+# --- 選択肢組み合わせ表「オフセット補正 × ignore_color_only_changes」「× pair_cache」---
+
+def test_offset_new_ignores_color_only_when_ignore_color_enabled():
+    """offset_new（手動オフセット指定）と ignore_color_only_changes を併用した場合、
+    位置がオフセット分ずれておりcolorだけが異なるエンティティが UNCHANGED_OFFSET
+    として一致する（ignore_color_only_changes=False の場合は color差が残るため
+    一致しない）。
+
+    signature_generator は SignatureGenerator(ignore_color=...) として構築され、
+    offset_detector.detect_offsets() にも同じ signature_fn が注入されるため、
+    ignore_color の設定はオフセット一致判定にも一貫して効くはずという契約を
+    固定する（dev-workflowスキルの組み合わせ表で「影響あり→要テスト」とした
+    表B: オフセット補正 × ignore_color_only_changes）。
+    """
+    import tempfile
+
+    old_doc = ezdxf.new()
+    old_doc.modelspace().add_line((0, 0), (10, 10), dxfattribs={'color': 7})
+    new_doc = ezdxf.new()
+    # NEW側は (5, 5) だけ平行移動、かつ color が異なる
+    new_doc.modelspace().add_line((5, 5), (15, 15), dxfattribs={'color': 4})
+
+    with tempfile.TemporaryDirectory() as d:
+        old_path = os.path.join(d, 'old.dxf')
+        new_path = os.path.join(d, 'new.dxf')
+
+        old_doc.saveas(old_path)
+        new_doc.saveas(new_path)
+
+        # ignore_color_only_changes=False（既定）: color差が残るためオフセット一致しない
+        out_path1 = os.path.join(d, 'out1.dxf')
+        ok1, counts1 = compare_dxf_files_and_generate_dxf(
+            old_path, new_path, out_path1, offset_new=(-5, -5),
+            ignore_color_only_changes=False)
+        assert ok1
+        assert counts1['deleted_entities'] == 1
+        assert counts1['added_entities'] == 1
+        assert counts1['unchanged_offset_entities'] == 0
+
+        # ignore_color_only_changes=True: color差を無視するためオフセット一致する
+        out_path2 = os.path.join(d, 'out2.dxf')
+        ok2, counts2 = compare_dxf_files_and_generate_dxf(
+            old_path, new_path, out_path2, offset_new=(-5, -5),
+            ignore_color_only_changes=True)
+        assert ok2
+        assert counts2['deleted_entities'] == 0
+        assert counts2['added_entities'] == 0
+        assert counts2['unchanged_offset_entities'] == 1
+        assert counts2['unchanged_offset_old_entities'] == 1
+
+
+def test_pair_cache_with_offset_produces_same_result_as_without_cache():
+    """pair_cache（バッチ内のファイル再解析回避キャッシュ）を使っても、オフセット
+    補正（offset_new）が有効な場合の差分結果が pair_cache 無しの場合と完全一致する
+    （dev-workflowスキルの組み合わせ表で「影響あり→要テスト」とした表G:
+    オフセット補正 × pair_cache）。
+
+    2026-09-18の変更で、和集合型オフセット補正への移行に伴い pair_cache の
+    NEW側キャッシュキーが (file_path, offset_new) から (file_path, None) に
+    単純化された（NEW側は常に生座標で展開されるため）。同じOLDファイルが
+    複数ペアで再利用されるケースを模して、キャッシュ有無で結果が変わらないことを
+    確認する。
+    """
+    import tempfile
+    from model.compare_dxf import PairFileCache
+
+    old_doc = ezdxf.new()
+    old_doc.modelspace().add_line((0, 0), (10, 10), dxfattribs={'color': 7})
+    new_doc = ezdxf.new()
+    new_doc.modelspace().add_line((5, 5), (15, 15), dxfattribs={'color': 7})
+
+    with tempfile.TemporaryDirectory() as d:
+        old_path = os.path.join(d, 'old.dxf')
+        new_path = os.path.join(d, 'new.dxf')
+        old_doc.saveas(old_path)
+        new_doc.saveas(new_path)
+
+        # キャッシュ無しでの結果
+        out_no_cache = os.path.join(d, 'out_no_cache.dxf')
+        ok_nc, counts_no_cache = compare_dxf_files_and_generate_dxf(
+            old_path, new_path, out_no_cache, offset_new=(-5, -5), pair_cache=None)
+        assert ok_nc
+
+        # 同じOLDファイルを2ペアで再利用するキャッシュ（バッチ処理を模す）
+        cache = PairFileCache([(old_path, None), (old_path, None), (new_path, None), (new_path, None)])
+        out_cached_1 = os.path.join(d, 'out_cached_1.dxf')
+        ok_c1, counts_cached_1 = compare_dxf_files_and_generate_dxf(
+            old_path, new_path, out_cached_1, offset_new=(-5, -5), pair_cache=cache)
+        out_cached_2 = os.path.join(d, 'out_cached_2.dxf')
+        ok_c2, counts_cached_2 = compare_dxf_files_and_generate_dxf(
+            old_path, new_path, out_cached_2, offset_new=(-5, -5), pair_cache=cache)
+
+        assert ok_c1 and ok_c2
+        assert counts_no_cache == counts_cached_1 == counts_cached_2
+        assert counts_no_cache['unchanged_offset_entities'] == 1
+        assert counts_no_cache['unchanged_offset_old_entities'] == 1
 
 
 def _run_all():

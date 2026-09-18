@@ -99,10 +99,12 @@ def test_create_diff_zip_passes_old_new_in_correct_order_to_compare_dxf():
                 if e.dxftype() == 'TEXT':
                     by_layer[getattr(e.dxf, 'layer', '')] = e.dxf.text
 
-            assert by_layer.get('ADDED') == 'NEW_ONLY_LABEL', \
-                f"ADDEDレイヤーに新図面のラベルが期待通り出力されていない: {by_layer}"
-            assert by_layer.get('DELETED') == 'OLD_ONLY_LABEL', \
-                f"DELETEDレイヤーに旧図面のラベルが期待通り出力されていない: {by_layer}"
+            # 2026-09-18、オフセット補正機能の組み込みに伴いレイヤー名がOLD/NEW接頭辞付きに
+            # 変更された（ADDED→NEW_ADDED、DELETED→OLD_DELETED）。
+            assert by_layer.get('NEW_ADDED') == 'NEW_ONLY_LABEL', \
+                f"NEW_ADDEDレイヤーに新図面のラベルが期待通り出力されていない: {by_layer}"
+            assert by_layer.get('OLD_DELETED') == 'OLD_ONLY_LABEL', \
+                f"OLD_DELETEDレイヤーに旧図面のラベルが期待通り出力されていない: {by_layer}"
         finally:
             os.unlink(out_path)
 

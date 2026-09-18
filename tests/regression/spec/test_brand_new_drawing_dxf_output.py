@@ -94,9 +94,14 @@ def test_brand_new_drawing_dxf_filename_and_layers():
             dxf_bytes = zf.read('BRANDNEW-001_vs_none.dxf')
 
         counts = _read_layer_counts(dxf_bytes)
-        assert counts.get('ADDED') == 2, f"ADDEDレイヤーの要素数が想定と異なる: {counts}"
-        assert counts.get('DELETED', 0) == 0, f"DELETEDレイヤーに要素が残っている: {counts}"
+        # 2026-09-18、オフセット補正機能の組み込みに伴いレイヤー名がOLD/NEW接頭辞付きに
+        # 変更された（ADDED→NEW_ADDED、DELETED→OLD_DELETED）。NEW_ADDEDはNEW_ALLにも
+        # 複製されるため、そちらの件数も併せて確認する。
+        assert counts.get('NEW_ADDED') == 2, f"NEW_ADDEDレイヤーの要素数が想定と異なる: {counts}"
+        assert counts.get('NEW_ALL') == 2, f"NEW_ALLレイヤーの要素数が想定と異なる: {counts}"
+        assert counts.get('OLD_DELETED', 0) == 0, f"OLD_DELETEDレイヤーに要素が残っている: {counts}"
         assert counts.get('UNCHANGED', 0) == 0, f"UNCHANGEDレイヤーに要素が残っている: {counts}"
+        assert counts.get('OLD_ALL', 0) == 0, f"OLD_ALLレイヤーに要素が残っている（比較対象が無いため空のはず）: {counts}"
 
 
 def test_brand_new_drawing_dxf_output_without_master_df():
