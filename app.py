@@ -898,7 +898,7 @@ def render_step0_master():
                 st.session_state.added_relationships_count = 0
             st.session_state.master_file_name = master_filename
 
-            st.info(f"新規台帳「{master_filename}」を作成します。差分抽出後、台帳が自動更新されてダウンロードZIPに含まれます。")
+            st.info(f"新規台帳「{master_filename}」を作成します。差分抽出後、台帳が自動更新されてダウンロード・ファイルに含まれます。")
 
     elif step0_mode == 'upload':
         master_file = st.file_uploader(
@@ -937,7 +937,7 @@ def render_step0_master():
         st.session_state.drawing_list_df = None
         st.session_state.master_file_name = None
         st.session_state.added_relationships_count = 0
-        st.info("図面管理台帳は作成・更新しません。差分抽出結果（差分DXF・ラベルリスト）のみをZIPで出力します。")
+        st.info("図面管理台帳は作成・更新しません。差分抽出結果（差分DXF・差分ラベルリスト）のみをZIPで出力します。")
 
 
 def render_step1_upload():
@@ -965,7 +965,7 @@ def _render_step1_auto_mode():
     st.caption(
         "ファイル名（拡張子なし）が図番として使用されます。"
         "フォルダをドラッグ&ドロップすると、サブフォルダ内も含めて図番フォーマット"
-        "（例: EE1234-567-89A / EE1234-567A）に一致するDXFファイルが自動的に抽出されます。"
+        "に一致するDXFファイルが自動的に抽出されます。"
         "複数のフォルダを読み込む場合は、フォルダを1つずつ順番にアップロードしてください"
         "（まとめてドロップすると一部が読み込まれないことがあります）。"
     )
@@ -1052,7 +1052,7 @@ def _render_step1_pair_list_mode():
     st.subheader("Step 2-1: ペアリストのアップロード")
     st.caption(
         "流用元図番（旧）と流用先図番（新）のペアを記載したExcelまたはCSVファイルをアップロードしてください。\n"
-        "必須カラム：**流用元図番** と **流用先図番**（旧名 **比較元図番**/**比較先図番**、"
+        "必須カラム：**流用元図番** と **流用先図番**（**比較元図番**/**比較先図番**、"
         "または **Reference** と **Target** も使用可）"
     )
 
@@ -1087,7 +1087,7 @@ def _render_step1_pair_list_mode():
     st.caption(
         "ファイル名（拡張子なし）が図番として使用されます。流用元と流用先のファイルをまとめてアップロードしてください。"
         "フォルダをドラッグ&ドロップすると、サブフォルダ内も含めて図番フォーマット"
-        "（例: EE1234-567-89A / EE1234-567A）に一致するDXFファイルが自動的に抽出されます。"
+        "に一致するDXFファイルが自動的に抽出されます。"
         "複数のフォルダを読み込む場合は、フォルダを1つずつ順番にアップロードしてください"
         "（まとめてドロップすると一部が読み込まれないことがあります）。"
     )
@@ -1185,7 +1185,7 @@ def _render_step1_all_in_one_mode():
         "流用元・流用先を区別せず全DXFファイルをアップロードしてください。\n"
         "ファイル名（拡張子なし）が図番として使用され、DXFから抽出した流用元図番でペアを自動作成します。\n"
         "フォルダをドラッグ&ドロップすると、サブフォルダ内も含めて図番フォーマット"
-        "（例: EE1234-567-89A / EE1234-567A）に一致するDXFファイルが自動的に抽出されます。"
+        "に一致するDXFファイルが自動的に抽出されます。"
         "複数のフォルダを読み込む場合は、フォルダを1つずつ順番にアップロードしてください"
         "（まとめてドロップすると一部が読み込まれないことがあります）。"
     )
@@ -1349,10 +1349,10 @@ def render_step3_diff(complete_pairs):
         value=False,
         key="label_only_diff",
         help=(
-            "ONにすると、diff_labels.xlsx のラベル比較で座標を使わず、ラベル文字列の"
-            "個数だけで新旧を比較します。回路ブロックの移動を自動的に「変更なし」扱い"
-            "できますが、同一座標での「名称変更」は検出できなくなり、全ての差分が"
-            "追加のみ／削除のみとして出力されます（X/Y列は常に空欄になります）。"
+            "ONにすると、diff_labels.xlsx のラベル比較で座標を使わず、"
+            "ラベル文字列の個数だけで新旧を比較します。"
+            "同一座標での「名称変更」は検出できなくなります。"
+            "（X/Y列は常に空欄になります）。"
         ),
     )
 
@@ -1365,13 +1365,13 @@ def render_step3_diff(complete_pairs):
         value=True,
         key="offset_compensation_diff",
         help=(
-            "ONにすると、変更がなく平行移動した一定の図形グループを「変化なし」と"
+            "ONにすると、変更がなく平行移動した一定の回路ブロックを「変化なし」と"
             "判断します。回路ブロックがまるごと別の位置に移動した場合、座標単位の"
             "比較では「削除＋追加」として検出されますが、この機能を有効にすると"
             "自動検出したオフセット（移動量）で一致する図形を OLD_UNCHANGED_OFFSET/"
             "NEW_UNCHANGED_OFFSET レイヤーに分類し、図面管理台帳の Unchanged Offset "
             "Entities 列にも記録します（diff_labels.xlsx のラベル比較には影響しません）。"
-            "検出には1ペアあたり数秒の追加時間がかかることがあります。"
+            "差分検出処理時間が長くなります。"
         ),
     )
     offset_detection = None
@@ -1499,12 +1499,12 @@ def render_step3_diff(complete_pairs):
                 # 検出0件のペアでは0または未使用のキーになるため .get() で読む。
                 # 完全新規図面はentity_countsにこのキー自体が無いため'-'のまま）
                 offset_entities = entity_counts.get('unchanged_offset_entities')
-                row['オフセット一致図形数'] = offset_entities if offset_entities else '-'
+                row['変更なし図形数'] = offset_entities if offset_entities else '-'
                 row['総図形数'] = entity_counts.get('total_entities', '-')
             else:
                 row['削除図形数'] = '-'
                 row['追加図形数'] = '-'
-                row['オフセット一致図形数'] = '-'
+                row['変更なし図形数'] = '-'
                 row['総図形数'] = '-'
             row['変更ラベル数'] = result.get('change_label_count', '-')
 
@@ -1532,7 +1532,7 @@ def render_step3_diff(complete_pairs):
         ]
         if pairs_with_offsets:
             with st.expander(
-                f"🔍 検出されたオフセット（{len(pairs_with_offsets)}ペア）", expanded=False
+                f"検出されたオフセット（{len(pairs_with_offsets)}ペア）", expanded=False
             ):
                 for result in pairs_with_offsets:
                     entity_counts = result['entity_counts']
@@ -1688,18 +1688,17 @@ def render_step3_diff(complete_pairs):
                 if settings.get('offset_compensation_enabled') else "無効"
             )
             st.info(f"""
-                **生成されたファイルについて（7レイヤー構成）：**
-                開いた直後は「NEW_ALL」「OLD_ALL」の2枚だけが表示され、詳細カテゴリ層
+                **生成されたファイルについて：**
+                開いた直後は「NEW_ALL」「OLD_ALL」の2枚だけが表示され、その他のレイヤー
                 （NEW_ADDED/OLD_DELETED/UNCHANGED/OLD_UNCHANGED_OFFSET/
-                NEW_UNCHANGED_OFFSET）は既定で非表示です。必要に応じて手動でONにしてください。
-                - NEW_ADDED: 流用先図面にのみ存在する要素（追加された図形。完全新規図面は全要素）
+                NEW_UNCHANGED_OFFSET）は既定で非表示です。必要に応じて手動でON/OFFを切り替えてください。
+                - NEW_ADDED: 流用先図面にのみ存在する要素（追加された図形, 完全新規図面は全要素）
                 - OLD_DELETED: 流用元図面にのみ存在する要素（削除された図形）
                 - UNCHANGED: 両方の図面に存在し変更がない図形
-                - OLD_UNCHANGED_OFFSET / NEW_UNCHANGED_OFFSET: オフセット補正で一致した図形
-                （それぞれ流用元・流用先の座標で描画。検出内容は「🔍 検出されたオフセット」から確認できます）
-                - OLD_ALL / NEW_ALL: 上記のうちそれぞれの図面の再現に必要なものを1枚に複製した合成レイヤー
+                - OLD_UNCHANGED_OFFSET / NEW_UNCHANGED_OFFSET: オフセット補正で変更がないと判断した図形
+                （それぞれ流用元・流用先の座標で描画）
+                - OLD_ALL / NEW_ALL: 流用元(OLD)、流用先(NEW)の図面を上記のレイヤーを合成した図面
                 - diff_labels.xlsx: 各図面の変更ラベル一覧（シート名は新図面の図番）
-                - 座標許容誤差: {settings.get('tolerance', 0.01)}
                 - オフセット補正: {offset_note}
                 """)
 
