@@ -146,10 +146,11 @@ def test_brand_new_drawing_has_diff_labels_sheet_with_new_only():
     （Old列は常に空）。Summaryシートにも図番・流用元図番="none"・削除ラベル数=0・
     変更ラベル数=0・追加ラベル数=シート行数で記録される。
     機器符号候補列（ペアシート先頭・Summaryの「機器符号候補数」）も出力される
-    （2026-09-16。'R10' は機器符号候補パターンに一致し、'LABEL_A' は
-    アンダースコアを含むためどの候補パターンにも一致しない）。"""
+    （2026-09-16。'C1' は機器符号候補パターンに一致し、'LABEL_A' は
+    アンダースコアを含むためどの候補パターンにも一致しない。2026-10-17: R10 は OTHER_PATTERNS で
+    候補外になったため、正例を C1 に変更）。"""
     with tempfile.TemporaryDirectory() as d:
-        pairs = _build_brand_new_pairs(d, 'BRANDNEW-004', labels=['LABEL_A', 'R10'])
+        pairs = _build_brand_new_pairs(d, 'BRANDNEW-004', labels=['LABEL_A', 'C1'])
         _, results, diff_labels_excel, _, _ = create_diff_zip(pairs, step1_mode='pair_list')
 
         assert results[0]['success']
@@ -160,10 +161,10 @@ def test_brand_new_drawing_has_diff_labels_sheet_with_new_only():
         sheet_df = pd.read_excel(xl, sheet_name='BRANDNEW-004')
         assert list(sheet_df.columns) == ['機器符号候補', 'X', 'Y', 'Old: none', 'New: BRANDNEW-004']
         assert sheet_df['Old: none'].isna().all(), "Old列に値が入っている（Newのみのはず）"
-        assert set(sheet_df['New: BRANDNEW-004']) == {'LABEL_A', 'R10'}
+        assert set(sheet_df['New: BRANDNEW-004']) == {'LABEL_A', 'C1'}
 
-        r10_row = sheet_df[sheet_df['New: BRANDNEW-004'] == 'R10'].iloc[0]
-        assert r10_row['機器符号候補'] == 'Y'
+        c1_row = sheet_df[sheet_df['New: BRANDNEW-004'] == 'C1'].iloc[0]
+        assert c1_row['機器符号候補'] == 'Y'
         label_a_row = sheet_df[sheet_df['New: BRANDNEW-004'] == 'LABEL_A'].iloc[0]
         assert pd.isna(label_a_row['機器符号候補'])
 

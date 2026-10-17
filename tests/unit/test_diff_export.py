@@ -459,12 +459,13 @@ def test_label_only_brand_new_drawing_has_empty_coordinates():
 
 def test_summary_ref_designator_count_for_normal_pair():
     """通常ペアの diff_labels.xlsx Summary に「機器符号候補数」列が出力され、
-    機器符号候補パターンに一致する行数と一致する。"""
+    機器符号候補パターンに一致する行数と一致する。
+    （2026-10-17: R10 は OTHER_PATTERNS で候補外になったため、正例を C1 に変更。）"""
     with tempfile.TemporaryDirectory() as d:
         old_doc = ezdxf.new()
         new_doc = ezdxf.new()
-        # R10(候補) と タイトル(非候補) を新図面のみに追加
-        new_doc.modelspace().add_text('R10', dxfattribs={'insert': (0, 0)})
+        # C1(候補) と タイトル(非候補) を新図面のみに追加
+        new_doc.modelspace().add_text('C1', dxfattribs={'insert': (0, 0)})
         new_doc.modelspace().add_text('タイトル', dxfattribs={'insert': (10, 10)})
         old_path = os.path.join(d, 'OLD-RD.dxf')
         new_path = os.path.join(d, 'NEW-RD.dxf')
@@ -482,8 +483,8 @@ def test_summary_ref_designator_count_for_normal_pair():
 
         sheet_df = pd.read_excel(io.BytesIO(diff_labels_excel), sheet_name='NEW-RD')
         assert list(sheet_df.columns)[0] == '機器符号候補'
-        r10_row = sheet_df[sheet_df['New: NEW-RD'] == 'R10'].iloc[0]
-        assert r10_row['機器符号候補'] == 'Y'
+        c1_row = sheet_df[sheet_df['New: NEW-RD'] == 'C1'].iloc[0]
+        assert c1_row['機器符号候補'] == 'Y'
         title_row = sheet_df[sheet_df['New: NEW-RD'] == 'タイトル'].iloc[0]
         assert pd.isna(title_row['機器符号候補'])
 
