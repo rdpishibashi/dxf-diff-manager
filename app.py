@@ -11,6 +11,7 @@ from datetime import datetime
 import gc
 import hashlib
 import time
+import unicodedata
 
 # model モジュールをインポート可能にするためのパスの追加
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -570,6 +571,14 @@ def render_pair_list():
         st.success(f"図面管理台帳に {st.session_state.added_relationships_count} 件の新しい関係を追加しました")
 
     return complete_pairs
+
+def _sheet_select_width(names):
+    """シート選択 selectbox の幅 px（最長のシート名に合わせる。既定の全幅だと
+    長すぎてメニューと認識されない、2026-10-17 ユーザー指摘）。"""
+    longest = max((sum(2 if unicodedata.east_asian_width(c) in 'WFA' else 1 for c in str(n))
+                   for n in names), default=0)
+    return max(160, longest * 8 + 28 + 36)
+
 
 def render_preview_dataframe(df, key_prefix):
     """プレビュー用データフレームの列幅を調整して表示"""
@@ -1589,6 +1598,7 @@ def render_step3_diff(complete_pairs):
                             diff_xl.sheet_names,
                             key="diff_labels_preview_sheet",
                             on_change=_mark_diff_preview_expanded,
+                            width=_sheet_select_width(diff_xl.sheet_names),
                         )
                         render_preview_dataframe(diff_xl.parse(sheet_name), "diff_preview")
 
