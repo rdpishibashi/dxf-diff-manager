@@ -21,7 +21,7 @@ from .label_diff import (
     round_labels_with_coordinates,
     build_diff_labels_workbook,
 )
-from .ref_designator_judge import is_ref_designator_label
+from .label_classifier import is_ref_designator_label
 from .pairing import get_brand_new_drawing_pairs
 from .master_ledger import (
     update_parent_child_master, save_master_to_bytes,
@@ -38,8 +38,8 @@ def _annotate_ref_designator_candidates(change_rows):
 
     Old Label・New Label のいずれかが機器符号候補パターンに一致すれば 'Y'
     （完全新規図面のシートは Old Label が常に None のため、実質 New Label
-    のみでの判定になる）。判定ロジックは `ref_designator_judge.py`
-    （DXF-extract-labels からの移植、NFKC正規化込み）に委譲する。
+    のみでの判定になる）。判定ロジックは `label_classifier.py`
+    （DXF-extract-labels からのバイトコピー。NFKC正規化は関数内部で行う）に委譲する。
 
     change_rows を破壊的に変更し、同じリストを返す（呼び出し元の利便性のため）。
     """
