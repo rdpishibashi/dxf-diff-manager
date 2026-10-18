@@ -817,3 +817,28 @@ def test_legacy_pair_list_relation_is_replaced_without_changed_suffix(tmp_path):
     master_df, _ = update_parent_child_master(master_df, pairs)
     rel = dict(zip(master_df['Child'], master_df['Relation']))
     assert rel == {'C1': '流用', 'C2': '流用-changed'}
+
+
+import pytest
+from model.master_ledger import master_filename_warning
+
+
+@pytest.mark.parametrize("filename", [
+    "ME24-1001-0_ZM00_405.xlsx",
+    "ME24-1001-0_na_na.xlsx",
+    "ME24-1001-0_ZM00_na_backup.xlsx",
+    "ME24-1001-0_ZM00_405-2.xlsx",
+])
+def test_master_filename_warning_none_for_valid_names(filename):
+    assert master_filename_warning(filename) is None
+
+
+@pytest.mark.parametrize("filename", [
+    "統合図面管理台帳.xlsx",
+    "ME24-1001-0.xlsx",          # モジュール・サイド未記入（na も無い）
+    "ME24-1001-0_ZM00.xlsx",     # サイド無し
+    "master (1).xlsx",
+])
+def test_master_filename_warning_for_invalid_names(filename):
+    message = master_filename_warning(filename)
+    assert message and filename in message and "na" in message

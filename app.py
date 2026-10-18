@@ -31,6 +31,7 @@ from model.master_ledger import (
     create_empty_drawing_list_df,
     load_drawing_list,
     parse_master_filename,
+    master_filename_warning,
 )
 from model.diff_export import create_diff_zip, DIFF_LABELS_FILENAME
 from model.offset_detector import OffsetDetectionConfig
@@ -76,6 +77,18 @@ def compute_default_zip_basename(master_file_name, step1_mode):
     if shiban is None:
         return "dxf_diff_results"
     return f"dxf_diff_results_Type{letter}_{shiban}_{module}_{side}"
+
+
+# st.spinner は開始から 0.5 秒経ってから表示される（streamlit/elements/spinner.py の
+# DELAY_SECS）。その前に進捗用の st.empty() を作ると進捗メッセージが先に出て、
+# spinner が出た時点でその下へ動いてしまう。spinner の表示後に作るため少し待つ。
+SPINNER_APPEAR_WAIT_SEC = 0.6
+
+
+def _status_placeholder_after_spinner():
+    """spinner が表示されるのを待ってから進捗表示用の `st.empty()` を返す。"""
+    time.sleep(SPINNER_APPEAR_WAIT_SEC)
+    return st.empty()
 
 
 def read_zip_member(zip_data, member_name):
@@ -918,6 +931,9 @@ def render_step0_master():
         )
 
         if master_file is not None:
+            filename_warning = master_filename_warning(master_file.name)
+            if filename_warning:
+                st.warning(filename_warning)
             if st.session_state.master_df is None or st.session_state.get('master_file_name') != master_file.name:
                 master_df, error_message = load_parent_child_master(master_file)
                 if error_message:
@@ -1403,8 +1419,11 @@ def render_step3_diff(complete_pairs):
         has_results = bool(st.session_state.get('results'))
         if st.button("差分抽出開始", key="start_comparison", type="primary", disabled=has_results):
             total_pairs = len(complete_pairs)
-            status_placeholder = st.empty()
             with st.spinner("差分抽出中..."):
+                # 進捗メッセージは spinner の下に出すため、st.empty() は spinner の内側で
+                # spinner の表示後に作る（他プロジェクトと同じ。_status_placeholder_after_spinner 参照）
+                status_placeholder = _status_placeholder_after_spinner()
+
                 def diff_progress(current, total, message):
                     status_placeholder.text(f"{message}（{current}/{total}組）")
 

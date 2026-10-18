@@ -60,6 +60,26 @@ def parse_master_filename(filename):
     return match['shiban'], match['module'], match['side']
 
 
+def master_filename_warning(filename):
+    """アップロードされた台帳のファイル名が命名規則に合わない場合の警告文を返す
+    （合っていれば None）。
+
+    命名規則に合わない台帳は、出力ZIPのファイル名（dxf_diff_results_Type{A/B/C}_
+    {指番}_{モジュール}_{サイド}）が指番入りにならず、Package List の
+    Sashiban/Module/Side も空欄になる。
+    """
+    shiban, _, _ = parse_master_filename(filename)
+    if shiban is not None:
+        return None
+    return (
+        f"台帳のファイル名「{filename}」が命名規則に一致しません。"
+        "「{指番}_{モジュール}_{サイド}.xlsx」の形式にしてください"
+        "（モジュールとサイドは未入力の場合 na。例: ME24-1001-0_ZM00_405.xlsx、"
+        "ME24-1001-0_na_na.xlsx）。このままだと出力ZIPのファイル名に指番が入らず、"
+        "Package List の Sashiban/Module/Side も空欄になります。"
+    )
+
+
 def load_parent_child_master(uploaded_file):
     """
     図面管理台帳ファイルを読み込む
