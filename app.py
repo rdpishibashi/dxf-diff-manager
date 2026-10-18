@@ -948,8 +948,10 @@ def render_step0_master():
                     if dl_error:
                         st.warning(dl_error)
                     st.session_state.drawing_list_df = drawing_list_df
-                    st.success(f"記録済み親子関係（{len(master_df)}件のレコード）")
-            else:
+                    # 命名規則違反の台帳では、読み込めた旨のメッセージは出さない（警告のみ）
+                    if not filename_warning:
+                        st.success(f"記録済み親子関係（{len(master_df)}件のレコード）")
+            elif not filename_warning:
                 st.info(f"既存の親子関係に追加します（{len(st.session_state.master_df)}件のレコード）")
         else:
             if st.session_state.master_df is not None:
