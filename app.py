@@ -686,9 +686,10 @@ def process_all_uploaded_files(groups):
 
     if all_items:
         total_files = len(all_items)
-        start_time = time.time()
-        status_placeholder = st.empty()
         with st.spinner("ファイルを処理中..."):
+            # 進捗メッセージは spinner の下に出すため、spinner の表示後に作る
+            status_placeholder = _status_placeholder_after_spinner()
+            start_time = time.time()
             for idx, (uploaded_file, group) in enumerate(all_items, start=1):
                 extractor = group['extractor']
                 file_info = extractor(uploaded_file)
@@ -1304,9 +1305,9 @@ def render_step2_pairing(source_count, dest_count):
                 st.session_state.all_in_one_files_dict,
             )
         else:  # auto
-            pairing_start = time.time()
-            status_placeholder = st.empty()
             with st.spinner("図面ペア・リスト作成中..."):
+                status_placeholder = _status_placeholder_after_spinner()
+                pairing_start = time.time()
                 def pairing_progress(progress, message, count, total):
                     elapsed = time.time() - pairing_start
                     text = message
