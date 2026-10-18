@@ -27,7 +27,6 @@ from model.pairing import (
     normalize_pair_list_columns,
     RELATION_REVUP,
     RELATION_DEPENDENCY,
-    RELATION_PAIR_LIST,
     STATUS_COMPLETE,
     STATUS_MISSING_SOURCE,
     STATUS_MISSING_TARGET,
@@ -181,7 +180,11 @@ def test_build_pairs_from_list_statuses():
         STATUS_NO_SOURCE_DEFINED, # 空白->C（流用先はあるが流用元の記載なし＝完全新規図面）
         STATUS_ONE_SIDED,         # A->空白（流用先が空白で比較対象がない）
     ]
-    assert all(p['relation'] == RELATION_PAIR_LIST for p in pairs)
+    # 関係は A/B と同じ規則で分類する（RevUp / 流用）。流用元が空白の行は None
+    assert [p['relation'] for p in pairs] == [
+        RELATION_DEPENDENCY, RELATION_DEPENDENCY, RELATION_DEPENDENCY,
+        RELATION_DEPENDENCY, None, None,
+    ]
 
 
 def test_build_pairs_from_list_missing_both():
@@ -306,3 +309,31 @@ def _run_all():
 
 if __name__ == '__main__':
     sys.exit(_run_all())
+
+
+def test_build_pairs_from_list_classifies_revup_and_dependency():
+    """Type C も RevUp（同一ベース図番で流用先のリビジョンが新しい）と 流用 に分類する。"""
+    df = pd.DataFrame({
+        '流用元図番': ['DE5313-008-02A', 'DE5313-008-02B', 'DE1111-001-01A', ''],
+        '流用先図番': ['DE5313-008-02B', 'DE5313-008-02A', 'DE2222-002-01A', 'DE3333-003-01A'],
+    })
+    pairs = build_pairs_from_list(df, {})
+    assert [p['relation'] for p in pairs] == [
+        RELATION_REVUP,       # 同一ベースでリビジョンが上がる
+        RELATION_DEPENDENCY,  # 同一ベースでもリビジョンが下がる → 流用
+        RELATION_DEPENDENCY,  # ベースが異なる
+        None,                 # 流用元なし（完全新規図面は台帳登録時に付与）
+    ]
+
+
+def test_build_pairs_from_list_drops_dependency_when_revup_exists_for_same_target():
+    """同じ流用先に RevUp があれば 流用 の行は採用しない（A/B の RevUp 優先と同じ）。"""
+    df = pd.DataFrame({
+        '流用元図番': ['DE5313-008-02A', 'DE9999-009-01A', 'DE9999-009-01A'],
+        '流用先図番': ['DE5313-008-02B', 'DE5313-008-02B', 'DE7777-007-01A'],
+    })
+    pairs = build_pairs_from_list(df, {})
+    assert [(p['source_drawing'], p['main_drawing'], p['relation']) for p in pairs] == [
+        ('DE5313-008-02A', 'DE5313-008-02B', RELATION_REVUP),
+        ('DE9999-009-01A', 'DE7777-007-01A', RELATION_DEPENDENCY),
+    ]

@@ -795,3 +795,25 @@ def _run_all():
 
 if __name__ == '__main__':
     sys.exit(_run_all())
+
+
+def test_legacy_pair_list_relation_is_replaced_without_changed_suffix(tmp_path):
+    """旧 Type C が書いた Relation='ペアリスト' は、RevUp/流用 へ置き換わっても
+    '-changed' を付けない。一方、RevUp→流用 など実際の関係変更は従来どおり付ける。"""
+    path = tmp_path / "uploaded_master.xlsx"
+    with pd.ExcelWriter(path, engine='xlsxwriter') as writer:
+        pd.DataFrame({'エンティティ統計': ['削除図形 総数'], 'Unnamed: 1': [0]}).to_excel(
+            writer, sheet_name='Summary', index=False)
+        pd.DataFrame({
+            'Child': ['C1', 'C2'], 'Parent': ['P1', 'P2'], 'Relation': ['ペアリスト', 'RevUp'],
+        }).to_excel(writer, sheet_name='Diff List', index=False)
+    master_df, error = load_parent_child_master(str(path))
+    assert error is None
+
+    pairs = [
+        {'main_drawing': 'C1', 'source_drawing': 'P1', 'relation': '流用', 'title': 'T', 'subtitle': 'S'},
+        {'main_drawing': 'C2', 'source_drawing': 'P2', 'relation': '流用', 'title': 'T', 'subtitle': 'S'},
+    ]
+    master_df, _ = update_parent_child_master(master_df, pairs)
+    rel = dict(zip(master_df['Child'], master_df['Relation']))
+    assert rel == {'C1': '流用', 'C2': '流用-changed'}

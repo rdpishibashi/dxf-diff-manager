@@ -496,7 +496,7 @@ def render_pair_list():
         # 統一感を持たせるため、missing_source/missing_target/missing_both の
         # 3セクションを「図面ファイルがない図番」1つにまとめた）。
         # 同じ流用先に RevUp の差分抽出可能ペアがある場合の注記は、Type C では
-        # relation が常に 'ペアリスト'（RevUpという関係自体が存在しない）ため不要。
+        # 不要（RevUp と競合する流用の行は build_pairs_from_list() が採用しないため）。
         # one_sided（流用先が空白）も、流用先のDXFファイルが無い点では実質的に
         # missing_target と同じ状況のため、本セクションに統合する（2026-06変更。
         # 旧「流用先がない流用元図面」セクションは廃止）。
