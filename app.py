@@ -31,6 +31,7 @@ from model.master_ledger import (
     create_empty_drawing_list_df,
     load_drawing_list,
     parse_master_filename,
+    master_filename_warning,
 )
 from model.diff_export import create_diff_zip, DIFF_LABELS_FILENAME
 from model.offset_detector import OffsetDetectionConfig
@@ -76,6 +77,18 @@ def compute_default_zip_basename(master_file_name, step1_mode):
     if shiban is None:
         return "dxf_diff_results"
     return f"dxf_diff_results_Type{letter}_{shiban}_{module}_{side}"
+
+
+# st.spinner は開始から 0.5 秒経ってから表示される（streamlit/elements/spinner.py の
+# DELAY_SECS）。その前に進捗用の st.empty() を作ると進捗メッセージが先に出て、
+# spinner が出た時点でその下へ動いてしまう。spinner の表示後に作るため少し待つ。
+SPINNER_APPEAR_WAIT_SEC = 0.6
+
+
+def _status_placeholder_after_spinner():
+    """spinner が表示されるのを待ってから進捗表示用の `st.empty()` を返す。"""
+    time.sleep(SPINNER_APPEAR_WAIT_SEC)
+    return st.empty()
 
 
 def read_zip_member(zip_data, member_name):
@@ -496,7 +509,7 @@ def render_pair_list():
         # 統一感を持たせるため、missing_source/missing_target/missing_both の
         # 3セクションを「図面ファイルがない図番」1つにまとめた）。
         # 同じ流用先に RevUp の差分抽出可能ペアがある場合の注記は、Type C では
-        # relation が常に 'ペアリスト'（RevUpという関係自体が存在しない）ため不要。
+        # 不要（RevUp と競合する流用の行は build_pairs_from_list() が採用しないため）。
         # one_sided（流用先が空白）も、流用先のDXFファイルが無い点では実質的に
         # missing_target と同じ状況のため、本セクションに統合する（2026-06変更。
         # 旧「流用先がない流用元図面」セクションは廃止）。
@@ -673,9 +686,10 @@ def process_all_uploaded_files(groups):
 
     if all_items:
         total_files = len(all_items)
-        start_time = time.time()
-        status_placeholder = st.empty()
         with st.spinner("ファイルを処理中..."):
+            # 進捗メッセージは spinner の下に出すため、spinner の表示後に作る
+            status_placeholder = _status_placeholder_after_spinner()
+            start_time = time.time()
             for idx, (uploaded_file, group) in enumerate(all_items, start=1):
                 extractor = group['extractor']
                 file_info = extractor(uploaded_file)
@@ -918,6 +932,9 @@ def render_step0_master():
         )
 
         if master_file is not None:
+            filename_warning = master_filename_warning(master_file.name)
+            if filename_warning:
+                st.warning(filename_warning)
             if st.session_state.master_df is None or st.session_state.get('master_file_name') != master_file.name:
                 master_df, error_message = load_parent_child_master(master_file)
                 if error_message:
@@ -931,8 +948,10 @@ def render_step0_master():
                     if dl_error:
                         st.warning(dl_error)
                     st.session_state.drawing_list_df = drawing_list_df
-                    st.success(f"記録済み親子関係（{len(master_df)}件のレコード）")
-            else:
+                    # 命名規則違反の台帳では、読み込めた旨のメッセージは出さない（警告のみ）
+                    if not filename_warning:
+                        st.success(f"記録済み親子関係（{len(master_df)}件のレコード）")
+            elif not filename_warning:
                 st.info(f"既存の親子関係に追加します（{len(st.session_state.master_df)}件のレコード）")
         else:
             if st.session_state.master_df is not None:
@@ -1288,9 +1307,9 @@ def render_step2_pairing(source_count, dest_count):
                 st.session_state.all_in_one_files_dict,
             )
         else:  # auto
-            pairing_start = time.time()
-            status_placeholder = st.empty()
             with st.spinner("図面ペア・リスト作成中..."):
+                status_placeholder = _status_placeholder_after_spinner()
+                pairing_start = time.time()
                 def pairing_progress(progress, message, count, total):
                     elapsed = time.time() - pairing_start
                     text = message
@@ -1403,8 +1422,11 @@ def render_step3_diff(complete_pairs):
         has_results = bool(st.session_state.get('results'))
         if st.button("差分抽出開始", key="start_comparison", type="primary", disabled=has_results):
             total_pairs = len(complete_pairs)
-            status_placeholder = st.empty()
             with st.spinner("差分抽出中..."):
+                # 進捗メッセージは spinner の下に出すため、st.empty() は spinner の内側で
+                # spinner の表示後に作る（他プロジェクトと同じ。_status_placeholder_after_spinner 参照）
+                status_placeholder = _status_placeholder_after_spinner()
+
                 def diff_progress(current, total, message):
                     status_placeholder.text(f"{message}（{current}/{total}組）")
 

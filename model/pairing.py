@@ -4,7 +4,7 @@
 「流用」と「RevUp」という 2 つのマッチング関係を一級概念として扱い、
 方式 A（all_in_one・単一プール）/ 方式 B（auto・流用元×流用先）を
 単一のコア関数 `build_pairs()` に統一する。方式 C（pair_list・明示ペア）は
-`build_pairs_from_list()` で別途扱う。
+`build_pairs_from_list()` で別途扱う（関係は A/B と同じ規則で分類する）。
 
 streamlit には依存しないため、`tests/` から直接ユニットテストできる。
 
@@ -22,7 +22,6 @@ from collections import defaultdict
 # --- 関係(relation) ---
 RELATION_REVUP = 'RevUp'          # 同一ベース図番・リビジョン差
 RELATION_DEPENDENCY = '流用'       # 流用元図番の完全一致
-RELATION_PAIR_LIST = 'ペアリスト'   # 明示ペアリスト（方式 C）
 
 # --- ステータス(status) ---
 STATUS_COMPLETE = 'complete'                  # 両ファイル有・差分比較対象
@@ -60,6 +59,19 @@ def extract_base_drawing_number(drawing_number):
         return drawing_number[:-1], last_char
 
     return None, None
+
+
+def classify_relation(source_drawing, target_drawing):
+    """流用元・流用先の図番だけから関係を分類する（方式 C 用。ファイルの有無は見ない）。
+
+    方式 A/B の find_revup_pairs() と同じ定義: 同一ベース図番で流用先のリビジョンが
+    流用元より新しければ RevUp、それ以外は 流用。
+    """
+    old_base, old_rev = extract_base_drawing_number(source_drawing)
+    new_base, new_rev = extract_base_drawing_number(target_drawing)
+    if old_base and old_base == new_base and new_rev > old_rev:
+        return RELATION_REVUP
+    return RELATION_DEPENDENCY
 
 
 def find_revup_pairs(source_files, target_files):
@@ -232,7 +244,7 @@ def build_pairs_from_list(pair_list_df, all_files_dict):
 
     pair_list_df の各行（流用元図番・流用先図番）について all_files_dict を参照し、
     図番の有無・ファイルの有無でステータスを決定する。RevUp の自動補完は行わず、
-    リストの内容をそのまま尊重する。
+    リストの内容を尊重する（ただし RevUp と競合する 流用 の行は A/B と同じく採用しない）。
 
     Args:
         pair_list_df: 流用元図番・流用先図番カラムを持つ DataFrame
@@ -274,7 +286,13 @@ def build_pairs_from_list(pair_list_df, all_files_dict):
             'main_file_info': target_file_info,
             'source_file_info': ref_file_info,
             'status': status,
-            'relation': RELATION_PAIR_LIST,
+            # 流用元なし（完全新規図面）は A/B の孤立パスと同じく None（台帳登録時に
+            # 「完全新規図面」へ変換される）。それ以外は図番から RevUp / 流用 に分類する。
+            'relation': (
+                classify_relation(ref_drawing, target_drawing)
+                if status != STATUS_NO_SOURCE_DEFINED and ref_drawing and target_drawing
+                else None
+            ),
             # 流用先（main_drawing）のファイルから抽出済みのタイトルを使う。
             # complete ペアは差分抽出時に extra_info から再取得して上書きするため
             # 影響しないが、完全新規図面（no_source_defined）は差分抽出を行わない
@@ -283,6 +301,14 @@ def build_pairs_from_list(pair_list_df, all_files_dict):
             'title': target_file_info.get('title') if target_file_info else None,
             'subtitle': target_file_info.get('subtitle') if target_file_info else None,
         })
+
+    # 同一の流用先に RevUp があれば 流用 の行は採用しない（方式 A/B の build_pairs() と
+    # 同じ RevUp 優先。同じ図面への二重の差分抽出を防ぐ）。
+    revup_targets = {p['main_drawing'] for p in pairs if p['relation'] == RELATION_REVUP}
+    pairs = [
+        p for p in pairs
+        if not (p['relation'] == RELATION_DEPENDENCY and p['main_drawing'] in revup_targets)
+    ]
 
     return pairs
 

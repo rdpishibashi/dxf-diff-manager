@@ -15,6 +15,9 @@ DRAWING_LIST_SHEET_NAME = "Package List"  # 旧名 "Drawing List"（2026-09 改�
 LEGACY_DRAWING_LIST_SHEET_NAMES = ("Drawing List",)
 MASTER_SHEET_NAME = "Master"  # 図面管理台帳データのシート名（旧名 "Diff List"、2026-08 改名）
 
+# 旧 Type C が Relation 列に書いていた値。現在は書かない（RevUp / 流用 に分類）。
+LEGACY_PAIR_LIST_RELATION = 'ペアリスト'
+
 # Master シートの「* Entities」列（object dtype: 整数と "n/a" 文字列が混在する）。
 # update_parent_child_master() のdtype統一・save_master_to_bytes() の列フォーマット
 # 適用の両方で使う共通定義。
@@ -55,6 +58,26 @@ def parse_master_filename(filename):
     if not match:
         return None, None, None
     return match['shiban'], match['module'], match['side']
+
+
+def master_filename_warning(filename):
+    """アップロードされた台帳のファイル名が命名規則に合わない場合の警告文を返す
+    （合っていれば None）。
+
+    命名規則に合わない台帳は、出力ZIPのファイル名（dxf_diff_results_Type{A/B/C}_
+    {指番}_{モジュール}_{サイド}）が指番入りにならず、Package List の
+    Sashiban/Module/Side も空欄になる。
+    """
+    shiban, _, _ = parse_master_filename(filename)
+    if shiban is not None:
+        return None
+    return (
+        f"台帳のファイル名「{filename}」が命名規則に一致しません。"
+        "「{指番}_{モジュール}_{サイド}.xlsx」の形式にしてください"
+        "（モジュールとサイドは未入力の場合 na。例: ME24-1001-0_ZM00_405.xlsx、"
+        "ME24-1001-0_na_na.xlsx）。このままだと出力ZIPのファイル名に指番が入らず、"
+        "Package List の Sashiban/Module/Side も空欄になります。"
+    )
 
 
 def load_parent_child_master(uploaded_file):
@@ -177,7 +200,9 @@ def update_parent_child_master(master_df, new_pairs):
                 relation_to_set = relation
                 if prev_relation_series.notna().any():
                     prev_unique = prev_relation_series.dropna().unique()
-                    if len(prev_unique) > 0 and prev_unique[0] != relation:
+                    # 旧 Type C が書いていた 'ペアリスト' からの変更は「変更」とみなさない
+                    # （現在は RevUp / 流用 に分類して記録する）
+                    if len(prev_unique) > 0 and prev_unique[0] not in (relation, LEGACY_PAIR_LIST_RELATION):
                         relation_to_set = f"{relation}-changed"
                 updated_df.loc[mask, 'Relation'] = relation_to_set
 
