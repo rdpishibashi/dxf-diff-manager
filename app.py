@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import os
 import re
 import sys
@@ -35,6 +36,7 @@ from model.master_ledger import (
 )
 from model.diff_export import create_diff_zip, DIFF_LABELS_FILENAME
 from model.offset_detector import OffsetDetectionConfig
+from model.dxf_preview import render_layers_svg, build_viewer_html
 
 # 設定をインポート
 from config import ui_config, diff_config, label_filter_config, help_text
@@ -89,6 +91,21 @@ def _status_placeholder_after_spinner():
     """spinner が表示されるのを待ってから進捗表示用の `st.empty()` を返す。"""
     time.sleep(SPINNER_APPEAR_WAIT_SEC)
     return st.empty()
+
+
+CIRCUIT_PREVIEW_HEIGHT_PX = 720
+CIRCUIT_PREVIEW_WARN_BYTES = 8 * 1024 * 1024
+
+
+@st.cache_data(show_spinner=False, max_entries=20)
+def render_circuit_preview_html(dxf_data: bytes):
+    """差分DXFのバイト列からブラウザ内プレビュー用HTMLを生成する（DXFバイト列をキーにキャッシュ）。
+
+    戻り値: (html, 日本語フォントがあるか, 描画対象が空か)
+    """
+    result = render_layers_svg(dxf_data)
+    return (build_viewer_html(result, height_px=CIRCUIT_PREVIEW_HEIGHT_PX),
+            result.cjk_font is not None, result.empty)
 
 
 def read_zip_member(zip_data, member_name):
@@ -1584,7 +1601,10 @@ def render_step3_diff(complete_pairs):
         # プレビューセクション
         # diff_labels.xlsx は zip_data 内から都度読み出す（二重保持しない）
         has_diff_labels = st.session_state.get('has_diff_labels', False)
-        preview_available = has_diff_labels or st.session_state.master_df is not None
+        successful_results = [r for r in sorted(results, key=lambda r: r['main_drawing'] or '')
+                              if r['success']]
+        preview_available = (has_diff_labels or st.session_state.master_df is not None
+                             or bool(successful_results))
 
         if preview_available:
             st.subheader("出力内容プレビュー")
@@ -1592,6 +1612,8 @@ def render_step3_diff(complete_pairs):
             preview_items = []
             if st.session_state.master_df is not None:
                 preview_items.append("図面管理台帳")
+            if successful_results:
+                preview_items.append("回路差分")
             if has_diff_labels:
                 preview_items.append("diff_labels.xlsx")
             if preview_items:
@@ -1600,6 +1622,29 @@ def render_step3_diff(complete_pairs):
             if st.session_state.master_df is not None:
                 with st.expander("図面管理台帳プレビュー", expanded=False):
                     render_preview_dataframe(st.session_state.master_df, "master_preview")
+
+            if successful_results:
+                with st.expander("回路差分プレビュー", expanded=False):
+                    st.caption("「差分抽出結果」の出力ファイルごとに、表示を ON にすると図面をブラウザ内に描画します。")
+                    for r in successful_results:
+                        out_name = r['output_filename']
+                        col_name, col_toggle = st.columns([5, 1])
+                        col_name.write(f"`{out_name}`")
+                        # key は出力ファイル名（ZIP 内で一意）
+                        if col_toggle.toggle("表示", key=f"circuit_preview_{out_name}"):
+                            dxf_data = read_zip_member(st.session_state.zip_data, out_name)
+                            if not dxf_data:
+                                st.warning(f"ZIP 内に {out_name} が見つかりません。")
+                                continue
+                            try:
+                                preview_html, has_cjk_font, is_empty = render_circuit_preview_html(dxf_data)
+                                if not has_cjk_font and not is_empty:
+                                    st.caption("⚠️ 日本語フォントが見つからないため、日本語の文字はプレビューに表示されません（ダウンロードしたDXFには影響しません）。")
+                                if len(preview_html) > CIRCUIT_PREVIEW_WARN_BYTES:
+                                    st.caption(f"⚠️ 図面が大きいため表示に時間がかかる場合があります（約 {len(preview_html) / 1024 / 1024:.0f}MB）。")
+                                components.html(preview_html, height=CIRCUIT_PREVIEW_HEIGHT_PX)
+                            except Exception as e:
+                                st.warning(f"プレビューを表示できませんでした: {e}")
 
             if has_diff_labels:
                 # 「一度開いたら開いたままにする」は、シート選択(selectbox)の変更という
@@ -1765,6 +1810,9 @@ def render_step3_diff(complete_pairs):
 
             # ファイルアップロード入力をクリアするためにキーをインクリメント
             st.session_state.uploader_key += 1
+
+            for key in [k for k in st.session_state.keys() if str(k).startswith('circuit_preview_')]:
+                del st.session_state[key]
 
             # ガベージコレクションを実行してメモリを解放
             gc.collect()
