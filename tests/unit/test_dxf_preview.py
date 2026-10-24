@@ -15,7 +15,7 @@ import ezdxf
 import pytest
 
 from model import dxf_preview
-from model.dxf_preview import PREVIEW_LAYERS, build_viewer_html, render_layers_svg
+from model.dxf_preview import PREVIEW_LAYERS, build_viewer_html, render_drawing_svg, render_layers_svg
 
 ALL_LAYERS = [name for name, _, _ in PREVIEW_LAYERS]
 
@@ -130,3 +130,73 @@ def test_japanese_mtext_is_drawn_when_cjk_font_available():
     without = render_layers_svg(_make_dxf(["UNCHANGED"]))
     unchanged = lambda r: next(l for l in r.layers if l.name == "UNCHANGED")
     assert len(unchanged(with_text).inner_svg) > len(unchanged(without).inner_svg)
+
+
+# ---------------------------------------------------------------------------
+# 他図面の表示（render_drawing_svg / build_viewer_html(layer_panel=False)）と全画面ボタン
+# ---------------------------------------------------------------------------
+
+def _make_plain_dxf(hidden_layer=None, frozen_layer=None):
+    """可視の線1本（画層 VISIBLE）と、非表示（off/frozen）の画層の線を持つ普通の DXF。"""
+    doc = ezdxf.new("R2010")
+    doc.layers.add("VISIBLE", color=1)
+    doc.modelspace().add_line((0, 0), (10, 10), dxfattribs={"layer": "VISIBLE"})
+    for name, mode in ((hidden_layer, "off"), (frozen_layer, "freeze")):
+        if name:
+            layer = doc.layers.add(name)
+            doc.modelspace().add_line((1000, 1000), (2000, 2000), dxfattribs={"layer": name})
+            getattr(layer, mode)()
+    buf = io.StringIO()
+    doc.write(buf)
+    return buf.getvalue().encode("utf-8")
+
+
+def test_render_drawing_svg_single_layer_with_own_class_prefix():
+    """他図面は1枚の SVG（data-layer="DRAWING"）になり、クラス名は D0C 接頭辞を持つ。"""
+    result = render_drawing_svg(_make_plain_dxf())
+    assert not result.empty
+    assert [layer.name for layer in result.layers] == ["DRAWING"]
+    assert result.layers[0].count == 1
+    assert 'data-layer="DRAWING"' in result.layers[0].inner_svg
+    classes = set(re.findall(r'class="(\w+)"', result.layers[0].inner_svg)) - {"layer"}
+    assert classes and all(c.startswith("D0C") for c in classes)
+    assert result.view_box[0] > 0 and result.view_box[1] > 0
+
+
+def test_render_drawing_svg_skips_off_and_frozen_layers():
+    """DXF 上で非表示（off/frozen）の画層は描かれない（描かれると描画範囲が遠方まで広がる）。"""
+    plain = render_drawing_svg(_make_plain_dxf())
+    hidden = render_drawing_svg(_make_plain_dxf(hidden_layer="HID", frozen_layer="FRZ"))
+    assert hidden.view_box == plain.view_box
+
+
+def test_render_drawing_svg_empty_dxf_is_empty():
+    """エンティティが無い DXF は empty で、viewer は『描画対象のエンティティがありません』になる。"""
+    result = render_drawing_svg(_make_dxf([]))
+    assert result.empty
+    assert "描画対象のエンティティがありません" in build_viewer_html(result, layer_panel=False)
+
+
+def test_render_drawing_svg_does_not_modify_input_bytes():
+    """他図面の描画でも、元の DXF バイト列は変更しない。"""
+    data = _make_plain_dxf()
+    before = bytes(data)
+    render_drawing_svg(data)
+    assert data == before
+
+
+def test_layer_panel_false_has_only_operations():
+    """layer_panel=False の左パネルは操作（全体表示・全画面）だけで、プリセットとレイヤー一覧を出さない。"""
+    html_text = build_viewer_html(render_drawing_svg(_make_plain_dxf()), layer_panel=False)
+    assert "<button data-preset" not in html_text and "data-layer=\"DRAWING\"" in html_text
+    assert "<input" not in html_text
+    assert 'id="fit"' in html_text and 'id="fs"' in html_text
+    assert "ホイール" in html_text
+
+
+def test_layer_panel_true_keeps_layers_and_has_fullscreen():
+    """既定（layer_panel=True）は従来どおりプリセット・レイヤー一覧を持ち、全画面ボタンも持つ。"""
+    html_text = build_viewer_html(render_layers_svg(_make_dxf(ALL_LAYERS)))
+    assert "<button data-preset" in html_text and "<input" in html_text
+    assert 'id="fit"' in html_text and 'id="fs"' in html_text
+    assert "#wrap:fullscreen{height:100vh !important}" in html_text
