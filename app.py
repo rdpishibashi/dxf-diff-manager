@@ -36,7 +36,7 @@ from model.master_ledger import (
 )
 from model.diff_export import create_diff_zip, DIFF_LABELS_FILENAME
 from model.offset_detector import OffsetDetectionConfig
-from model.dxf_preview import render_layers_svg, build_viewer_html
+from model.dxf_preview import render_layers_svg, render_drawing_svg, build_viewer_html
 
 # 設定をインポート
 from config import ui_config, diff_config, label_filter_config, help_text
@@ -106,6 +106,55 @@ def render_circuit_preview_html(dxf_data: bytes):
     result = render_layers_svg(dxf_data)
     return (build_viewer_html(result, height_px=CIRCUIT_PREVIEW_HEIGHT_PX),
             result.cjk_font is not None, result.empty)
+
+
+@st.cache_data(show_spinner=False, max_entries=20)
+def render_other_drawing_html(dxf_data: bytes):
+    """「他図面の表示」でアップロードされた DXF のバイト列から viewer HTML を生成する（バイト列をキーにキャッシュ）。
+
+    左パネルは操作のみ（レイヤー一覧なし）。戻り値は `render_circuit_preview_html` と同じ形。
+    """
+    result = render_drawing_svg(dxf_data)
+    return (build_viewer_html(result, height_px=CIRCUIT_PREVIEW_HEIGHT_PX, layer_panel=False),
+            result.cjk_font is not None, result.empty)
+
+
+def md_plain(text):
+    """ファイル名を Markdown の特殊文字として解釈させないためのエスケープ。"""
+    return re.sub(r'([\\`*_~\[\]<>|$])', r'\\\1', text)
+
+
+def show_preview_html(preview):
+    """viewer HTML（`render_*_html` の戻り値）を表示する。注意書き（日本語フォント・大きい図面）付き。"""
+    preview_html, has_cjk_font, is_empty = preview
+    if not has_cjk_font and not is_empty:
+        st.caption("⚠️ 日本語フォントが見つからないため、日本語の文字はプレビューに表示されません（ダウンロードしたDXFには影響しません）。")
+    if len(preview_html) > CIRCUIT_PREVIEW_WARN_BYTES:
+        st.caption(f"⚠️ 図面が大きいため表示に時間がかかる場合があります（約 {len(preview_html) / 1024 / 1024:.0f}MB）。")
+    components.html(preview_html, height=CIRCUIT_PREVIEW_HEIGHT_PX)
+
+
+def render_other_drawing_controls(out_name):
+    """回路差分 viewer の「他図面の表示」。戻り値は (配置, アップロードされた DXF のバイト列 or None)。
+
+    トグルが OFF のときは (None, None)。リセットは uploader のキーの世代を進めて作り直す
+    （アップロード済みのファイルを外し、別のファイルを選べるようにする）。
+    キーはすべて `circuit_preview_` で始め、「新しい差分抽出を開始」で消える。
+    """
+    if not st.toggle("他図面の表示", key=f"circuit_preview_other_{out_name}"):
+        return None, None
+    position = st.radio("配置", ["右", "下", "左"], horizontal=True,
+                        key=f"circuit_preview_other_pos_{out_name}")
+    gen_key = f"circuit_preview_other_gen_{out_name}"
+    col_upload, col_reset = st.columns([5, 1], vertical_alignment="bottom")
+    uploaded = col_upload.file_uploader(
+        "表示する DXF ファイル（ドラッグ＆ドロップ または Browse）", type=["dxf"],
+        key=f"circuit_preview_other_file_{out_name}_{st.session_state.get(gen_key, 0)}")
+    if col_reset.button("リセット", key=f"circuit_preview_other_reset_{out_name}",
+                        disabled=uploaded is None):
+        st.session_state[gen_key] = st.session_state.get(gen_key, 0) + 1
+        st.rerun()
+    return position, uploaded
 
 
 def read_zip_member(zip_data, member_name):
@@ -1625,26 +1674,41 @@ def render_step3_diff(complete_pairs):
 
             if successful_results:
                 with st.expander("回路差分プレビュー", expanded=False):
-                    st.caption("「差分抽出結果」の出力ファイルごとに、表示を ON にすると図面をブラウザ内に描画します。")
+                    st.caption("「差分抽出結果」の出力ファイルごとに、表示を ON にすると図面をブラウザ内に描画します。「他図面の表示」で別の DXF を並べて表示することもできます。")
                     for r in successful_results:
                         out_name = r['output_filename']
-                        col_name, col_toggle = st.columns([5, 1])
-                        col_name.write(f"`{out_name}`")
+                        col_name, col_toggle = st.columns([5, 1], vertical_alignment="center")
+                        col_name.markdown(md_plain(out_name))
                         # key は出力ファイル名（ZIP 内で一意）
                         if col_toggle.toggle("表示", key=f"circuit_preview_{out_name}"):
                             dxf_data = read_zip_member(st.session_state.zip_data, out_name)
                             if not dxf_data:
                                 st.warning(f"ZIP 内に {out_name} が見つかりません。")
                                 continue
+                            position, other_file = render_other_drawing_controls(out_name)
+                            panels = []  # (ファイル名, 描画関数) を表示順に並べる
                             try:
-                                preview_html, has_cjk_font, is_empty = render_circuit_preview_html(dxf_data)
-                                if not has_cjk_font and not is_empty:
-                                    st.caption("⚠️ 日本語フォントが見つからないため、日本語の文字はプレビューに表示されません（ダウンロードしたDXFには影響しません）。")
-                                if len(preview_html) > CIRCUIT_PREVIEW_WARN_BYTES:
-                                    st.caption(f"⚠️ 図面が大きいため表示に時間がかかる場合があります（約 {len(preview_html) / 1024 / 1024:.0f}MB）。")
-                                components.html(preview_html, height=CIRCUIT_PREVIEW_HEIGHT_PX)
+                                circuit = render_circuit_preview_html(dxf_data)
+                                panels.append((out_name, circuit))
                             except Exception as e:
                                 st.warning(f"プレビューを表示できませんでした: {e}")
+                            if other_file is not None:
+                                try:
+                                    other = render_other_drawing_html(other_file.getvalue())
+                                    panels.insert(0 if position == "左" else len(panels),
+                                                  (other_file.name, other))
+                                except Exception as e:
+                                    st.warning(f"他図面を表示できませんでした: {e}")
+                            if len(panels) == 2 and position in ("右", "左"):
+                                for col, (name, preview) in zip(st.columns(2), panels):
+                                    with col:
+                                        st.markdown(md_plain(name))
+                                        show_preview_html(preview)
+                            else:
+                                for name, preview in panels:
+                                    if len(panels) == 2:
+                                        st.markdown(md_plain(name))
+                                    show_preview_html(preview)
 
             if has_diff_labels:
                 # 「一度開いたら開いたままにする」は、シート選択(selectbox)の変更という
