@@ -37,10 +37,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from model.extract_labels import extract_labels
 from model.label_diff import compute_label_differences
 
-SAMPLE_DXF = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    'sample-dxf', 'problems', 'DE3527-553-10E.dxf',
-)
+_SAMPLE_POOL = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'sample-dxf')
+
+
+def _find_sample(name):
+    """sample-dxf 配下をファイル名で再帰探索する（フォルダは決め打ちしない。
+    curated の problems を先に見て、あとは名前順。見つからなければ AssertionError）。"""
+    for sub in ('problems', 'samples', 'terminal-detector', 'viewer-error'):
+        path = os.path.join(_SAMPLE_POOL, sub, name)
+        if os.path.exists(path):
+            return path
+    for dirpath, dirnames, filenames in os.walk(_SAMPLE_POOL):
+        dirnames.sort()
+        if name in filenames:
+            return os.path.join(dirpath, name)
+    raise AssertionError(f'{name} が {_SAMPLE_POOL} 配下（再帰）に無い（データ欠落）')
+
+
+SAMPLE_DXF = _find_sample('DE3527-553-10E.dxf')
 
 EXPECTED_TITLE = 'ELECTRICAL SCHEMATIC DIAGRAM'
 EXPECTED_SUBTITLE = 'ＩＮＰＵＴ ＬＡ／ＬＢ'  # ラベル間は半角スペースで連結される（' '.join）
