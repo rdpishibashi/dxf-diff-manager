@@ -105,7 +105,7 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
             比較は移動の吸収を最初から内包しているため）。
         offset_detection: 差分DXFのオフセット補正（変更がなく平行移動した一定の
             図形グループを「変化なし」と判定する機能）の自動検出設定
-            （`utils.offset_detector.OffsetDetectionConfig`。None なら無効。
+            （`model.offset_detector.OffsetDetectionConfig`。None なら無効。
             Step4「オフセット補正を行う」チェックボックスから渡される。
             2026-09-18新設、DXF-visual-diffから移植）。
             compare_dxf_files_and_generate_dxf() にそのまま渡す——完全新規図面
