@@ -131,7 +131,10 @@ def show_preview_html(preview):
         st.caption("⚠️ 日本語フォントが見つからないため、日本語の文字はプレビューに表示されません（ダウンロードしたDXFには影響しません）。")
     if len(preview_html) > CIRCUIT_PREVIEW_WARN_BYTES:
         st.caption(f"⚠️ 図面が大きいため表示に時間がかかる場合があります（約 {len(preview_html) / 1024 / 1024:.0f}MB）。")
-    components.html(preview_html, height=CIRCUIT_PREVIEW_HEIGHT_PX)
+    if hasattr(st, "iframe"):  # components.v1.html は廃止予定（st.iframe は新しい Streamlit のみ）
+        st.iframe(preview_html, height=CIRCUIT_PREVIEW_HEIGHT_PX)
+    else:
+        components.html(preview_html, height=CIRCUIT_PREVIEW_HEIGHT_PX)
 
 
 def render_other_drawing_controls(out_name):
