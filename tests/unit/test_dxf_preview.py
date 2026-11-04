@@ -186,17 +186,17 @@ def test_render_drawing_svg_does_not_modify_input_bytes():
 
 
 def test_layer_panel_false_has_only_operations():
-    """layer_panel=False の左パネルは操作（全体表示・全画面）だけで、プリセットとレイヤー一覧を出さない。"""
+    """layer_panel=False の左パネルは操作（全体表示・全画面・別ウィンドウ）だけで、プリセットとレイヤー一覧を出さない。"""
     html_text = build_viewer_html(render_drawing_svg(_make_plain_dxf()), layer_panel=False)
     assert "<button data-preset" not in html_text and "data-layer=\"DRAWING\"" in html_text
     assert "<input" not in html_text
-    assert 'id="fit"' in html_text and 'id="fs"' in html_text
+    assert 'id="fit"' in html_text and 'id="fs"' in html_text and 'id="pop"' in html_text
     assert "ホイール" in html_text
 
 
 def test_layer_panel_true_keeps_layers_and_has_fullscreen():
-    """既定（layer_panel=True）は従来どおりプリセット・レイヤー一覧を持ち、全画面ボタンも持つ。"""
+    """既定（layer_panel=True）は従来どおりプリセット・レイヤー一覧を持ち、全画面・別ウィンドウボタンも持つ。"""
     html_text = build_viewer_html(render_layers_svg(_make_dxf(ALL_LAYERS)))
     assert "<button data-preset" in html_text and "<input" in html_text
-    assert 'id="fit"' in html_text and 'id="fs"' in html_text
+    assert 'id="fit"' in html_text and 'id="fs"' in html_text and 'id="pop"' in html_text
     assert "#wrap:fullscreen{height:100vh !important}" in html_text
