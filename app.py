@@ -37,6 +37,8 @@ from model.master_ledger import (
 from model.diff_export import create_diff_zip, DIFF_LABELS_FILENAME
 from model.offset_detector import OffsetDetectionConfig
 from model.dxf_preview import render_layers_svg, render_drawing_svg, build_viewer_html
+from model.pdf_preview import render_pdf_svg, build_pdf_viewer_html, DEFAULT_MAX_PAGES
+from model.reference_drawings import detect_drawing_format, build_download_zip
 
 # 設定をインポート
 from config import ui_config, diff_config, label_filter_config, help_text
@@ -108,15 +110,23 @@ def render_circuit_preview_html(dxf_data: bytes):
             result.cjk_font is not None, result.empty)
 
 
-@st.cache_data(show_spinner=False, max_entries=20)
-def render_other_drawing_html(dxf_data: bytes):
-    """「他図面の表示」でアップロードされた DXF のバイト列から viewer HTML を生成する（バイト列をキーにキャッシュ）。
+# 件数を絞る理由: PDF は1ページ約1MBで、20ページなら1件約20MB。切り替えて見ている図面だけを残す（メモリ節約）
+@st.cache_data(show_spinner=False, max_entries=3)
+def render_reference_html(data: bytes, fmt: str):
+    """「他図面の表示」の図面（DXF または PDF のバイト列）から viewer HTML を生成する（バイト列をキーにキャッシュ）。
 
-    左パネルは操作のみ（レイヤー一覧なし）。戻り値は `render_circuit_preview_html` と同じ形。
+    左パネルは操作のみ（レイヤー一覧なし）。戻り値は ((html, 日本語フォントがあるか, 描画対象が空か), 注意書き or None)。
+    PDF は画像で描くので日本語フォントの警告は出さない。
     """
-    result = render_drawing_svg(dxf_data)
+    if fmt == "pdf":
+        result, total_pages = render_pdf_svg(data)
+        notice = (f"PDF は {total_pages} ページあります。先頭 {DEFAULT_MAX_PAGES} ページだけを表示しています。"
+                  if total_pages > DEFAULT_MAX_PAGES else None)
+        # PDF は画像で描くのでフォントは不要。viewer が result.cjk_font=None のときに左パネルへ出す注意書きを消す
+        return (build_pdf_viewer_html(result, height_px=CIRCUIT_PREVIEW_HEIGHT_PX), True, result.empty), notice
+    result = render_drawing_svg(data)
     return (build_viewer_html(result, height_px=CIRCUIT_PREVIEW_HEIGHT_PX, layer_panel=False),
-            result.cjk_font is not None, result.empty)
+            result.cjk_font is not None, result.empty), None
 
 
 def md_plain(text):
@@ -137,27 +147,88 @@ def show_preview_html(preview):
         components.html(preview_html, height=CIRCUIT_PREVIEW_HEIGHT_PX)
 
 
-def render_other_drawing_controls(out_name):
-    """回路差分 viewer の「他図面の表示」。戻り値は (配置, アップロードされた DXF のバイト列 or None)。
+def reference_store_key(out_name):
+    return f"circuit_preview_refs_{out_name}"
 
-    トグルが OFF のときは (None, None)。リセットは uploader のキーの世代を進めて作り直す
-    （アップロード済みのファイルを外し、別のファイルを選べるようにする）。
+
+def get_reference_store(out_name):
+    """出力ファイルの参照図面（「他図面の表示」で入れた図面）。[(ファイル名, bytes, 形式, file_id)]。
+
+    「表示」「他図面の表示」を OFF にしても残り、「リセット」か「新しい差分抽出を開始」でだけ消える
+    （uploader はトグル OFF で中身が消えるため、バイト列をここに保持する）。ZIP にはこの全件が入る。
+    """
+    return st.session_state.get(reference_store_key(out_name), [])
+
+
+def render_other_drawing_controls(out_name):
+    """回路差分 viewer の「他図面の表示」。戻り値は (配置, 参照図面 [(ファイル名, bytes, 形式, file_id)], 切替で選ばれた図面名)。
+
+    トグルが OFF のときは (None, 保持済みの図面, None)。DXF と PDF を混ぜて何枚でもアップロードでき、
+    形式は内容と拡張子から自動で判定する（`type=` は指定しない: フォルダ D&D の再帰読み込みが壊れるため）。
+    アップロードした図面は取り込み後、uploader を作り直して空にし、バイト列は session_state にだけ保持する（上記。二重保持しない）。
+    非対応の形式・同名の2つ目は除外し、名前を画面に出す。配置が右・左のときは、表示する1枚を
+    segmented_control で切り替える（下のときは全部を縦に並べるので切替は出さない）。
+    リセットは保持した図面を消し、uploader のキーの世代を進めて作り直す。
     キーはすべて `circuit_preview_` で始め、「新しい差分抽出を開始」で消える。
     """
+    store_key = reference_store_key(out_name)
     if not st.toggle("他図面の表示", key=f"circuit_preview_other_{out_name}"):
-        return None, None
+        return None, get_reference_store(out_name), None
     position = st.radio("配置", ["右", "下", "左"], horizontal=True,
                         key=f"circuit_preview_other_pos_{out_name}")
     gen_key = f"circuit_preview_other_gen_{out_name}"
+    notice_key = f"circuit_preview_other_notice_{out_name}"
+    stored = list(st.session_state.get(store_key, []))
     col_upload, col_reset = st.columns([5, 1], vertical_alignment="bottom")
     uploaded = col_upload.file_uploader(
-        "表示する DXF ファイル（ドラッグ＆ドロップ または Browse）", type=["dxf"],
+        "追加する図面（DXF・PDF。複数可。ドラッグ＆ドロップ または Browse）", accept_multiple_files=True,
         key=f"circuit_preview_other_file_{out_name}_{st.session_state.get(gen_key, 0)}")
     if col_reset.button("リセット", key=f"circuit_preview_other_reset_{out_name}",
-                        disabled=uploaded is None):
+                        disabled=not (uploaded or stored)):
+        st.session_state.pop(store_key, None)
+        st.session_state.pop(notice_key, None)
         st.session_state[gen_key] = st.session_state.get(gen_key, 0) + 1
         st.rerun()
-    return position, uploaded
+
+    if uploaded:
+        # 取り込んだら図面は保持側（store）だけに置き、uploader は作り直して空にする
+        # （uploader が原本を持ち続けると同じ図面がメモリに二重に載るため）
+        names = {r[0] for r in stored}
+        unsupported, duplicated = [], []
+        for f in uploaded:
+            data = f.getvalue()
+            fmt = detect_drawing_format(f.name, data)
+            if fmt is None:
+                unsupported.append(f.name)
+            elif f.name in names:
+                duplicated.append(f.name)
+            else:
+                names.add(f.name)
+                stored.append((f.name, data, fmt, f.file_id))
+        st.session_state[store_key] = stored
+        st.session_state[notice_key] = (unsupported, duplicated)  # 作り直し後の画面に出す
+        st.session_state[gen_key] = st.session_state.get(gen_key, 0) + 1
+        st.rerun()
+
+    unsupported, duplicated = st.session_state.get(notice_key, ([], []))
+    if unsupported:
+        st.caption("⚠️ 表示できない形式のため除外: " + ", ".join(unsupported))
+    if duplicated:
+        st.caption("⚠️ 同じファイル名のため除外（先のものだけ使います）: " + ", ".join(duplicated))
+    if stored:
+        st.caption(f"保持している他図面: {len(stored)} 件（表示を OFF にしても残り、ZIP に入ります。"
+                   "消すのは「リセット」のときだけです）")
+
+    selected = None
+    if stored and position != "下":
+        sel_names = [r[0] for r in stored]
+        sel_key = f"circuit_preview_other_sel_{out_name}"
+        if st.session_state.get(sel_key) not in sel_names:  # ウィジェット生成前に直す（未選択・図面の増減）
+            st.session_state[sel_key] = sel_names[0]
+        if len(sel_names) > 1:
+            st.segmented_control("表示する他図面", sel_names, key=sel_key)
+        selected = st.session_state.get(sel_key) or sel_names[0]
+    return position, stored, selected
 
 
 def read_zip_member(zip_data, member_name):
@@ -1658,6 +1729,10 @@ def render_step3_diff(complete_pairs):
         preview_available = (has_diff_labels or st.session_state.master_df is not None
                              or bool(successful_results))
 
+        # 参照図面（保持している他図面）。表示・他図面の表示トグルの ON/OFF に関わらず ZIP に入る
+        ref_files_by_output = {r['output_filename']: get_reference_store(r['output_filename'])
+                               for r in successful_results if get_reference_store(r['output_filename'])}
+
         if preview_available:
             st.subheader("出力内容プレビュー")
 
@@ -1677,7 +1752,7 @@ def render_step3_diff(complete_pairs):
 
             if successful_results:
                 with st.expander("回路差分プレビュー", expanded=False):
-                    st.caption("「差分抽出結果」の出力ファイルごとに、表示を ON にすると図面をブラウザ内に描画します。「他図面の表示」で別の DXF を並べて表示することもできます。")
+                    st.caption("「差分抽出結果」の出力ファイルごとに、表示を ON にすると図面をブラウザ内に描画します。「他図面の表示」で別の図面（DXF・PDF、何枚でも）を並べて表示することもできます。入れた図面は、表示を OFF にしても保持され、ダウンロードする ZIP に参照図面として入ります（消すのは各出力の「リセット」のときだけです）。")
                     for r in successful_results:
                         out_name = r['output_filename']
                         col_name, col_toggle = st.columns([5, 1], vertical_alignment="center")
@@ -1688,30 +1763,45 @@ def render_step3_diff(complete_pairs):
                             if not dxf_data:
                                 st.warning(f"ZIP 内に {out_name} が見つかりません。")
                                 continue
-                            position, other_file = render_other_drawing_controls(out_name)
-                            panels = []  # (ファイル名, 描画関数) を表示順に並べる
+                            position, refs, selected = render_other_drawing_controls(out_name)
+                            circuit = None
                             try:
                                 circuit = render_circuit_preview_html(dxf_data)
-                                panels.append((out_name, circuit))
                             except Exception as e:
                                 st.warning(f"プレビューを表示できませんでした: {e}")
-                            if other_file is not None:
+                            # 右・左: 選ばれた1枚だけ。下: 全部を縦に並べる
+                            # トグル OFF（position が None）のときは他図面を描かない
+                            shown = [] if position is None else (
+                                refs if position == "下" else [r for r in refs if r[0] == selected])
+                            others = []  # (ファイル名, preview, 注意書き)
+                            for name, data, fmt, _ in shown:
                                 try:
-                                    other = render_other_drawing_html(other_file.getvalue())
-                                    panels.insert(0 if position == "左" else len(panels),
-                                                  (other_file.name, other))
+                                    preview, notice = render_reference_html(data, fmt)
+                                    others.append((name, preview, notice))
                                 except Exception as e:
-                                    st.warning(f"他図面を表示できませんでした: {e}")
-                            if len(panels) == 2 and position in ("右", "左"):
-                                for col, (name, preview) in zip(st.columns(2), panels):
+                                    st.warning(f"他図面 {name} を表示できませんでした: {e}")
+
+                            def show_panel(name, preview, notice=None):
+                                st.markdown(md_plain(name))
+                                if notice:
+                                    st.caption("⚠️ " + notice)
+                                show_preview_html(preview)
+
+                            if not others:
+                                if circuit is not None:
+                                    show_preview_html(circuit)
+                            elif position in ("右", "左") and circuit is not None:
+                                panels = [(out_name, circuit, None), others[0]]
+                                if position == "左":
+                                    panels.reverse()
+                                for col, panel in zip(st.columns(2), panels):
                                     with col:
-                                        st.markdown(md_plain(name))
-                                        show_preview_html(preview)
+                                        show_panel(*panel)
                             else:
-                                for name, preview in panels:
-                                    if len(panels) == 2:
-                                        st.markdown(md_plain(name))
-                                    show_preview_html(preview)
+                                if circuit is not None:
+                                    show_panel(out_name, circuit)
+                                for panel in others:
+                                    show_panel(*panel)
 
             if has_diff_labels:
                 # 「一度開いたら開いたままにする」は、シート選択(selectbox)の変更という
@@ -1800,9 +1890,21 @@ def render_step3_diff(complete_pairs):
             # ダウンロードできてしまう余地を無くすため、グレーアウトではなく非表示を
             # 選んだ。確定済みになったら逆に「ファイル名を確定」を非表示にし、
             # 「ZIPでダウンロード」を青色で表示する。
+            # 参照図面（「他図面の表示」で表示した図面）。確定時の組と違えば確定をやり直す
+            # （ZIP は確定時に作るため、確定後に参照図面を変えたまま古い ZIP を渡さない）。
+            ref_signature = tuple(sorted(
+                (out, ref[3], ref[0]) for out, refs in ref_files_by_output.items() for ref in refs))
+            if ref_signature:
+                st.caption(
+                    f"ZIP に含める参照図面: {len(ref_signature)} 件（回路差分ファイル名のフォルダに保存し、"
+                    "diff_labels.xlsx の Summary「参照図面」列に記載します）")
+                for out, refs in ref_files_by_output.items():
+                    st.caption(f"　{md_plain(out)} → " + ", ".join(md_plain(ref[0]) for ref in refs))
+
             needs_confirmation = (
                 st.session_state.zip_basename_confirmed is None
                 or (st.session_state.zip_basename_input or '') != st.session_state.zip_basename_confirmed
+                or st.session_state.get('zip_confirmed_ref_signature', ()) != ref_signature
             )
 
             if needs_confirmation:
@@ -1810,13 +1912,23 @@ def render_step3_diff(complete_pairs):
                     st.session_state.zip_basename_confirmed = (
                         (st.session_state.zip_basename_input or '').strip() or default_zip_basename
                     )
+                    # 参照図面があるときだけ、確定時に ZIP を作り直す（無ければ Step 4 の zip_data をそのまま使う）
+                    refs_map = {out: [(ref[0], ref[1]) for ref in refs]
+                                for out, refs in ref_files_by_output.items()}
+                    if refs_map:
+                        st.session_state.final_zip_data = build_download_zip(
+                            st.session_state.zip_data, refs_map, DIFF_LABELS_FILENAME)
+                    else:
+                        st.session_state.pop('final_zip_data', None)
+                    st.session_state.zip_confirmed_ref_signature = ref_signature
+                    st.session_state.downloaded = False
                     st.rerun()  # ボタン表示をこの場で「ZIPでダウンロード」側に切り替えるため
                 st.caption("「ファイル名を確定」を押すと、上記の内容でダウンロードできるようになります。")
             else:
                 downloaded = st.session_state.get('downloaded', False)
                 st.download_button(
                     label="ZIPでダウンロード",
-                    data=st.session_state.zip_data,
+                    data=st.session_state.get('final_zip_data') or st.session_state.zip_data,
                     file_name=f"{st.session_state.zip_basename_confirmed}.zip",
                     mime="application/zip",
                     key="download_zip",
@@ -1867,7 +1979,7 @@ def render_step3_diff(complete_pairs):
                         'all_upload_failures', 'all_upload_summary',
                         'all_in_one_files_dict', 'all_in_one_upload_key',
                         'all_in_one_upload_failures', 'all_in_one_upload_summary',
-                        'results', 'zip_data', 'processing_settings',
+                        'results', 'zip_data', 'final_zip_data', 'zip_confirmed_ref_signature', 'processing_settings',
                         'master_df', 'drawing_list_df', 'master_file_name', 'added_relationships_count',
                         'has_diff_labels',
                         'diff_preview_expanded',
