@@ -110,7 +110,8 @@ def render_circuit_preview_html(dxf_data: bytes):
             result.cjk_font is not None, result.empty)
 
 
-@st.cache_data(show_spinner=False, max_entries=10)
+# 件数を絞る理由: PDF は1ページ約1MBで、20ページなら1件約20MB。切り替えて見ている図面だけを残す（メモリ節約）
+@st.cache_data(show_spinner=False, max_entries=3)
 def render_reference_html(data: bytes, fmt: str):
     """「他図面の表示」の図面（DXF または PDF のバイト列）から viewer HTML を生成する（バイト列をキーにキャッシュ）。
 
@@ -164,7 +165,7 @@ def render_other_drawing_controls(out_name):
 
     トグルが OFF のときは (None, 保持済みの図面, None)。DXF と PDF を混ぜて何枚でもアップロードでき、
     形式は内容と拡張子から自動で判定する（`type=` は指定しない: フォルダ D&D の再帰読み込みが壊れるため）。
-    アップロードした図面は uploader とは別にバイト列を session_state に保持する（上記）。
+    アップロードした図面は取り込み後、uploader を作り直して空にし、バイト列は session_state にだけ保持する（上記。二重保持しない）。
     非対応の形式・同名の2つ目は除外し、名前を画面に出す。配置が右・左のときは、表示する1枚を
     segmented_control で切り替える（下のときは全部を縦に並べるので切替は出さない）。
     リセットは保持した図面を消し、uploader のキーの世代を進めて作り直す。
@@ -176,31 +177,40 @@ def render_other_drawing_controls(out_name):
     position = st.radio("配置", ["右", "下", "左"], horizontal=True,
                         key=f"circuit_preview_other_pos_{out_name}")
     gen_key = f"circuit_preview_other_gen_{out_name}"
+    notice_key = f"circuit_preview_other_notice_{out_name}"
     stored = list(st.session_state.get(store_key, []))
     col_upload, col_reset = st.columns([5, 1], vertical_alignment="bottom")
     uploaded = col_upload.file_uploader(
-        "表示する図面（DXF・PDF。複数可。ドラッグ＆ドロップ または Browse）", accept_multiple_files=True,
+        "追加する図面（DXF・PDF。複数可。ドラッグ＆ドロップ または Browse）", accept_multiple_files=True,
         key=f"circuit_preview_other_file_{out_name}_{st.session_state.get(gen_key, 0)}")
     if col_reset.button("リセット", key=f"circuit_preview_other_reset_{out_name}",
                         disabled=not (uploaded or stored)):
         st.session_state.pop(store_key, None)
+        st.session_state.pop(notice_key, None)
         st.session_state[gen_key] = st.session_state.get(gen_key, 0) + 1
         st.rerun()
 
-    names = {r[0] for r in stored}
-    unsupported, duplicated = [], []
-    for f in uploaded or []:
-        data = f.getvalue()
-        fmt = detect_drawing_format(f.name, data)
-        if fmt is None:
-            unsupported.append(f.name)
-        elif f.name in names:
-            if not any(r[3] == f.file_id for r in stored):  # 保持済みと別のファイルが同名
+    if uploaded:
+        # 取り込んだら図面は保持側（store）だけに置き、uploader は作り直して空にする
+        # （uploader が原本を持ち続けると同じ図面がメモリに二重に載るため）
+        names = {r[0] for r in stored}
+        unsupported, duplicated = [], []
+        for f in uploaded:
+            data = f.getvalue()
+            fmt = detect_drawing_format(f.name, data)
+            if fmt is None:
+                unsupported.append(f.name)
+            elif f.name in names:
                 duplicated.append(f.name)
-        else:
-            names.add(f.name)
-            stored.append((f.name, data, fmt, f.file_id))
-    st.session_state[store_key] = stored
+            else:
+                names.add(f.name)
+                stored.append((f.name, data, fmt, f.file_id))
+        st.session_state[store_key] = stored
+        st.session_state[notice_key] = (unsupported, duplicated)  # 作り直し後の画面に出す
+        st.session_state[gen_key] = st.session_state.get(gen_key, 0) + 1
+        st.rerun()
+
+    unsupported, duplicated = st.session_state.get(notice_key, ([], []))
     if unsupported:
         st.caption("⚠️ 表示できない形式のため除外: " + ", ".join(unsupported))
     if duplicated:
