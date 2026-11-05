@@ -37,3 +37,13 @@ def test_viewer_has_no_external_references():
 def test_broken_bytes_raise_value_error():
     with pytest.raises(ValueError):
         render_pdf_svg(b"not a pdf")
+
+
+def test_pdf_viewer_has_no_font_warning_but_dxf_viewer_without_font_does():
+    """PDF は画像なので「日本語フォントが見つからない」注意書きを出さない（DXF の viewer は出す）。"""
+    from model.dxf_preview import build_viewer_html
+    from model.pdf_preview import VIEWER_FONT_NOTE, build_pdf_viewer_html
+    r, _ = render_pdf_svg(_pdf(1))
+    assert r.cjk_font is None
+    assert VIEWER_FONT_NOTE in build_viewer_html(r, layer_panel=False)  # 注意書きの文言が viewer と一致している
+    assert VIEWER_FONT_NOTE not in build_pdf_viewer_html(r)

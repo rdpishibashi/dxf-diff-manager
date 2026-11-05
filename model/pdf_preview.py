@@ -12,7 +12,9 @@ import base64
 import io
 from typing import Tuple
 
-from .dxf_preview import LayerSvg, PreviewResult
+import html
+
+from .dxf_preview import LayerSvg, PreviewResult, build_viewer_html
 
 DEFAULT_MAX_LONG_SIDE_PX = 4000
 DEFAULT_MAX_PAGES = 20
@@ -71,3 +73,14 @@ def render_pdf_svg(pdf_bytes: bytes, max_long_side_px: int = DEFAULT_MAX_LONG_SI
     result.layers.append(LayerSvg("DRAWING", "図面", "#ffffff", len(pages), "".join(parts)))
     result.view_box = (int(round(width)), int(round(height)))
     return result, total
+
+
+# build_viewer_html は result.cjk_font が None のとき、左パネルにこの文言を出す。
+# PDF は画像で描くのでフォントは関係なく、出すと誤解を招くため消す
+VIEWER_FONT_NOTE = "日本語フォントが見つからないため、日本語の文字は表示されません。"
+
+
+def build_pdf_viewer_html(result: PreviewResult, height_px: int = 720) -> str:
+    """PDF の viewer HTML（左パネルは操作のみ。日本語フォントの注意書きは出さない）。"""
+    page = build_viewer_html(result, height_px=height_px, layer_panel=False)
+    return page.replace(html.escape(VIEWER_FONT_NOTE), "")
