@@ -14,6 +14,10 @@ import pandas as pd
 
 from .extract_labels import extract_labels
 
+# Summary シートの最後の列。Step 4 の生成時点では空欄で、ダウンロード用 ZIP を作るときに
+# model.reference_drawings.fill_reference_column() が値を書き込む
+REFERENCE_DRAWINGS_COLUMN = '参照図面'
+
 
 def _load_labels_with_cache(
     file_path: str,
@@ -413,8 +417,8 @@ def build_diff_labels_workbook(
                 if include_ref_designator_column:
                     headers.append('機器符号候補数')
                     col_widths.append(14)
-                headers += ['タイトル', 'サブタイトル']
-                col_widths += [30, 30]
+                headers += ['タイトル', 'サブタイトル', REFERENCE_DRAWINGS_COLUMN]
+                col_widths += [30, 30, 40]
                 for col_idx, (h, w) in enumerate(zip(headers, col_widths)):
                     ws.write(0, col_idx, h, header_fmt)
                     ws.set_column(col_idx, col_idx, w)
