@@ -206,3 +206,6 @@ log*.txt
 /docs/
 /backup_docs
 /Archive/
+
+# Local secrets (designator master key) — never commit
+/.streamlit/secrets.toml

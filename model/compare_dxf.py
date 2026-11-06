@@ -620,6 +620,9 @@ class EntityExpander:
                     'insert_point': (0.0, 0.0, 0.0),
                     'rotation': 0.0,
                     'scale': (1.0, 1.0, 1.0),
+                    # 寸法線の描画ブロック由来（寸法値の MTEXT など）。差分判定の署名には入らない。
+                    # `model/extra_labels.py` が寸法値をラベルとして取り出すのに使う
+                    'dimension': True,
                 }
                 expanded_entities.append(absolute_entity)
 

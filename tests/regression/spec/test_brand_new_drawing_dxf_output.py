@@ -164,7 +164,7 @@ def test_brand_new_drawing_has_diff_labels_sheet_with_new_only():
         assert set(sheet_df['New: BRANDNEW-004']) == {'LABEL_A', 'C1'}
 
         c1_row = sheet_df[sheet_df['New: BRANDNEW-004'] == 'C1'].iloc[0]
-        assert c1_row['機器符号候補'] == 'Y'
+        assert c1_row['機器符号候補'] == 'CAN'
         label_a_row = sheet_df[sheet_df['New: BRANDNEW-004'] == 'LABEL_A'].iloc[0]
         assert pd.isna(label_a_row['機器符号候補'])
 

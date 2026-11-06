@@ -3,7 +3,9 @@
 （model/label_classifier.py、バイトコピー）で判定されること。
 
 背景（2026-10-17）: 旧判定（ref_designator_judge.py）は 2026-10-10 以前の規則の凍結コピーで、
-DATE・GND・R10・AWG24 等を候補にしていた。現行 primary に追随した（列の形式 'Y'/空欄は不変）。
+DATE・GND・R10・AWG24 等を候補にしていた。現行 primary に追随した。
+2026-11-06 から列の値は DXF-extract-labels と同じ 'DEF'／'CAN'／空欄（旧 'Y' は 'CAN'。
+DEF は機器符号一覧の索引を渡したときだけ。→ `tests/unit/test_designator_mark.py`）。
 旧テストで True だった GND・SYSTEM・R10 が None に変わるのは、この追随による意図的な変更。
 
 実行:
@@ -27,8 +29,8 @@ def _mark(old_label=None, new_label=None):
 
 
 @pytest.mark.parametrize('label', ['C1', 'C1(2.2K)', 'CB001', 'MCCB001', 'X14A', 'TB1'])
-def test_designator_labels_are_marked_y(label):
-    assert _mark(new_label=label) == ('Y', 1)
+def test_designator_labels_are_marked_can(label):
+    assert _mark(new_label=label) == ('CAN', 1)
 
 
 @pytest.mark.parametrize('label', [
@@ -46,7 +48,7 @@ def test_non_designator_labels_are_not_marked(label):
 def test_fullwidth_label_is_normalized_before_judgment():
     """diff-manager の extract_labels.py は NFKC 正規化をしない。全角のまま渡っても
     判定側が正規化すること（正規化を怠ると全角ラベルがすり抜ける）。"""
-    assert _mark(new_label='Ｃ１') == ('Y', 1)
+    assert _mark(new_label='Ｃ１') == ('CAN', 1)
 
 
 def test_old_only_new_only_and_none_rows_are_counted_correctly():
@@ -56,4 +58,4 @@ def test_old_only_new_only_and_none_rows_are_counted_correctly():
         {'Old Label': 'GND', 'New Label': 'DATE'},    # どちらも候補外
     ]
     assert _annotate_ref_designator_candidates(rows) == 2
-    assert [r['機器符号候補'] for r in rows] == ['Y', 'Y', None]
+    assert [r['機器符号候補'] for r in rows] == ['CAN', 'CAN', None]
