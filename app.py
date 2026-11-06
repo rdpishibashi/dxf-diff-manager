@@ -101,9 +101,12 @@ def _status_placeholder_after_spinner():
 
 CIRCUIT_PREVIEW_HEIGHT_PX = 720
 CIRCUIT_PREVIEW_WARN_BYTES = 8 * 1024 * 1024
+# 大きな図面（36MB の差分DXFで約8秒）の描画中、Streamlit 標準の「画面が薄くなる」だけでは処理中と分からない。
+# cache_data の show_spinner に文字列を渡すと、キャッシュに無い初回の描画中だけ円が回る spinner が出る
+PREVIEW_RENDER_SPINNER_TEXT = "図面を描画しています…（大きな図面は数十秒かかることがあります）"
 
 
-@st.cache_data(show_spinner=False, max_entries=20)
+@st.cache_data(show_spinner=PREVIEW_RENDER_SPINNER_TEXT, max_entries=20)
 def render_circuit_preview_html(dxf_data: bytes):
     """差分DXFのバイト列からブラウザ内プレビュー用HTMLを生成する（DXFバイト列をキーにキャッシュ）。
 
@@ -115,7 +118,7 @@ def render_circuit_preview_html(dxf_data: bytes):
 
 
 # 件数を絞る理由: PDF は1ページ約1MBで、20ページなら1件約20MB。切り替えて見ている図面だけを残す（メモリ節約）
-@st.cache_data(show_spinner=False, max_entries=3)
+@st.cache_data(show_spinner=PREVIEW_RENDER_SPINNER_TEXT, max_entries=3)
 def render_reference_html(data: bytes, fmt: str):
     """「他図面の表示」の図面（DXF または PDF のバイト列）から viewer HTML を生成する（バイト列をキーにキャッシュ）。
 
