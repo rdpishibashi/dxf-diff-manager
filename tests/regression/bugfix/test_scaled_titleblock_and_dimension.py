@@ -128,6 +128,15 @@ def test_dimension_without_geometry_block_keeps_placeholder():
     assert types == ['DIMENSION']
 
 
+# 10倍・(1000, 0) に置いたスプラインの制御点 (x, y) を平らに並べたもの
+# （pytest>=9.2 の approx は入れ子の列を比べられない）
+EXPECTED_CONTROL_XY = [1000, 0, 1010, 20, 1030, 20, 1040, 0]
+
+
+def _xy_flat(points):
+    return [v for p in points for v in tuple(p)[:2]]
+
+
 def _scaled_block_doc():
     """SPLINE・HATCH・SOLID を持つブロックを 10 倍・(1000, 0) に INSERT した図面。"""
     doc = ezdxf.new('R2010', setup=True)
@@ -152,8 +161,7 @@ def test_spline_hatch_solid_follow_insert_transform():
     entities = _by_type(_expand(_scaled_block_doc()))
 
     spline = entities['SPLINE'][0]['attributes']
-    assert [tuple(p)[:2] for p in spline['control_points']] == pytest.approx(
-        [(1000, 0), (1010, 20), (1030, 20), (1040, 0)])
+    assert _xy_flat(spline['control_points']) == pytest.approx(EXPECTED_CONTROL_XY)
     hatch = entities['HATCH'][0]['attributes']
     xs = [p[0] for p in hatch['hatch_paths'][0]]
     ys = [p[1] for p in hatch['hatch_paths'][0]]
@@ -205,7 +213,6 @@ def test_output_keeps_spline_hatch_solid_without_placeholder(tmp_path):
     assert types.count('HATCH') == 1
     assert types.count('SOLID') == 3  # ブロックの1個＋寸法の矢印2個
     spline = next(e for e in added if e.dxftype() == 'SPLINE')
-    assert [tuple(p)[:2] for p in spline.control_points] == pytest.approx(
-        [(1000, 0), (1010, 20), (1030, 20), (1040, 0)])
+    assert _xy_flat(spline.control_points) == pytest.approx(EXPECTED_CONTROL_XY)
     hatch = next(e for e in added if e.dxftype() == 'HATCH')
     assert hatch.dxf.pattern_name == 'ANSI32'
