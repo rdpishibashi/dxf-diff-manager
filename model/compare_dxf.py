@@ -26,7 +26,19 @@ logger = logging.getLogger(__name__)
 # EntityExpander._transform_coordinate_attributes() と translate_absolute_entity()
 # の両方から参照する（取りこぼし防止のため一元管理。2026-09-18、オフセット補正
 # 組み込みに伴いDXF-visual-diffから移植）。
-COORDINATE_ATTRIBUTES = ['insert', 'center', 'start', 'end', 'location', 'base_point']
+# 'vtx0'〜'vtx3' は SOLID／TRACE の4頂点（寸法線の塗りつぶし矢印など）。
+COORDINATE_ATTRIBUTES = ['insert', 'center', 'start', 'end', 'location', 'base_point',
+                         'vtx0', 'vtx1', 'vtx2', 'vtx3']
+
+# 点の列を持つ属性（DXF属性ではなく展開時に詰める）。COORDINATE_ATTRIBUTES と同様に
+# 変換・平行移動の対象。'control_points'/'fit_points' は SPLINE、'hatch_paths' は
+# HATCH の境界（折れ線に近似した点列のリスト）。
+POINT_LIST_ATTRIBUTES = ['control_points', 'fit_points']
+HATCH_PATHS_ATTRIBUTE = 'hatch_paths'
+
+# HATCH の境界（円弧・楕円・スプラインの辺）を折れ線に近似するときの最大誤差
+# （ブロック内の局所座標の単位）。
+HATCH_FLATTEN_DISTANCE = 0.05
 
 
 class ToleranceConfig:
@@ -240,6 +252,10 @@ class EntityExpander:
                 vertices = self._extract_polyline_like_vertices(entity)
                 if vertices:
                     clean_attrs['vertices'] = vertices
+            elif entity.dxftype() == 'SPLINE':
+                clean_attrs.update(self._extract_spline_geometry(entity))
+            elif entity.dxftype() == 'HATCH':
+                clean_attrs[HATCH_PATHS_ATTRIBUTE] = self._extract_hatch_paths(entity)
 
             self._local_attrs_cache[cache_key] = clean_attrs
             return clean_attrs
@@ -248,6 +264,37 @@ class EntityExpander:
             if self.debug:
                 logger.debug(f"Error getting attributes for {entity.dxftype()}: {e}")
             return {}
+
+    @staticmethod
+    def _extract_spline_geometry(entity) -> Dict:
+        """SPLINE の制御点・フィット点・ノット・重みを取り出す（局所座標）。
+
+        B スプラインはアフィン変換で制御点を変換すれば形が保たれるため、
+        ノット・重みはそのまま使う。
+        """
+        geometry = {}
+        try:
+            geometry['control_points'] = [tuple(p) for p in entity.control_points]
+            geometry['fit_points'] = [tuple(p) for p in entity.fit_points]
+            geometry['knots'] = [float(k) for k in entity.knots]
+            geometry['weights'] = [float(w) for w in entity.weights]
+        except Exception:
+            pass
+        return geometry
+
+    @staticmethod
+    def _extract_hatch_paths(entity) -> List[List[Tuple[float, float, float]]]:
+        """HATCH の境界を、閉じた折れ線の点列のリストとして返す（局所座標）。"""
+        from ezdxf import path as ezpath
+        paths = []
+        try:
+            for boundary in ezpath.from_hatch(entity):
+                points = [tuple(p) for p in boundary.flattening(HATCH_FLATTEN_DISTANCE)]
+                if len(points) >= 3:
+                    paths.append(points)
+        except Exception:
+            pass
+        return paths
 
     def _extract_polyline_like_vertices(self, entity) -> List[Tuple[float, float]]:
         """LWPOLYLINE / LEADER の頂点情報を抽出"""
@@ -373,6 +420,21 @@ class EntityExpander:
                     transformed_vertices.append(transformed_vertex[:2])
 
             transformed_attrs['vertices'] = transformed_vertices
+
+        def _transform_points(points):
+            out = []
+            for p in points:
+                p3 = (p[0], p[1], p[2] if len(p) > 2 else 0.0)
+                out.append(self._apply_global_offset(self.transformer.transform_point(p3, transform_matrix)))
+            return out
+
+        for attr_name in POINT_LIST_ATTRIBUTES:
+            if clean_attrs.get(attr_name):
+                transformed_attrs[attr_name] = _transform_points(clean_attrs[attr_name])
+
+        if clean_attrs.get(HATCH_PATHS_ATTRIBUTE):
+            transformed_attrs[HATCH_PATHS_ATTRIBUTE] = [
+                _transform_points(points) for points in clean_attrs[HATCH_PATHS_ATTRIBUTE]]
     
     def _transform_size_attributes(self, entity_type: str, clean_attrs: Dict, 
                                  transformed_attrs: Dict, scale_x: float, scale_y: float, scale_z: float):
@@ -398,6 +460,20 @@ class EntityExpander:
         
         if entity_type in ['TEXT', 'MTEXT', 'ATTRIB'] and 'height' in clean_attrs:
             transformed_attrs['height'] = clean_attrs['height'] * scale_y
+
+        # HATCH の模様の大きさは INSERT の倍率に合わせる
+        if entity_type == 'HATCH' and 'pattern_scale' in clean_attrs:
+            transformed_attrs['pattern_scale'] = clean_attrs['pattern_scale'] * (scale_x + scale_y) / 2.0
+
+        # MTEXT の文字高さは `char_height`、折り返し幅は `width`。拡大配置した
+        # タイトルブロック（xscale=10 の INSERT）内の文字が元の大きさのまま
+        # 出力され、極小で読めなくなるのを防ぐ。署名は `char_height` を見ない
+        # ので差分判定には影響しない。
+        if entity_type == 'MTEXT':
+            if 'char_height' in clean_attrs:
+                transformed_attrs['char_height'] = clean_attrs['char_height'] * scale_y
+            if 'width' in clean_attrs:
+                transformed_attrs['width'] = clean_attrs['width'] * scale_x
     
     def expand_insert_entities(self, doc, doc_label: str) -> List[Dict]:
         """INSERTエンティティを展開して絶対座標エンティティリストを作成
@@ -425,6 +501,11 @@ class EntityExpander:
                     self._expand_insert_recursive(doc, entity, transform_matrix, expanded_entities)
                 except Exception as e:
                     logger.warning(f"Error expanding INSERT {entity.dxf.name}: {e}")
+
+            elif entity_type == 'DIMENSION' and self._dimension_block_name(doc, entity):
+                if not self._is_layer_visible(getattr(entity.dxf, 'layer', '0')) or is_invisible(entity):
+                    continue
+                self._expand_dimension(doc, entity, np.eye(4), expanded_entities)
 
             elif entity_type != 'ATTDEF':
                 # 直接エンティティ（off/frozen レイヤー・invisible属性なら表示されないので除外）
@@ -475,6 +556,11 @@ class EntityExpander:
                     doc, block_entity, nested_matrix, expanded_entities, depth + 1, max_depth)
                 continue
 
+            if block_entity.dxftype() == 'DIMENSION' and self._dimension_block_name(doc, block_entity):
+                self._expand_dimension(doc, block_entity, transform_matrix, expanded_entities,
+                                       depth + 1, max_depth)
+                continue
+
             absolute_entity = self.transform_entity_to_absolute(block_entity, transform_matrix)
             if absolute_entity:
                 absolute_entity['insert_info'] = {
@@ -489,7 +575,57 @@ class EntityExpander:
                 }
                 expanded_entities.append(absolute_entity)
 
-        # ATTRIB処理
+        self._append_insert_attribs(insert_entity, block_name, expanded_entities)
+
+    @staticmethod
+    def _dimension_block_name(doc, dimension) -> Optional[str]:
+        """DIMENSION の描画ブロック名（`dxf.geometry`）。ブロックが無ければ None。"""
+        name = dimension.dxf.get('geometry')
+        if name and name in doc.blocks:
+            return name
+        return None
+
+    def _expand_dimension(self, doc, dimension, transform_matrix: np.ndarray,
+                          expanded_entities: List[Dict], depth: int = 0,
+                          max_depth: int = 20) -> None:
+        """DIMENSION を描画ブロック（寸法線・寸法値・矢印）に展開する。
+
+        描画ブロックの中身は DIMENSION と同じ座標系（モデル空間直下ならワールド
+        座標）で書かれているため、親の変換行列をそのまま使う。矢印は INSERT
+        なので既存の再帰展開に渡す。`Defpoints` 画層の POINT（寸法の基準点。
+        印刷されない）は出力しない。ブロックが無い DIMENSION は呼び出し側で
+        従来どおりプレースホルダにする（`_dimension_block_name()` で判定）。
+        """
+        block_name = self._dimension_block_name(doc, dimension)
+        if block_name is None or depth > max_depth:
+            return
+        for block_entity in doc.blocks[block_name]:
+            block_type = block_entity.dxftype()
+            if block_type == 'ATTDEF':
+                continue
+            layer = getattr(block_entity.dxf, 'layer', '0')
+            if block_type == 'POINT' and str(layer).lower() == 'defpoints':
+                continue
+            if not self._is_layer_visible(layer) or is_invisible(block_entity):
+                continue
+            if block_type == 'INSERT':
+                nested_matrix = transform_matrix @ self.transformer.create_transformation_matrix(block_entity)
+                self._expand_insert_recursive(
+                    doc, block_entity, nested_matrix, expanded_entities, depth + 1, max_depth)
+                continue
+            absolute_entity = self.transform_entity_to_absolute(block_entity, transform_matrix)
+            if absolute_entity:
+                absolute_entity['insert_info'] = {
+                    'block_name': block_name,
+                    'insert_point': (0.0, 0.0, 0.0),
+                    'rotation': 0.0,
+                    'scale': (1.0, 1.0, 1.0),
+                }
+                expanded_entities.append(absolute_entity)
+
+    def _append_insert_attribs(self, insert_entity, block_name: str,
+                               expanded_entities: List[Dict]) -> None:
+        """INSERT の ATTRIB を絶対座標エンティティとして追加する。"""
         if hasattr(insert_entity, 'attribs'):
             for attrib in insert_entity.attribs:
                 if is_invisible(attrib):
@@ -539,6 +675,14 @@ def translate_absolute_entity(absolute_entity: Dict, offset: Tuple[float, float]
 
     if 'vertices' in attrs and attrs['vertices']:
         attrs['vertices'] = [_translate_point(v, dx, dy) for v in attrs['vertices']]
+
+    for attr_name in POINT_LIST_ATTRIBUTES:
+        if attrs.get(attr_name):
+            attrs[attr_name] = [_translate_point(p, dx, dy) for p in attrs[attr_name]]
+
+    if attrs.get(HATCH_PATHS_ATTRIBUTE):
+        attrs[HATCH_PATHS_ATTRIBUTE] = [
+            [_translate_point(p, dx, dy) for p in points] for points in attrs[HATCH_PATHS_ATTRIBUTE]]
 
     translated['attributes'] = attrs
     return translated
@@ -699,6 +843,26 @@ class SignatureGenerator:
                         normalized_vertices.append(norm_vertex)
                 if normalized_vertices:
                     signature_parts.append(f"{entity_type.lower()}_vertices_{normalized_vertices}")
+
+        elif entity_type in ('SOLID', 'TRACE'):
+            corners = [self.transformer.normalize_coordinate_with_context(attrs[k], entity_type)
+                       for k in ('vtx0', 'vtx1', 'vtx2', 'vtx3') if attrs.get(k) is not None]
+            signature_parts.append(f"{entity_type.lower()}_{corners}")
+
+        elif entity_type == 'SPLINE':
+            points = attrs.get('control_points') or attrs.get('fit_points') or []
+            normalized = [self.transformer.normalize_coordinate_with_context((p[0], p[1]), entity_type)
+                          for p in points]
+            signature_parts.append(f"spline_{attrs.get('degree')}_{normalized}")
+
+        elif entity_type == 'HATCH':
+            paths = attrs.get(HATCH_PATHS_ATTRIBUTE) or []
+            normalized_paths = [
+                [self.transformer.normalize_coordinate_with_context((p[0], p[1]), entity_type)
+                 for p in points[:5]] + [len(points)]
+                for points in paths]
+            fill = 'solid' if attrs.get('solid_fill') else attrs.get('pattern_name')
+            signature_parts.append(f"hatch_{fill}_{normalized_paths}")
 
 
 def extract_linetype_patterns(doc) -> Dict[str, Tuple[List[float], str]]:
@@ -965,6 +1129,15 @@ class OutputGenerator:
         except Exception as e:
             logger.warning(f"Failed to register linetype '{linetype_name}': {e}")
 
+    @staticmethod
+    def _basic_dxfattribs(attrs: Dict, layer_name: str, layer_color: int) -> Dict:
+        """画層・色・線の太さ・線種だけの dxfattribs（展開時に詰めた非DXF属性を渡さない）。"""
+        dxfattribs = {'layer': layer_name, 'color': layer_color}
+        for key in ('lineweight', 'linetype'):
+            if attrs.get(key) is not None:
+                dxfattribs[key] = attrs[key]
+        return dxfattribs
+
     def create_entity_from_absolute(self, absolute_entity: Dict, target_space, layer_name: str, layer_color: int,
                                      source_linetypes: Optional[Dict[str, Tuple[List[float], str]]] = None) -> bool:
         """絶対座標エンティティから実際のDXFエンティティを作成（レイヤー指定）"""
@@ -1105,6 +1278,55 @@ class OutputGenerator:
                         if attrs.get('flags', 0) & 1:
                             new_entity.close()
             
+            elif entity_type in ('SOLID', 'TRACE'):
+                corners = [attrs.get(k) for k in ('vtx0', 'vtx1', 'vtx2', 'vtx3')]
+                corners = [c for c in corners if c is not None]
+                if len(corners) < 3:
+                    return False
+                add = target_space.add_solid if entity_type == 'SOLID' else target_space.add_trace
+                new_entity = add([c[:2] for c in corners[:3]], dxfattribs=self._basic_dxfattribs(attrs, layer_name, layer_color))
+                # DXF の頂点順（ジグザグ順）をそのまま写す
+                for i, corner in enumerate(corners[:4]):
+                    new_entity.dxf.set(f'vtx{i}', corner)
+
+            elif entity_type == 'SPLINE':
+                control_points = attrs.get('control_points') or []
+                fit_points = attrs.get('fit_points') or []
+                if not control_points and not fit_points:
+                    return False
+                new_entity = target_space.add_spline(dxfattribs=self._basic_dxfattribs(attrs, layer_name, layer_color))
+                new_entity.dxf.degree = int(attrs.get('degree', 3))
+                if control_points:
+                    new_entity.control_points = control_points
+                    if attrs.get('knots'):
+                        new_entity.knots = attrs['knots']
+                    if attrs.get('weights'):
+                        new_entity.weights = attrs['weights']
+                if fit_points:
+                    new_entity.fit_points = fit_points
+                new_entity.dxf.flags = int(attrs.get('flags', 0))
+
+            elif entity_type == 'HATCH':
+                paths = attrs.get(HATCH_PATHS_ATTRIBUTE) or []
+                if not paths:
+                    return False
+                new_entity = target_space.add_hatch(color=layer_color,
+                                                    dxfattribs=self._basic_dxfattribs(attrs, layer_name, layer_color))
+                pattern_name = attrs.get('pattern_name') or 'SOLID'
+                if attrs.get('solid_fill') or pattern_name.upper() == 'SOLID':
+                    new_entity.set_solid_fill(color=layer_color)
+                else:
+                    try:
+                        new_entity.set_pattern_fill(pattern_name, color=layer_color,
+                                                    angle=float(attrs.get('pattern_angle', 0.0)),
+                                                    scale=float(attrs.get('pattern_scale', 1.0)))
+                    except Exception:
+                        new_entity.set_pattern_fill('ANSI31', color=layer_color,
+                                                    angle=float(attrs.get('pattern_angle', 0.0)),
+                                                    scale=float(attrs.get('pattern_scale', 1.0)))
+                for points in paths:
+                    new_entity.paths.add_polyline_path([(p[0], p[1]) for p in points], is_closed=True)
+
             else:
                 # サポートされていないエンティティ
                 insert_pos = attrs.get('insert', attrs.get('center', (0, 0, 0)))
