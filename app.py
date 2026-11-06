@@ -39,6 +39,10 @@ from model.offset_detector import OffsetDetectionConfig
 from model.dxf_preview import render_layers_svg, render_drawing_svg, build_viewer_html
 from model.pdf_preview import render_pdf_svg, build_pdf_viewer_html, DEFAULT_MAX_PAGES
 from model.reference_drawings import detect_drawing_format, build_download_zip
+from model import designator_master
+from model.candidate_filter import (
+    CANDIDATE_COLUMN, candidate_filter_options, filter_by_candidate,
+)
 
 # 設定をインポート
 from config import ui_config, diff_config, label_filter_config, help_text
@@ -731,6 +735,50 @@ def _sheet_select_width(names):
     longest = max((sum(2 if unicodedata.east_asian_width(c) in 'WFA' else 1 for c in str(n))
                    for n in names), default=0)
     return max(160, longest * 8 + 28 + 36)
+
+
+def _resolve_master_index():
+    """機器符号一覧の索引（`designator_master.DesignatorMasterIndex`）を解決する。
+
+    DXF-extract-labels・DXF-cross-checker・HostPL-comparer の同名関数と同じ。鍵は
+    `st.secrets['DESIGNATOR_MASTER_KEY']`（ローカルは git 管理外の `.streamlit/secrets.toml`、
+    Streamlit Cloud は Secrets）→ 環境変数の順。鍵・ダイジェストファイルが無い、または鍵が
+    一覧生成時と異なる場合は索引なし（diff_labels.xlsx の「機器符号候補」は CAN／空欄のみ）。
+
+    戻り値: (master_index または None, 画面に出す状態メッセージ)。
+    """
+    try:
+        secret = st.secrets.get('DESIGNATOR_MASTER_KEY')
+    except Exception:
+        secret = None
+    if not secret:
+        secret = os.environ.get('DESIGNATOR_MASTER_KEY')
+
+    digest_path = os.path.join(current_dir, 'assets', 'designator_digests.txt')
+
+    if not secret:
+        return None, "機器符号一覧が未設定のため DEF(defined) 判定は行われていません"
+    if not os.path.isfile(digest_path):
+        return None, ("機器符号一覧のダイジェストファイルが見つからないため "
+                      "DEF(defined) 判定は行われていません")
+
+    index = designator_master.load_index(digest_path, secret)
+    if index is None:
+        return None, "鍵が機器符号一覧の生成時と異なるため DEF(defined) 判定は行われていません"
+    return index, f"機器符号一覧: {len(index)}件を読み込み済み（DEF判定あり）"
+
+
+def render_candidate_pills(df, key, on_change=None):
+    """表の上に「機器符号候補」の絞り込み選択欄（`st.pills`、複数選択）を出し、選択された値の
+    リストを返す。列が無い（Summary など）・行が無いときは出さずに None を返す。初期状態は全選択。
+    DXF-extract-labels の同名関数と同じ。"""
+    if CANDIDATE_COLUMN not in df.columns or df.empty:
+        return None
+    options = candidate_filter_options(df[CANDIDATE_COLUMN])
+    # 選択肢の構成が変わったとき（別の抽出結果など）に古い選択が残らないよう、key に含める
+    selected = st.pills(CANDIDATE_COLUMN, options, selection_mode='multi',
+                        default=options, key=f"{key}:{'|'.join(options)}", on_change=on_change)
+    return list(selected or [])
 
 
 def render_preview_dataframe(df, key_prefix):
@@ -1572,6 +1620,7 @@ def render_step3_diff(complete_pairs):
 
                 try:
                     step1_mode = st.session_state.step1_mode
+                    master_index, master_index_status = _resolve_master_index()
                     zip_data, results, diff_labels_excel, updated_master, updated_drawing_list = create_diff_zip(
                         st.session_state.pairs,
                         master_df=st.session_state.master_df,
@@ -1593,6 +1642,7 @@ def render_step3_diff(complete_pairs):
                         drawing_list_df=st.session_state.drawing_list_df,
                         label_only=label_only,
                         offset_detection=offset_detection,
+                        master_index=master_index,
                     )
 
                     # セッション状態に保存
@@ -1602,6 +1652,7 @@ def render_step3_diff(complete_pairs):
                     st.session_state.zip_data = zip_data
                     st.session_state.results = results
                     st.session_state.has_diff_labels = bool(diff_labels_excel)
+                    st.session_state.designator_master_status = master_index_status
                     st.session_state.processing_settings = {
                         'tolerance': tolerance,
                         'deleted_color': deleted_color,
@@ -1824,7 +1875,16 @@ def render_step3_diff(complete_pairs):
                             on_change=_mark_diff_preview_expanded,
                             width=_sheet_select_width(diff_xl.sheet_names),
                         )
-                        render_preview_dataframe(diff_xl.parse(sheet_name), "diff_preview")
+                        master_status = st.session_state.get('designator_master_status')
+                        if master_status:
+                            st.caption(master_status)
+                        sheet_df = pd.read_excel(diff_xl, sheet_name=sheet_name)
+                        selected_marks = render_candidate_pills(
+                            sheet_df, key=f"diff_cand_filter_{sheet_name}",
+                            on_change=_mark_diff_preview_expanded)
+                        if selected_marks is not None:
+                            sheet_df = filter_by_candidate(sheet_df, selected_marks)
+                        render_preview_dataframe(sheet_df, "diff_preview")
 
         # ダウンロードボタン
         if successful_count > 0:
@@ -1983,6 +2043,7 @@ def render_step3_diff(complete_pairs):
                         'master_df', 'drawing_list_df', 'master_file_name', 'added_relationships_count',
                         'has_diff_labels',
                         'diff_preview_expanded',
+                        'designator_master_status',
                         'downloaded']:
                 if key in st.session_state:
                     del st.session_state[key]

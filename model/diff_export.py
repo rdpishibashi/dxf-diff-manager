@@ -5,6 +5,7 @@ streamlit には依存しないため、`tests/` から直接ユニットテス�
 （`model/pairing.py` と同じ方針）。エラー通知・進捗表示は呼び出し元から渡される
 コールバック（`on_error`/`progress_callback`）経由で行う。
 """
+import re
 import os
 import gc
 import tempfile
@@ -14,6 +15,7 @@ from io import BytesIO
 from .compare_dxf import (
     compare_dxf_files_and_generate_dxf, generate_all_added_dxf, PairFileCache,
 )
+from .extra_labels import extract_extra_labels
 from .extract_labels import extract_labels, get_title_and_subtitle
 from .label_diff import (
     compute_label_differences,
@@ -27,31 +29,63 @@ from .master_ledger import (
     update_parent_child_master, save_master_to_bytes,
     update_drawing_list, parse_master_filename,
 )
-from config import diff_config, label_filter_config
+from config import diff_config, label_filter_config, extraction_config
 
 DIFF_LABELS_FILENAME = "diff_labels.xlsx"
 
 
-def _annotate_ref_designator_candidates(change_rows):
-    """change_rows の各行に「機器符号候補」キー（'Y' または None）を付与し、
-    'Y' の行数を返す。
+MARK_DEFINED = 'DEF'
+MARK_CANDIDATE = 'CAN'
+_MARK_RANK = {MARK_DEFINED: 2, MARK_CANDIDATE: 1, None: 0}
 
-    Old Label・New Label のいずれかが機器符号候補パターンに一致すれば 'Y'
-    （完全新規図面のシートは Old Label が常に None のため、実質 New Label
-    のみでの判定になる）。判定ロジックは `label_classifier.py`
-    （DXF-extract-labels からのバイトコピー。NFKC正規化は関数内部で行う）に委譲する。
 
-    change_rows を破壊的に変更し、同じリストを返す（呼び出し元の利便性のため）。
+def _is_drawing_number(text):
+    """ラベル全体が図番（`extraction_config.DRAWING_NUMBER_PATTERN`。例 EE5319-300-01B）か。"""
+    return re.fullmatch(extraction_config.DRAWING_NUMBER_PATTERN, text.strip(), re.IGNORECASE) is not None
+
+
+def _designator_mark(text, master_index=None):
+    """ラベル1つの「機器符号候補」の値（'DEF'／'CAN'／None）を返す。
+
+    DXF-extract-labels の `ref_designator.designator_mark()` と同じ規則
+    （同ファイルは領域検出などに依存して重いので持ち込まず、規則だけをここに持つ）:
+    (1) `master_index`（`designator_master.DesignatorMasterIndex`）に含まれれば 'DEF'
+    (2) 機器符号候補パターン（`label_classifier.is_ref_designator_label()`）に一致すれば 'CAN'
+    (3) どちらでもなければ None（空欄）。`master_index=None`（鍵なし等）なら DEF は出ない。
+
+    **図番のラベルは常に None**（DXF-extract-labels との意図的な差）。分類器は図番の形
+    （`EE5319-300-01B`）を候補パターンに一致と判定するが、DXF-extract-labels は図面情報枠の中の
+    ラベルを最初から集めないので図番が候補に出ない。DXF-diff-manager は枠の中も含めて比べるため、
+    ここで図番の形を外して同じ結果にする（2026-11-06、ユーザー指摘。共有の `label_classifier.py` は変えない）。
+    """
+    if text is None:
+        return None
+    if _is_drawing_number(text):
+        return None
+    if master_index is not None and master_index.contains(text):
+        return MARK_DEFINED
+    if is_ref_designator_label(text):
+        return MARK_CANDIDATE
+    return None
+
+
+def _annotate_ref_designator_candidates(change_rows, master_index=None):
+    """change_rows の各行に「機器符号候補」キー（'DEF'／'CAN'／None）を付与し、
+    DEF または CAN の行数を返す（Summary の「機器符号候補数」）。
+
+    行の値は Old Label・New Label それぞれの判定（`_designator_mark()`）の強い方
+    （DEF > CAN > 空欄）。完全新規図面のシートは Old Label が常に None のため、
+    実質 New Label だけで決まる。
+
+    change_rows を破壊的に変更する。
     """
     count = 0
     for row in change_rows:
-        old_label, new_label = row.get('Old Label'), row.get('New Label')
-        is_candidate = (
-            (old_label is not None and is_ref_designator_label(old_label)) or
-            (new_label is not None and is_ref_designator_label(new_label))
-        )
-        row['機器符号候補'] = 'Y' if is_candidate else None
-        if is_candidate:
+        marks = (_designator_mark(row.get('Old Label'), master_index),
+                 _designator_mark(row.get('New Label'), master_index))
+        mark = max(marks, key=lambda m: _MARK_RANK[m])
+        row['機器符号候補'] = mark
+        if mark is not None:
             count += 1
     return count
 
@@ -63,7 +97,8 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                     ignore_moved_labels=False, ignore_color_only_changes=False,
                     step1_mode=None,
                     source_drawing_numbers=None, dest_drawing_numbers=None,
-                    drawing_list_df=None, label_only=False, offset_detection=None):
+                    drawing_list_df=None, label_only=False, offset_detection=None,
+                    master_index=None):
     """
     ペアリストに基づいて差分DXFファイルを作成し、ZIPアーカイブを生成
 
@@ -110,6 +145,9 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
             2026-09-18新設、DXF-visual-diffから移植）。
             compare_dxf_files_and_generate_dxf() にそのまま渡す——完全新規図面
             （generate_all_added_dxf()）は比較対象が無いため対象外。
+        master_index: 機器符号一覧の索引（`designator_master.DesignatorMasterIndex`。
+            `contains(label)` を持つもの）。diff_labels.xlsx の「機器符号候補」列で
+            一覧にあるラベルを 'DEF' にする。None（鍵なし等）なら 'CAN'／空欄のみ。
 
     Returns:
         tuple: (zip_data, results, diff_labels_excel, master_df, drawing_list_df)
@@ -190,7 +228,7 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                 report_error(f"ラベル比較中にエラーが発生しました ({main_drawing}): {str(e)}")
                 change_rows = []
 
-            ref_designator_count = _annotate_ref_designator_candidates(change_rows)
+            ref_designator_count = _annotate_ref_designator_candidates(change_rows, master_index)
 
             # Summary 行を収集
             added_count = sum(1 for r in change_rows if r['Old Label'] is None)
@@ -360,6 +398,8 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                     extract_drawing_numbers_option=True,
                     original_filename=file_info.get('filename'),
                 )
+                # 寸法値・属性値もラベルに足す（ペア比較の `label_diff._load_labels_with_cache()` と同じ）
+                labels = list(labels) + extract_extra_labels(file_info['temp_path'])
             except Exception:
                 labels, info_new = [], {}
 
@@ -390,7 +430,8 @@ def create_diff_zip(pairs, master_df=None, master_filename=None, tolerance=None,
                 ]
             brand_new_change_rows = filter_change_rows_by_patterns(brand_new_change_rows, diff_label_patterns)
             brand_new_change_rows.sort(key=lambda r: r['New Label'] or '')
-            brand_new_ref_designator_count = _annotate_ref_designator_candidates(brand_new_change_rows)
+            brand_new_ref_designator_count = _annotate_ref_designator_candidates(
+                brand_new_change_rows, master_index)
 
             diff_label_sheets.append({
                 'sheet_name': main_drawing,

@@ -218,7 +218,7 @@ def test_build_diff_labels_workbook_with_ref_designator_column():
     sheets = [{
         'sheet_name': 'EE1234-567A',
         'rows': [
-            {'機器符号候補': 'Y', 'X': 0, 'Y': 0, 'Old Label': None, 'New Label': 'R10'},
+            {'機器符号候補': 'CAN', 'X': 0, 'Y': 0, 'Old Label': None, 'New Label': 'R10'},
             {'機器符号候補': None, 'X': 1, 'Y': 1, 'Old Label': None, 'New Label': 'タイトル'},
         ],
         'old_label_name': 'Old: EE1234-567',
@@ -235,7 +235,7 @@ def test_build_diff_labels_workbook_with_ref_designator_column():
 
     df = pd.read_excel(xl, sheet_name='EE1234-567A')
     assert list(df.columns) == ['機器符号候補', 'X', 'Y', 'Old: EE1234-567', 'New: EE1234-567A']
-    assert df.loc[df['New: EE1234-567A'] == 'R10', '機器符号候補'].iloc[0] == 'Y'
+    assert df.loc[df['New: EE1234-567A'] == 'R10', '機器符号候補'].iloc[0] == 'CAN'
     assert pd.isna(df.loc[df['New: EE1234-567A'] == 'タイトル', '機器符号候補'].iloc[0])
 
     summary_df = pd.read_excel(xl, sheet_name='Summary')
@@ -244,6 +244,47 @@ def test_build_diff_labels_workbook_with_ref_designator_column():
     # タイトル・サブタイトルの位置が機器符号候補数の後ろにずれていないか確認
     assert summary_df.iloc[0]['タイトル'] == 'T'
     assert summary_df.iloc[0]['サブタイトル'] == 'S'
+
+
+def test_pair_sheets_have_excel_autofilter_but_summary_does_not():
+    """ペアシートの見出し行に Excel のオートフィルターが付き、Summary には付かない
+    （DXF-extract-labels の出力と同じ。2026-11-06、「機器符号候補」で絞り込めるように）。"""
+    import io
+    import openpyxl
+
+    sheets = [{
+        'sheet_name': 'EE1234-567A',
+        'rows': [
+            {'機器符号候補': 'DEF', 'X': 0, 'Y': 0, 'Old Label': None, 'New Label': 'CB001'},
+            {'機器符号候補': None, 'X': 1, 'Y': 1, 'Old Label': None, 'New Label': 'タイトル'},
+        ],
+        'old_label_name': 'Old: EE1234-567',
+        'new_label_name': 'New: EE1234-567A',
+    }]
+    summary_data = [{
+        '図番': 'EE1234-567A', '流用元図番': 'EE1234-567', '追加ラベル数': 2,
+        '削除ラベル数': 0, '変更ラベル数': 0, '機器符号候補数': 1,
+        'タイトル': 'T', 'サブタイトル': 'S',
+    }]
+    data = build_diff_labels_workbook(sheets, summary_data=summary_data,
+                                       include_ref_designator_column=True)
+    wb = openpyxl.load_workbook(io.BytesIO(data))
+
+    assert wb['EE1234-567A'].auto_filter.ref == 'A1:E3'  # 見出し＋2行、5列（機器符号候補・X・Y・Old・New）
+    assert wb['Summary'].auto_filter.ref is None
+
+
+def test_pair_sheet_with_no_rows_still_gets_autofilter_on_header():
+    """行が0件のペアシートでも、見出し行だけにオートフィルターが付き、壊れない。"""
+    import io
+    import openpyxl
+
+    sheets = [{'sheet_name': 'EE1234-567A', 'rows': [],
+               'old_label_name': 'Old: EE1234-567', 'new_label_name': 'New: EE1234-567A'}]
+    data = build_diff_labels_workbook(sheets, include_ref_designator_column=True)
+    wb = openpyxl.load_workbook(io.BytesIO(data))
+
+    assert wb['EE1234-567A'].auto_filter.ref == 'A1:E1'
 
 
 def _run_all():

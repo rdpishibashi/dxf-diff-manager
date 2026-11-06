@@ -484,7 +484,7 @@ def test_summary_ref_designator_count_for_normal_pair():
         sheet_df = pd.read_excel(io.BytesIO(diff_labels_excel), sheet_name='NEW-RD')
         assert list(sheet_df.columns)[0] == '機器符号候補'
         c1_row = sheet_df[sheet_df['New: NEW-RD'] == 'C1'].iloc[0]
-        assert c1_row['機器符号候補'] == 'Y'
+        assert c1_row['機器符号候補'] == 'CAN'
         title_row = sheet_df[sheet_df['New: NEW-RD'] == 'タイトル'].iloc[0]
         assert pd.isna(title_row['機器符号候補'])
 

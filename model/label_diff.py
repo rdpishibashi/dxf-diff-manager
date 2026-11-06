@@ -12,6 +12,7 @@ from typing import List, Dict, Tuple, Optional
 
 import pandas as pd
 
+from .extra_labels import extract_extra_labels
 from .extract_labels import extract_labels
 
 # Summary シートの最後の列。Step 4 の生成時点では空欄で、ダウンロード用 ZIP を作るときに
@@ -50,6 +51,11 @@ def _load_labels_with_cache(
         extract_drawing_numbers_option=True,
         original_filename=original_filename,
     )
+    # 寸法値と属性値（ブロックの ATTRIB）も差分の対象にする（差分DXFに出る文字と Excel を合わせる。
+    # `extract_labels()` は TEXT／MTEXT だけを見るため別に足す。→ `extra_labels.py`）。
+    # 機器符号以外を除く指定（filter_non_parts）のときは、部品ではないので足さない。
+    if not filter_non_parts:
+        labels = list(labels) + extract_extra_labels(file_path)
     result = (labels, info)
     if label_cache is not None:
         label_cache[cache_key] = result
@@ -374,13 +380,15 @@ def build_diff_labels_workbook(
 
     Args:
         include_ref_designator_column: True の場合、ペアシートの先頭に
-            「機器符号候補」列（'Y' または空欄）を、Summary シートに
-            「機器符号候補数」列を追加する。値そのものは呼び出し元が
+            「機器符号候補」列（'DEF'／'CAN'／空欄。DXF-extract-labels と同じ表示）を、
+            Summary シートに「機器符号候補数」列を追加する。値そのものは呼び出し元
+            （`diff_export._annotate_ref_designator_candidates()`）が
             `sheets[*]['rows']` の各行 dict に `'機器符号候補'` キーとして、
             `summary_data` の各行 dict に `'機器符号候補数'` キーとして
-            あらかじめ埋め込んでおく必要がある（本関数は機器符号の判定ロジック
-            自体は持たない——`label_diff.py` を DXF-visual-diff と
-            byte-identical に保つため、判定用モジュールへの依存を増やさない）。
+            あらかじめ埋め込んでおく（本関数は機器符号の判定ロジックを持たない）。
+
+    ペアシートには Excel のオートフィルターを付ける（見出し行。Summary には付けない。
+    DXF-extract-labels の出力と同じ）。
     """
     # ペアシート名を事前決定（Summary の図番ハイパーリンクに必要）
     tmp_used: set = set()
@@ -455,6 +463,7 @@ def build_diff_labels_workbook(
                 df.rename(columns={'Old Label': old_col, 'New Label': new_col}, inplace=True)
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
                 format_sheet(writer, sheet_name, df)
+                writer.sheets[sheet_name].autofilter(0, 0, len(df), len(df.columns) - 1)
 
             # ── Invalid シート ──
             if invalid_data is not None:
