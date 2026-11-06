@@ -521,10 +521,14 @@ class EntityExpander:
 
     def _expand_insert_recursive(self, doc, insert_entity, transform_matrix: np.ndarray,
                                   expanded_entities: List[Dict], depth: int = 0,
-                                  max_depth: int = 20) -> None:
+                                  max_depth: int = 20,
+                                  attrib_matrix: Optional[np.ndarray] = None) -> None:
         """1つのINSERTエンティティをブロック内容に展開し、結果を expanded_entities に追加する。
         ブロック内にネストしたINSERTがあれば、親の変換行列と合成した行列で再帰展開する。
-        depth は循環参照（ブロックが自分自身を間接的に参照する等）による無限再帰を防ぐガード。"""
+        depth は循環参照（ブロックが自分自身を間接的に参照する等）による無限再帰を防ぐガード。
+        attrib_matrix は、この INSERT の ATTRIB を絶対座標にする行列。ATTRIB の座標は
+        「INSERT が置かれている座標系」で記録されるので、親ブロックの合成行列
+        （この INSERT 自身の行列を含まない）を渡す。None はモデル空間直下（恒等行列）。"""
         if depth > max_depth:
             logger.warning(
                 f"INSERT nesting exceeded max depth ({max_depth}) at block "
@@ -553,7 +557,8 @@ class EntityExpander:
                 nested_local_matrix = self.transformer.create_transformation_matrix(block_entity)
                 nested_matrix = transform_matrix @ nested_local_matrix
                 self._expand_insert_recursive(
-                    doc, block_entity, nested_matrix, expanded_entities, depth + 1, max_depth)
+                    doc, block_entity, nested_matrix, expanded_entities, depth + 1, max_depth,
+                    attrib_matrix=transform_matrix)
                 continue
 
             if block_entity.dxftype() == 'DIMENSION' and self._dimension_block_name(doc, block_entity):
@@ -575,7 +580,7 @@ class EntityExpander:
                 }
                 expanded_entities.append(absolute_entity)
 
-        self._append_insert_attribs(insert_entity, block_name, expanded_entities)
+        self._append_insert_attribs(insert_entity, block_name, expanded_entities, attrib_matrix)
 
     @staticmethod
     def _dimension_block_name(doc, dimension) -> Optional[str]:
@@ -611,7 +616,8 @@ class EntityExpander:
             if block_type == 'INSERT':
                 nested_matrix = transform_matrix @ self.transformer.create_transformation_matrix(block_entity)
                 self._expand_insert_recursive(
-                    doc, block_entity, nested_matrix, expanded_entities, depth + 1, max_depth)
+                    doc, block_entity, nested_matrix, expanded_entities, depth + 1, max_depth,
+                    attrib_matrix=transform_matrix)
                 continue
             absolute_entity = self.transform_entity_to_absolute(block_entity, transform_matrix)
             if absolute_entity:
@@ -627,14 +633,16 @@ class EntityExpander:
                 expanded_entities.append(absolute_entity)
 
     def _append_insert_attribs(self, insert_entity, block_name: str,
-                               expanded_entities: List[Dict]) -> None:
-        """INSERT の ATTRIB を絶対座標エンティティとして追加する。"""
+                               expanded_entities: List[Dict],
+                               attrib_matrix: Optional[np.ndarray] = None) -> None:
+        """INSERT の ATTRIB を絶対座標エンティティとして追加する。
+        attrib_matrix は親ブロックの合成行列（None ならモデル空間直下＝恒等行列）。"""
         if hasattr(insert_entity, 'attribs'):
             for attrib in insert_entity.attribs:
                 if is_invisible(attrib):
                     continue
-                identity_matrix = np.eye(4)
-                absolute_attrib = self.transform_entity_to_absolute(attrib, identity_matrix)
+                matrix = np.eye(4) if attrib_matrix is None else attrib_matrix
+                absolute_attrib = self.transform_entity_to_absolute(attrib, matrix)
                 if absolute_attrib:
                     absolute_attrib['insert_info'] = {
                         'block_name': block_name,
