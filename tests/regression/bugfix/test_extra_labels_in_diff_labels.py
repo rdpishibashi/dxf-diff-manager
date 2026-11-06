@@ -174,9 +174,11 @@ def test_attribute_value_inside_nested_block_is_extracted(tmp_path):
 
     labels = extract_extra_labels(_save(doc, tmp_path, 'f.dxf'))
 
-    # 位置は差分DXFと同じ展開に従う（入れ子の INSERT の属性は親ブロックの変換が掛からない既知の挙動のため、
-    # ここでは位置を固定しない）
+    # 入れ子の INSERT の属性にも親ブロックの配置位置が掛かる（2026-11-06 修正。位置は
+    # test_nested_insert_attrib_position.py でも固定）
     assert [t for t, _x, _y in labels] == ['Ｄ']
+    assert labels[0][1] == pytest.approx(1010)
+    assert labels[0][2] == pytest.approx(10)
 
 
 def test_invisible_attribute_and_hidden_layer_insert_are_not_extracted(tmp_path):
