@@ -140,13 +140,13 @@ def update_parent_child_master(master_df, new_pairs):
 
     entity_count_columns = ENTITY_COUNT_COLUMNS
 
-    # アップロードされた既存台帳で、まだ完全新規図面（"n/a"）の行が一度も無い場合、
-    # pandas はエントリ数カラムを float64 として読み込む。この状態のカラムへ後段で
-    # "n/a" 文字列を代入すると FutureWarning（将来的には TypeError）になるため、
-    # 更新前に object dtype へ統一しておく（2026-07 追加。値は変えない）。
-    for col in entity_count_columns:
-        if col in updated_df.columns and updated_df[col].dtype != object:
-            updated_df[col] = updated_df[col].astype(object)
+    # 全列を object dtype へ統一しておく（値は変えない）。pandas は読み込んだ台帳の
+    # 列型を中身から推測するため、空欄だけの列（Subtitle、Note、"n/a" が一度も無い
+    # Entities 列）は float64、文字列の列は str になる。そこへ別の型の値を代入すると
+    # pandas 3 では TypeError になる。実例: Step 3 のペア作成時（タイトル未抽出）に
+    # 既存行の Title へ None を書くと Title 列が全部空になって float64 化し、差分抽出時に
+    # タイトル文字列を書くと失敗した（2026-11-15、ME26-9603-0_ZM00_307.xlsx）。
+    updated_df = updated_df.astype(object)
 
     for pair in new_pairs:
         parent = pair.get('source_drawing')  # 流用元図番がParent
@@ -407,6 +407,9 @@ def update_drawing_list(drawing_list_df, new_entries, shiban, module, side):
         tuple: (更新後のDataFrame, 追加件数)
     """
     updated = drawing_list_df.copy() if drawing_list_df is not None else create_empty_drawing_list_df()
+    # update_parent_child_master() と同じ理由で全列を object dtype にそろえる
+    # （空欄だけの Subtitle 列は float64 で読まれ、文字列の追加行で TypeError になる）。
+    updated = updated.astype(object)
     if 'Child Drawing Number' not in updated.columns:
         updated['Child Drawing Number'] = pd.Series(dtype='object')
 

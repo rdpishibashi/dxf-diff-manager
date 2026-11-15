@@ -1613,6 +1613,8 @@ def render_step3_diff(complete_pairs):
         has_results = bool(st.session_state.get('results'))
         if st.button("差分抽出開始", key="start_comparison", type="primary", disabled=has_results):
             total_pairs = len(complete_pairs)
+            # 例外時は rerun しない（rerun するとエラー表示が一瞬で消え、原因が分からない）
+            succeeded = False
             with st.spinner("差分抽出中..."):
                 # 進捗メッセージは spinner の下に出すため、st.empty() は spinner の内側で
                 # spinner の表示後に作る（他プロジェクトと同じ。_status_placeholder_after_spinner 参照）
@@ -1672,6 +1674,7 @@ def render_step3_diff(complete_pairs):
 
                     # メモリ解放
                     gc.collect()
+                    succeeded = True
 
                 except Exception as e:
                     st.error(f"エラーが発生しました: {str(e)}")
@@ -1680,7 +1683,8 @@ def render_step3_diff(complete_pairs):
                 finally:
                     status_placeholder.empty()
 
-            st.rerun()
+            if succeeded:
+                st.rerun()
     else:
         st.warning("比較対象となる旧図面がありません。旧図面をアップロードしてください。")
 
